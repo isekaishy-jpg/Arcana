@@ -475,15 +475,21 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             expr: Box::new(parse_expr(fields.get("expr").ok_or_else(|| {
                 format!("slice expression missing expr in `{text}`")
             })?)?),
+            family: match fields.get("family").map(|value| value.as_str()) {
+                None | Some("inferred") => ParsedProjectionFamily::Inferred,
+                Some("contiguous") => ParsedProjectionFamily::Contiguous,
+                Some("strided") => ParsedProjectionFamily::Strided,
+                Some(other) => {
+                    return Err(format!("slice expression has unsupported family `{other}`"));
+                }
+            },
             start: parse_optional_runtime_expr(
-                fields
-                    .get("start")
-                    .ok_or_else(|| format!("slice expression missing start in `{text}`"))?,
+                fields.get("start").map(String::as_str).unwrap_or(""),
             )?,
-            end: parse_optional_runtime_expr(
-                fields
-                    .get("end")
-                    .ok_or_else(|| format!("slice expression missing end in `{text}`"))?,
+            end: parse_optional_runtime_expr(fields.get("end").map(String::as_str).unwrap_or(""))?,
+            len: parse_optional_runtime_expr(fields.get("len").map(String::as_str).unwrap_or(""))?,
+            stride: parse_optional_runtime_expr(
+                fields.get("stride").map(String::as_str).unwrap_or(""),
             )?,
             inclusive_end: parse_runtime_bool_keyword(
                 fields

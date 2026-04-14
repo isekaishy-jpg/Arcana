@@ -5,13 +5,13 @@ import arcana_text.fonts
 import arcana_text.layout
 import arcana_text.shape.types
 import arcana_text.types
-import std.bytes
+import std.text
 import std.collections.array
 import std.collections.list
 import std.collections.map
-import std.fs
+import arcana_process.fs
 import std.option
-import std.path
+import arcana_process.path
 import std.text
 use std.option.Option
 
@@ -56,28 +56,28 @@ Memory temp:raster_scratch -alloc
     reset_on = owner_exit
 
 fn raster_probe_flag_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
 
 fn raster_probe_log_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "text_raster_probe.log" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "text_raster_probe.log" :: call
 
 fn raster_probe_enabled() -> Bool:
-    return std.fs.is_file :: (raster_probe_flag_path :: :: call) :: call
+    return arcana_process.fs.is_file :: (raster_probe_flag_path :: :: call) :: call
 
 fn raster_probe_append(line: Str):
     if not (raster_probe_enabled :: :: call):
         return
-    let _ = std.fs.mkdir_all :: (std.path.parent :: (raster_probe_log_path :: :: call) :: call) :: call
-    let opened = std.fs.stream_open_write :: (raster_probe_log_path :: :: call), true :: call
+    let _ = arcana_process.fs.mkdir_all :: (arcana_process.path.parent :: (raster_probe_log_path :: :: call) :: call) :: call
+    let opened = arcana_process.fs.stream_open_write :: (raster_probe_log_path :: :: call), true :: call
     return match opened:
         std.result.Result.Ok(value) => raster_probe_append_ready :: value, line :: call
         std.result.Result.Err(_) => 0
 
-fn raster_probe_append_ready(take value: std.fs.FileStream, line: Str):
+fn raster_probe_append_ready(take value: arcana_winapi.process_handles.FileStream, line: Str):
     let mut stream = value
-    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
-    let _ = std.fs.stream_write :: stream, bytes :: call
-    let _ = std.fs.stream_close :: stream :: call
+    let bytes = std.text.bytes_from_str_utf8 :: (line + "\n") :: call
+    let _ = arcana_process.fs.stream_write :: stream, bytes :: call
+    let _ = arcana_process.fs.stream_close :: stream :: call
 
 fn max_int(a: Int, b: Int) -> Int:
     if a > b:
@@ -496,3 +496,4 @@ impl TextRenderer:
         let stream = arcana_text.raster.draw_stream_active_renderer :: self, (snapshot, config) :: call
         self.draw_streams :: key, stream :: set
         return stream
+

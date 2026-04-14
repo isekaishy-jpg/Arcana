@@ -96,6 +96,34 @@ shackle flags WinapiInternals:
     pub(crate) type CatalogEntryRef = &'static SystemFontEntry;
     pub(crate) type ResultCatalogRef = Result<CatalogStateRef, String>;
     pub(crate) type ResultCatalogEntryRef = Result<CatalogEntryRef, String>;
+    pub(crate) struct SoftwareSurfaceState {
+        pub(crate) hwnd: HWND,
+        pub(crate) width: i64,
+        pub(crate) height: i64,
+        pub(crate) stride: i64,
+        pub(crate) pixels: Vec<u8>,
+        pub(crate) current_map: i64,
+        pub(crate) presented_once: bool,
+    }
+    pub(crate) struct SoftwareSurfaceMapState {
+        pub(crate) surface: i64,
+    }
+    pub(crate) struct WinapiPackageState {
+        pub(crate) last_error_text: String,
+        pub(crate) desktop_state_handle: u64,
+        pub(crate) next_file_stream_handle: u64,
+        pub(crate) file_streams: std::collections::BTreeMap<u64, crate::helpers_process_impl::WinapiFileStreamState>,
+        pub(crate) next_surface_handle: i64,
+        pub(crate) next_surface_map_handle: i64,
+        pub(crate) software_surfaces: std::collections::BTreeMap<i64, SoftwareSurfaceState>,
+        pub(crate) software_surface_maps: std::collections::BTreeMap<i64, SoftwareSurfaceMapState>,
+        pub(crate) next_audio_device_handle: u64,
+        pub(crate) audio_devices: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioDeviceState>,
+        pub(crate) next_audio_buffer_handle: u64,
+        pub(crate) audio_buffers: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioBufferState>,
+        pub(crate) next_audio_playback_handle: u64,
+        pub(crate) audio_playbacks: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioPlaybackState>,
+    }
 
     pub(crate) fn window_class_name() -> WideText {
         "ArcanaHiddenWindow\0".encode_utf16().collect::<Vec<u16>>()
@@ -245,6 +273,122 @@ shackle flags WinapiInternals:
         }
     }
 
+    pub(crate) fn software_surface_stride(width: i64, height: i64) -> Result<i64, String> {
+        if width <= 0 || height <= 0 {
+            return Err("surface dimensions must be > 0".to_string());
+        }
+        width
+            .checked_mul(4)
+            .ok_or_else(|| "surface stride overflowed".to_string())
+    }
+
+    pub(crate) fn package_state_data_ref(
+        instance: &crate::BindingInstance,
+    ) -> Result<&WinapiPackageState, String> {
+        let ptr = instance.package_state.state_handle as usize as *const WinapiPackageState;
+        if ptr.is_null() {
+            return Err("binding package state handle must not be null".to_string());
+        }
+        Ok(unsafe { &*ptr })
+    }
+
+    pub(crate) fn package_state_data_mut(
+        instance: &mut crate::BindingInstance,
+    ) -> Result<&mut WinapiPackageState, String> {
+        let ptr = instance.package_state.state_handle as usize as *mut WinapiPackageState;
+        if ptr.is_null() {
+            return Err("binding package state handle must not be null".to_string());
+        }
+        Ok(unsafe { &mut *ptr })
+    }
+
+    pub(crate) fn destroy_package_state_handle(handle: u64) {
+        let ptr = handle as usize as *mut WinapiPackageState;
+        if !ptr.is_null() {
+            unsafe {
+                crate::helpers_desktop_impl::destroy_desktop_state_handle((*ptr).desktop_state_handle);
+                drop(Box::from_raw(ptr));
+            }
+        }
+    }
+
+    pub(crate) fn clear_helper_error(instance: &mut crate::BindingInstance) {
+        if let Ok(state) = package_state_data_mut(instance) {
+            state.last_error_text.clear();
+        }
+    }
+
+    pub(crate) fn set_helper_error(instance: &mut crate::BindingInstance, message: String) {
+        if let Ok(state) = package_state_data_mut(instance) {
+            state.last_error_text = message;
+        }
+    }
+
+    pub(crate) fn take_helper_error(instance: &mut crate::BindingInstance) -> String {
+        match package_state_data_mut(instance) {
+            Ok(state) => std::mem::take(&mut state.last_error_text),
+            Err(_) => String::new(),
+        }
+    }
+
+    pub(crate) fn software_surface_ref(
+        instance: &crate::BindingInstance,
+        handle: i64,
+    ) -> Result<&SoftwareSurfaceState, String> {
+        if handle <= 0 {
+            return Err("software surface handle must be > 0".to_string());
+        }
+        package_state_data_ref(instance)?
+            .software_surfaces
+            .get(&handle)
+            .ok_or_else(|| format!("invalid software surface handle `{handle}`"))
+    }
+
+    pub(crate) fn software_surface_mut(
+        instance: &mut crate::BindingInstance,
+        handle: i64,
+    ) -> Result<&mut SoftwareSurfaceState, String> {
+        if handle <= 0 {
+            return Err("software surface handle must be > 0".to_string());
+        }
+        package_state_data_mut(instance)?
+            .software_surfaces
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid software surface handle `{handle}`"))
+    }
+
+    pub(crate) fn software_surface_map_ref(
+        instance: &crate::BindingInstance,
+        handle: i64,
+    ) -> Result<&SoftwareSurfaceMapState, String> {
+        if handle <= 0 {
+            return Err("software surface map handle must be > 0".to_string());
+        }
+        package_state_data_ref(instance)?
+            .software_surface_maps
+            .get(&handle)
+            .ok_or_else(|| format!("invalid software surface map handle `{handle}`"))
+    }
+
+    pub(crate) fn software_surface_map_remove(
+        instance: &mut crate::BindingInstance,
+        handle: i64,
+    ) -> Result<SoftwareSurfaceMapState, String> {
+        if handle <= 0 {
+            return Err("software surface map handle must be > 0".to_string());
+        }
+        let map = package_state_data_mut(instance)?
+            .software_surface_maps
+            .remove(&handle)
+            .ok_or_else(|| format!("invalid software surface map handle `{handle}`"))?;
+        if let Some(surface) = package_state_data_mut(instance)?.software_surfaces.get_mut(&map.surface)
+            && surface.current_map == handle
+        {
+            surface.current_map = 0;
+        }
+        Ok(map)
+    }
+
 shackle import fn GetLastError() -> DWORD = kernel32.GetLastError
 shackle import fn GetModuleFileNameW(module: HMODULE, buffer: LPWSTR, size: DWORD) -> DWORD = kernel32.GetModuleFileNameW
 shackle import fn GetModuleHandleExW(flags: DWORD, address: LPCVOID, module: PHMODULE) -> BOOL = kernel32.GetModuleHandleExW
@@ -260,10 +404,33 @@ shackle import fn SetWindowLongPtrW(window: HWND, index: i32, value: LONG_PTR) -
 shackle import fn DefWindowProcW(window: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT = user32.DefWindowProcW
 
 shackle fn package_state_init() = __binding.package_state_init:
-    Ok(PackageState { last_callback_code: 0 })
+    let state = Box::new(WinapiPackageState {
+        last_error_text: String::new(),
+        desktop_state_handle: crate::helpers_desktop_impl::new_desktop_state_handle(),
+        next_file_stream_handle: 1,
+        file_streams: std::collections::BTreeMap::new(),
+        next_surface_handle: 1,
+        next_surface_map_handle: 1,
+        software_surfaces: std::collections::BTreeMap::new(),
+        software_surface_maps: std::collections::BTreeMap::new(),
+        next_audio_device_handle: 1,
+        audio_devices: std::collections::BTreeMap::new(),
+        next_audio_buffer_handle: 1,
+        audio_buffers: std::collections::BTreeMap::new(),
+        next_audio_playback_handle: 1,
+        audio_playbacks: std::collections::BTreeMap::new(),
+    });
+    Ok(PackageState {
+        last_callback_code: 0,
+        state_handle: Box::into_raw(state) as usize as u64,
+    })
+
+shackle fn package_state_drop(read state: PackageState) = __binding.package_state_drop:
+    destroy_package_state_handle(state.state_handle);
 
 shackle struct PackageState:
     last_callback_code: i64,
+    state_handle: u64,
 
 shackle thunk hidden_window_proc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT = win32.hidden_window_proc:
     if message == WM_NCCREATE {
@@ -275,7 +442,7 @@ shackle thunk hidden_window_proc(hwnd: HWND, message: UINT, wparam: WPARAM, lpar
         }
         return 1;
     }
-    let instance = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut BindingInstance };
+    let instance = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut crate::BindingInstance };
     if message == WM_APP + 1 && !instance.is_null() {
         let args = [
             binding_layout(hwnd),
@@ -376,7 +543,7 @@ shackle fn windows_create_hidden_window_impl() -> arcana_winapi.raw.types.HWND =
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             module,
-            instance as *mut BindingInstance as LPVOID,
+            instance as *mut crate::BindingInstance as LPVOID,
         )
     };
     if hwnd.is_null() {

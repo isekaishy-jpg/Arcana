@@ -8,14 +8,14 @@ import arcana_text.shape.types
 import arcana_text.text_units
 import arcana_text.types
 import arcana_winapi.fonts
-import std.bytes
+import std.text
 import std.collections.array
 import std.collections.list
 import std.collections.map
-import std.fs
+import arcana_process.fs
 import std.memory
 import std.option
-import std.path
+import arcana_process.path
 import std.result
 import std.text
 use std.option.Option
@@ -130,28 +130,28 @@ fn same_match(read left: arcana_text.types.FontMatch, read right: arcana_text.ty
     return left.id.source_index == right.id.source_index and left.id.face_index == right.id.face_index
 
 fn fonts_probe_flag_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
 
 fn fonts_probe_log_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "text_fonts_probe.log" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "text_fonts_probe.log" :: call
 
 fn fonts_probe_enabled() -> Bool:
-    return std.fs.is_file :: (fonts_probe_flag_path :: :: call) :: call
+    return arcana_process.fs.is_file :: (fonts_probe_flag_path :: :: call) :: call
 
 fn fonts_probe_append(line: Str):
     if not (fonts_probe_enabled :: :: call):
         return
-    let _ = std.fs.mkdir_all :: (std.path.parent :: (fonts_probe_log_path :: :: call) :: call) :: call
-    let opened = std.fs.stream_open_write :: (fonts_probe_log_path :: :: call), true :: call
+    let _ = arcana_process.fs.mkdir_all :: (arcana_process.path.parent :: (fonts_probe_log_path :: :: call) :: call) :: call
+    let opened = arcana_process.fs.stream_open_write :: (fonts_probe_log_path :: :: call), true :: call
     return match opened:
         Result.Ok(value) => fonts_probe_append_ready :: value, line :: call
         Result.Err(_) => 0
 
-fn fonts_probe_append_ready(take value: std.fs.FileStream, line: Str):
+fn fonts_probe_append_ready(take value: arcana_winapi.process_handles.FileStream, line: Str):
     let mut stream = value
-    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
-    let _ = std.fs.stream_write :: stream, bytes :: call
-    let _ = std.fs.stream_close :: stream :: call
+    let bytes = std.text.bytes_from_str_utf8 :: (line + "\n") :: call
+    let _ = arcana_process.fs.stream_write :: stream, bytes :: call
+    let _ = arcana_process.fs.stream_close :: stream :: call
 
 export obj FontSystem:
     source_count: Int
@@ -261,14 +261,14 @@ fn abs_int(value: Int) -> Int:
     return value
 
 fn infer_family_from_path(path: Str) -> Str:
-    let stem = (std.path.stem :: path :: call) :: (std.path.file_name :: path :: call) :: fallback
+    let stem = (arcana_process.path.stem :: path :: call) :: (arcana_process.path.file_name :: path :: call) :: fallback
     let mark = std.text.find :: stem, 0, " Var" :: call
     if mark >= 0:
         return std.text.slice_bytes :: stem, 0, mark :: call
     return stem
 
 fn infer_face_from_path(path: Str) -> Str:
-    let stem = (std.path.stem :: path :: call) :: (std.path.file_name :: path :: call) :: fallback
+    let stem = (arcana_process.path.stem :: path :: call) :: (arcana_process.path.file_name :: path :: call) :: fallback
     if (std.text.contains :: stem, "Bold" :: call):
         return "Bold"
     if (std.text.contains :: stem, "Italic" :: call):
@@ -784,7 +784,7 @@ fn source_face_total_from_bytes(read bytes: Array[Int]) -> Int:
     if not (arcana_text.fonts.source_is_collection_bytes :: bytes :: call):
         fonts_probe_append :: "source_face_total:single_face" :: call
         return 1
-    let view = std.memory.bytes_view :: bytes, 0, (bytes :: :: len) :: call
+    let view = bytes[0..(bytes :: :: len)]
     let total_result = arcana_text.font_leaf.source_face_count_from_view :: view :: call
     let total = total_result :: 1 :: unwrap_or
     fonts_probe_append :: ("source_face_total:done total=" + (std.text.from_int :: total :: call)) :: call
@@ -823,7 +823,7 @@ fn source_bytes_for_index(edit self: arcana_text.fonts.FontSystem, index: Int) -
         return Result.Ok[Array[Int], Str] :: (std.kernel.memory.slab_borrow_read :: self.source_blobs, blob_id :: call) :: call
     let source = arcana_text.fonts.source_at_or_empty :: self, index :: call
     if source.path != "":
-        let bytes_result = std.fs.read_bytes :: source.path :: call
+        let bytes_result = arcana_process.fs.read_bytes :: source.path :: call
         if bytes_result :: :: is_err:
             return Result.Err[Array[Int], Str] :: (result_err_or :: bytes_result, "failed to read source bytes" :: call) :: call
         let bytes = bytes_result :: (arcana_text.fonts.empty_bytes :: :: call) :: unwrap_or
@@ -862,7 +862,7 @@ fn hydrate_registered_faces_from_source(edit self: arcana_text.fonts.FontSystem,
     if bytes_result :: :: is_err:
         return
     let source_bytes = bytes_result :: (arcana_text.fonts.empty_bytes :: :: call) :: unwrap_or
-    let bytes_view = std.memory.bytes_view :: source_bytes, 0, (source_bytes :: :: len) :: call
+    let bytes_view = source_bytes[0..(source_bytes :: :: len)]
     let source = arcana_text.fonts.source_at_or_empty :: self, source_index :: call
     let fallback_family = arcana_text.fonts.family_or_label :: source :: call
     let fallback_label = source.label
@@ -1285,21 +1285,21 @@ impl FontSystem:
         return added
 
     fn add_if_file(edit self: arcana_text.fonts.FontSystem, path: Str) -> Int:
-        if not (std.fs.is_file :: path :: call):
+        if not (arcana_process.fs.is_file :: path :: call):
             return 0
         let _ = self :: path :: add_file
         return 1
 
     fn add_file(edit self: arcana_text.fonts.FontSystem, path: Str) -> arcana_text.types.FontFaceId:
         fonts_probe_append :: ("add_file:start path=" + path) :: call
-        if not (std.fs.is_file :: path :: call):
+        if not (arcana_process.fs.is_file :: path :: call):
             fonts_probe_append :: "add_file:missing" :: call
             return arcana_text.fonts.invalid_face_id :: :: call
         if self.path_index :: path :: has:
             let existing = self.path_index :: path :: get
             fonts_probe_append :: ("add_file:existing source=" + (std.text.from_int :: existing :: call)) :: call
             return arcana_text.fonts.first_face_id_for_source :: self, existing :: call
-        let bytes_result = std.fs.read_bytes :: path :: call
+        let bytes_result = arcana_process.fs.read_bytes :: path :: call
         if bytes_result :: :: is_err:
             fonts_probe_append :: "add_file:read_err" :: call
             return arcana_text.fonts.invalid_face_id :: :: call
@@ -1311,14 +1311,14 @@ impl FontSystem:
         return arcana_text.fonts.add_source_value_with_blob :: self, registration :: call
 
     fn add_dir(edit self: arcana_text.fonts.FontSystem, path: Str) -> Int:
-        if not (std.fs.is_dir :: path :: call):
+        if not (arcana_process.fs.is_dir :: path :: call):
             return 0
         let mut added = 0
-        let entries = match (std.fs.list_dir :: path :: call):
+        let entries = match (arcana_process.fs.list_dir :: path :: call):
             std.result.Result.Ok(value) => value
             std.result.Result.Err(_) => (std.collections.list.new[Str] :: :: call)
         for entry in entries:
-            let ext = std.text.trim :: (std.path.ext :: entry :: call) :: call
+            let ext = std.text.trim :: (arcana_process.path.ext :: entry :: call) :: call
             if ext == ".ttf" or ext == ".otf" or ext == ".ttc" or ext == ".otc":
                 let _ = self :: entry :: add_file
                 added += 1
@@ -1510,17 +1510,19 @@ impl FontSystem:
             Option.None => (0, 1)
 
 fn utf8_codepoint(read text: Str) -> Int:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     if total <= 0:
         return 0
-    let first = std.bytes.at :: bytes, 0 :: call
+    let first = std.text.bytes_at :: bytes, 0 :: call
     if first < 128:
         return first
     if first < 224 and total >= 2:
-        return ((first - 192) * 64) + ((std.bytes.at :: bytes, 1 :: call) - 128)
+        return ((first - 192) * 64) + ((std.text.bytes_at :: bytes, 1 :: call) - 128)
     if first < 240 and total >= 3:
-        return ((first - 224) * 4096) + (((std.bytes.at :: bytes, 1 :: call) - 128) * 64) + ((std.bytes.at :: bytes, 2 :: call) - 128)
+        return ((first - 224) * 4096) + (((std.text.bytes_at :: bytes, 1 :: call) - 128) * 64) + ((std.text.bytes_at :: bytes, 2 :: call) - 128)
     if first < 248 and total >= 4:
-        return ((first - 240) * 262144) + (((std.bytes.at :: bytes, 1 :: call) - 128) * 4096) + (((std.bytes.at :: bytes, 2 :: call) - 128) * 64) + ((std.bytes.at :: bytes, 3 :: call) - 128)
+        return ((first - 240) * 262144) + (((std.text.bytes_at :: bytes, 1 :: call) - 128) * 4096) + (((std.text.bytes_at :: bytes, 2 :: call) - 128) * 64) + ((std.text.bytes_at :: bytes, 3 :: call) - 128)
     return first
+
+

@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecProjectionFamily {
+    #[default]
+    Inferred,
+    Contiguous,
+    Strided,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecExpr {
     Int(i64),
@@ -46,10 +55,16 @@ pub enum ExecExpr {
     },
     Slice {
         expr: Box<ExecExpr>,
+        #[serde(default)]
+        family: ExecProjectionFamily,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<Box<ExecExpr>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         end: Option<Box<ExecExpr>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        len: Option<Box<ExecExpr>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stride: Option<Box<ExecExpr>>,
         inclusive_end: bool,
     },
     Range {

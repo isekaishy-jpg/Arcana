@@ -3,4 +3,5 @@ kind = "lib"
 
 [deps]
 arcana_winapi = { path = "../../arcana/winapi" }
+arcana_process = { path = "../../arcana/process" }
 std = { path = "../../../std" }

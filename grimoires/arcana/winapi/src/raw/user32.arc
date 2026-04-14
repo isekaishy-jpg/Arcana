@@ -13,6 +13,11 @@ export shackle import fn MonitorFromWindow(window: arcana_winapi.raw.types.HWND,
 export shackle import fn GetDpiForWindow(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.UINT = user32.GetDpiForWindow
 export shackle import fn OpenClipboard(owner: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.BOOL = user32.OpenClipboard
 export shackle import fn CloseClipboard() -> arcana_winapi.raw.types.BOOL = user32.CloseClipboard
+export shackle import fn EmptyClipboard() -> arcana_winapi.raw.types.BOOL = user32.EmptyClipboard
+export shackle import fn GetClipboardData(format: arcana_winapi.raw.types.UINT) -> arcana_winapi.raw.types.HANDLE = user32.GetClipboardData
+export shackle import fn IsClipboardFormatAvailable(format: arcana_winapi.raw.types.UINT) -> arcana_winapi.raw.types.BOOL = user32.IsClipboardFormatAvailable
+export shackle import fn RegisterClipboardFormatW(name: arcana_winapi.raw.types.LPCWSTR) -> arcana_winapi.raw.types.UINT = user32.RegisterClipboardFormatW
+export shackle import fn SetClipboardData(format: arcana_winapi.raw.types.UINT, handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.HANDLE = user32.SetClipboardData
 export shackle import fn DragAcceptFiles(window: arcana_winapi.raw.types.HWND, accept: arcana_winapi.raw.types.BOOL) = user32.DragAcceptFiles
 export shackle import fn GetDC(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.HDC = user32.GetDC
 export shackle import fn ReleaseDC(window: arcana_winapi.raw.types.HWND, device: arcana_winapi.raw.types.HDC) -> arcana_winapi.raw.types.I32 = user32.ReleaseDC

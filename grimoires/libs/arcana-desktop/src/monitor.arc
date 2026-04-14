@@ -1,7 +1,7 @@
 import arcana_desktop.types
 import arcana_desktop.window
 
-export fn current(read win: arcana_desktop.types.Window) -> arcana_desktop.types.MonitorInfo:
+export fn current(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.MonitorInfo:
     return arcana_desktop.window.current_monitor :: win :: call
 
 export fn primary() -> arcana_desktop.types.MonitorInfo:
@@ -12,3 +12,4 @@ export fn count() -> Int:
 
 export fn get(index: Int) -> arcana_desktop.types.MonitorInfo:
     return arcana_desktop.window.monitor :: index :: call
+

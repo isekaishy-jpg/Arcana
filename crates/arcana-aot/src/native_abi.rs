@@ -5,8 +5,9 @@ use crate::artifact::{
 use arcana_cabi::{
     ArcanaCabiBindingCallback, ArcanaCabiBindingImport, ArcanaCabiBindingLayout,
     ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam,
-    ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType, ArcanaCabiBindingType, ArcanaCabiExport,
-    ArcanaCabiExportParam, ArcanaCabiType, validate_binding_callbacks, validate_binding_imports,
+    ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType, ArcanaCabiBindingType,
+    ArcanaCabiBindingViewType, ArcanaCabiExport, ArcanaCabiExportParam, ArcanaCabiType,
+    ArcanaCabiViewFamily, validate_binding_callbacks, validate_binding_imports,
     validate_binding_layouts,
 };
 use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
@@ -374,7 +375,7 @@ fn canonical_native_type_name(ty: &NativeAbiType) -> String {
         NativeAbiType::Int => "Int".to_string(),
         NativeAbiType::Bool => "Bool".to_string(),
         NativeAbiType::Str => "Str".to_string(),
-        NativeAbiType::Bytes => "Array[Int]".to_string(),
+        NativeAbiType::Bytes => "Bytes".to_string(),
         NativeAbiType::Opaque(name) => name.clone(),
         NativeAbiType::Unit => "Unit".to_string(),
         NativeAbiType::Pair(left, right) => {
@@ -482,6 +483,7 @@ fn parse_native_type(ty: &IrRoutineType) -> Result<NativeAbiType, String> {
             [name] if name == "Int" => Ok(NativeAbiType::Int),
             [name] if name == "Bool" => Ok(NativeAbiType::Bool),
             [name] if name == "Str" => Ok(NativeAbiType::Str),
+            [name] if name == "Bytes" => Ok(NativeAbiType::Bytes),
             [name] if name == "Unit" => Ok(NativeAbiType::Unit),
             _ => Ok(NativeAbiType::Opaque(ty.render())),
         },
@@ -509,6 +511,10 @@ fn parse_native_binding_type(ty: &IrRoutineType) -> Result<NativeBindingType, St
             [name] if name == "Int" => Ok(NativeBindingType::Int),
             [name] if name == "Bool" => Ok(NativeBindingType::Bool),
             [name] if name == "Str" => Ok(NativeBindingType::Str),
+            [name] if name == "Bytes" => Ok(NativeBindingType::Bytes),
+            [name] if name == "Utf16" => Ok(NativeBindingType::Utf16),
+            [name] if name == "ByteBuffer" => Ok(NativeBindingType::ByteBuffer),
+            [name] if name == "Utf16Buffer" => Ok(NativeBindingType::Utf16Buffer),
             [name] if name == "Unit" => Ok(NativeBindingType::Unit),
             [name] if name == "I8" => Ok(NativeBindingType::I8),
             [name] if name == "U8" => Ok(NativeBindingType::U8),
@@ -525,6 +531,24 @@ fn parse_native_binding_type(ty: &IrRoutineType) -> Result<NativeBindingType, St
             _ => Ok(NativeBindingType::Named(ty.render())),
         },
         IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
+            Some("View") if args.len() == 2 => {
+                let element_type = parse_native_binding_type(&args[0])?;
+                let family = match args[1].root_name() {
+                    Some("Contiguous") => ArcanaCabiViewFamily::Contiguous,
+                    Some("Strided") => ArcanaCabiViewFamily::Strided,
+                    Some("Mapped") => ArcanaCabiViewFamily::Mapped,
+                    _ => {
+                        return Err(format!(
+                            "unsupported native binding view family `{}`",
+                            args[1].render()
+                        ))
+                    }
+                };
+                Ok(NativeBindingType::View(ArcanaCabiBindingViewType {
+                    element_type: Box::new(element_type),
+                    family,
+                }))
+            }
             Some("Array") if args.len() == 1 && args[0].root_name() == Some("Int") => {
                 Ok(NativeBindingType::Bytes)
             }
@@ -680,10 +704,19 @@ fn collect_named_binding_type_ids(
     collected: &mut BTreeMap<String, ArcanaCabiBindingLayout>,
     visiting: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    if let ArcanaCabiBindingType::Named(layout_id) = ty
-        && available.contains_key(layout_id)
-    {
-        collect_binding_layout_id(layout_id, available, collected, visiting)?;
+    match ty {
+        ArcanaCabiBindingType::Named(layout_id) if available.contains_key(layout_id) => {
+            collect_binding_layout_id(layout_id, available, collected, visiting)?;
+        }
+        ArcanaCabiBindingType::View(view) => {
+            collect_named_binding_type_ids(
+                view.element_type.as_ref(),
+                available,
+                collected,
+                visiting,
+            )?;
+        }
+        _ => {}
     }
     Ok(())
 }

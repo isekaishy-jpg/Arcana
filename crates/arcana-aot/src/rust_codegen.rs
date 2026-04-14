@@ -238,7 +238,8 @@ fn render_exe_main_rs(
         NativeRoutineLowering::Direct { routine_key } => format!(
             concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
-                "use arcana_runtime::{{RuntimeAbiValue, RuntimeExecutionState, RuntimePackagePlan, activate_current_bundle_native_products, current_process_runtime_host, parse_runtime_package_image}};\n\n",
+                "use arcana_runtime::{{RuntimeAbiValue, RuntimeExecutionState, RuntimePackagePlan, activate_current_bundle_native_products, parse_runtime_package_image}};\n",
+                "use arcana_runtime::current_process_core_host;\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "{}",
@@ -261,7 +262,7 @@ fn render_exe_main_rs(
                 "        return Ok(code);\n",
                 "    }}\n",
                 "    let plan = load_plan()?;\n",
-                "    let mut host = current_process_runtime_host()?;\n",
+                "    let mut host = current_process_core_host()?;\n",
                 "    let mut state = RuntimeExecutionState::default();\n",
                 "    let result = {}?;\n",
                 "    match result {{\n",
@@ -391,8 +392,9 @@ fn render_dll_lib_rs(
             "use std::ffi::{{c_char, c_void}};\n",
             "use std::ptr;\n",
             "use std::sync::OnceLock;\n\n",
-            "use arcana_cabi::{{ArcanaBytesView, ArcanaCabiExportEntryV1, ArcanaCabiExportOpsV1, ArcanaCabiExportParamV1, ArcanaCabiProductApiV1, ArcanaOwnedBytes, ArcanaOwnedStr, ArcanaStrView}};\n",
-            "use arcana_runtime::{{RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, RuntimeExecutionState, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image}};\n\n",
+            "use arcana_cabi::{{ArcanaCabiExportEntryV1, ArcanaCabiExportOpsV1, ArcanaCabiExportParamV1, ArcanaCabiProductApiV1, ArcanaOwnedBytes, ArcanaOwnedStr, ArcanaViewV1}};\n",
+            "use arcana_runtime::{{RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, RuntimeExecutionState, RuntimePackagePlan, execute_exported_abi_routine, parse_runtime_package_image}};\n",
+            "use arcana_runtime::current_process_core_host;\n\n",
             "thread_local! {{\n",
             "    static LAST_ERROR: RefCell<Vec<u8>> = const {{ RefCell::new(Vec::new()) }};\n",
             "}}\n\n",
@@ -420,13 +422,13 @@ fn render_dll_lib_rs(
             "        Err(err) => Err(err.clone()),\n",
             "    }}\n",
             "}}\n\n",
-            "fn default_host() -> Result<Box<dyn arcana_runtime::RuntimeHost>, String> {{\n",
-            "    current_process_runtime_host()\n",
+            "fn default_host() -> Result<Box<dyn arcana_runtime::RuntimeCoreHost>, String> {{\n",
+            "    current_process_core_host()\n",
             "}}\n\n",
             "fn set_last_error(err: String) {{\n",
             "    LAST_ERROR.with(|slot| *slot.borrow_mut() = err.into_bytes());\n",
             "}}\n\n",
-            "fn bytes_from_view(view: ArcanaBytesView, context: &str) -> Result<Vec<u8>, String> {{\n",
+            "fn bytes_from_view(view: ArcanaViewV1, context: &str) -> Result<Vec<u8>, String> {{\n",
             "    if view.ptr.is_null() {{\n",
             "        if view.len == 0 {{\n",
             "            return Ok(Vec::new());\n",
@@ -435,8 +437,8 @@ fn render_dll_lib_rs(
             "    }}\n",
             "    Ok(unsafe {{ std::slice::from_raw_parts(view.ptr, view.len) }}.to_vec())\n",
             "}}\n\n",
-            "fn string_from_view(view: ArcanaStrView, context: &str) -> Result<String, String> {{\n",
-            "    let bytes = bytes_from_view(ArcanaBytesView {{ ptr: view.ptr, len: view.len }}, context)?;\n",
+            "fn string_from_view(view: ArcanaViewV1, context: &str) -> Result<String, String> {{\n",
+            "    let bytes = bytes_from_view(view, context)?;\n",
             "    String::from_utf8(bytes).map_err(|e| format!(\"{{context}} received invalid utf8: {{e}}\"))\n",
             "}}\n\n",
             "fn allocated_bytes_parts(bytes: Vec<u8>) -> (*mut u8, usize) {{\n",
@@ -995,10 +997,10 @@ fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let params = if params.is_empty() {
-        "plan: &RuntimePackagePlan, state: &mut RuntimeExecutionState, host: &mut dyn arcana_runtime::RuntimeHost".to_string()
+        "plan: &RuntimePackagePlan, state: &mut RuntimeExecutionState, host: &mut dyn arcana_runtime::RuntimeCoreHost".to_string()
     } else {
         format!(
-            "plan: &RuntimePackagePlan, state: &mut RuntimeExecutionState, host: &mut dyn arcana_runtime::RuntimeHost, {params}"
+            "plan: &RuntimePackagePlan, state: &mut RuntimeExecutionState, host: &mut dyn arcana_runtime::RuntimeCoreHost, {params}"
         )
     };
     let mut prelude = String::new();

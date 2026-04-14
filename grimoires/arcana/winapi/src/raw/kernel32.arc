@@ -5,6 +5,11 @@ export shackle import fn LoadLibraryW(path: arcana_winapi.raw.types.LPCWSTR) -> 
 export shackle import fn FreeLibrary(module: arcana_winapi.raw.types.HMODULE) -> arcana_winapi.raw.types.BOOL = kernel32.FreeLibrary
 export shackle import fn GetProcAddress(module: arcana_winapi.raw.types.HMODULE, name: arcana_winapi.raw.types.LPCSTR) -> arcana_winapi.raw.types.LPVOID = kernel32.GetProcAddress
 export shackle import fn CloseHandle(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.CloseHandle
+export shackle import fn GlobalAlloc(flags: arcana_winapi.raw.types.UINT, bytes: arcana_winapi.raw.types.SIZE_T) -> arcana_winapi.raw.types.HANDLE = kernel32.GlobalAlloc
+export shackle import fn GlobalFree(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.HANDLE = kernel32.GlobalFree
+export shackle import fn GlobalLock(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.LPVOID = kernel32.GlobalLock
+export shackle import fn GlobalSize(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.SIZE_T = kernel32.GlobalSize
+export shackle import fn GlobalUnlock(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.GlobalUnlock
 export shackle import fn CreateEventW(attributes: arcana_winapi.raw.types.LPVOID, manual_reset: arcana_winapi.raw.types.BOOL, initial_state: arcana_winapi.raw.types.BOOL, name: arcana_winapi.raw.types.LPCWSTR) -> arcana_winapi.raw.types.HANDLE = kernel32.CreateEventW
 export shackle import fn SetEvent(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.SetEvent
 export shackle import fn ResetEvent(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.ResetEvent

@@ -1,5 +1,5 @@
 import arcana_text.types
-import std.bytes
+import std.text
 import std.collections.list
 
 export obj ShapeSnapshot:
@@ -27,12 +27,12 @@ export fn mix_signature(seed: Int, value: Int) -> Int:
     return next
 
 export fn mix_signature_text(seed: Int, read text: Str) -> Int:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     let mut next = seed
     let mut index = 0
     while index < total:
-        next = arcana_text.shape.types.mix_signature :: next, (std.bytes.at :: bytes, index :: call) :: call
+        next = arcana_text.shape.types.mix_signature :: next, (std.text.bytes_at :: bytes, index :: call) :: call
         index += 1
     return next
 

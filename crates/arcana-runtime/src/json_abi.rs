@@ -6,7 +6,7 @@ use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 use serde::Serialize;
 
 use super::{
-    RuntimeExecutionState, RuntimeHost, RuntimeOpaqueFamily, RuntimePackagePlan,
+    RuntimeCoreHost, RuntimeExecutionState, RuntimeOpaqueFamily, RuntimePackagePlan,
     RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
     native_abi::project_export_write_backs, routine_plan::render_runtime_signature_text,
     runtime_binding_callback_signatures_for_package, runtime_binding_import_signatures_for_package,
@@ -159,7 +159,7 @@ pub fn execute_exported_json_abi_routine(
     plan: &RuntimePackagePlan,
     routine_key: &str,
     args_json: &str,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<String, String> {
     let args_value = serde_json::from_str::<serde_json::Value>(args_json)
         .map_err(|e| format!("failed to parse runtime json abi args: {e}"))?;
@@ -280,7 +280,7 @@ fn json_abi_path_is_runtime_opaque(plan: &RuntimePackagePlan, rendered: &str) ->
                 .opaque_family_types
                 .get(family.lang_item_name())
                 .is_some_and(|entries| entries.iter().any(|entry| entry == rendered))
-    })
+    }) || super::retired_binding_opaque_type_matches(plan, rendered)
 }
 
 fn json_abi_pass_mode(mode: Option<&str>) -> ArcanaCabiPassMode {
@@ -333,6 +333,74 @@ fn json_value_to_runtime_value(value: &serde_json::Value) -> Result<RuntimeValue
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         serde_json::Value::Object(entries) => {
+            if let Some(values) = entries.get("$bytes") {
+                let values = values
+                    .as_array()
+                    .ok_or_else(|| "`$bytes` must contain a JSON array".to_string())?;
+                return Ok(RuntimeValue::Bytes(
+                    values
+                        .iter()
+                        .map(|value| {
+                            let unit = expect_json_int(value, "byte value")?;
+                            u8::try_from(unit).map_err(|_| {
+                                format!("json abi byte value `{unit}` is out of range `0..=255`")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ));
+            }
+            if let Some(values) = entries.get("$byte_buffer") {
+                let values = values
+                    .as_array()
+                    .ok_or_else(|| "`$byte_buffer` must contain a JSON array".to_string())?;
+                return Ok(RuntimeValue::ByteBuffer(
+                    values
+                        .iter()
+                        .map(|value| {
+                            let unit = expect_json_int(value, "byte buffer value")?;
+                            u8::try_from(unit).map_err(|_| {
+                                format!(
+                                    "json abi byte buffer value `{unit}` is out of range `0..=255`"
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ));
+            }
+            if let Some(values) = entries.get("$utf16") {
+                let values = values
+                    .as_array()
+                    .ok_or_else(|| "`$utf16` must contain a JSON array".to_string())?;
+                return Ok(RuntimeValue::Utf16(
+                    values
+                        .iter()
+                        .map(|value| {
+                            let unit = expect_json_int(value, "utf16 value")?;
+                            u16::try_from(unit).map_err(|_| {
+                                format!("json abi utf16 value `{unit}` is out of range `0..=65535`")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ));
+            }
+            if let Some(values) = entries.get("$utf16_buffer") {
+                let values = values
+                    .as_array()
+                    .ok_or_else(|| "`$utf16_buffer` must contain a JSON array".to_string())?;
+                return Ok(RuntimeValue::Utf16Buffer(
+                    values
+                        .iter()
+                        .map(|value| {
+                            let unit = expect_json_int(value, "utf16 buffer value")?;
+                            u16::try_from(unit).map_err(|_| {
+                                format!(
+                                    "json abi utf16 buffer value `{unit}` is out of range `0..=65535`"
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ));
+            }
             if let Some(values) = entries.get("$array") {
                 let values = values
                     .as_array()
@@ -469,6 +537,18 @@ fn runtime_value_to_json_value(value: RuntimeValue) -> Result<serde_json::Value,
         }
         RuntimeValue::Bool(value) => Ok(serde_json::Value::Bool(value)),
         RuntimeValue::Str(value) => Ok(serde_json::Value::String(value)),
+        RuntimeValue::Bytes(bytes) => Ok(serde_json::json!({
+            "$bytes": bytes,
+        })),
+        RuntimeValue::ByteBuffer(bytes) => Ok(serde_json::json!({
+            "$byte_buffer": bytes,
+        })),
+        RuntimeValue::Utf16(units) => Ok(serde_json::json!({
+            "$utf16": units,
+        })),
+        RuntimeValue::Utf16Buffer(units) => Ok(serde_json::json!({
+            "$utf16_buffer": units,
+        })),
         RuntimeValue::List(values) => Ok(serde_json::Value::Array(
             values
                 .into_iter()

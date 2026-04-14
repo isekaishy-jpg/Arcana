@@ -1,13 +1,12 @@
-import std.collections.array
-import std.collections.list
 import std.memory
+import std.text
 
 export record Reader:
-    view: std.memory.ByteView
+    view: View[U8, Contiguous]
     cursor: Int
 
 export record Writer:
-    values: List[Int]
+    values: ByteBuffer
 
 export trait BinaryReadable[T]:
     fn read_from(edit reader: std.binary.Reader) -> T
@@ -15,10 +14,10 @@ export trait BinaryReadable[T]:
 export trait ByteSink[T]:
     fn write_to(read value: T, edit writer: std.binary.Writer)
 
-export fn from_array(read values: Array[Int]) -> std.binary.Reader:
-    return std.binary.Reader :: view = (std.memory.bytes_view :: values, 0, (values :: :: len) :: call), cursor = 0 :: call
+export fn from_bytes(read values: Bytes) -> std.binary.Reader:
+    return std.binary.Reader :: view = values[0..(values :: :: len)], cursor = 0 :: call
 
-export fn from_view(read view: std.memory.ByteView) -> std.binary.Reader:
+export fn from_view(read view: View[U8, Contiguous]) -> std.binary.Reader:
     return std.binary.Reader :: view = view, cursor = 0 :: call
 
 impl Reader:
@@ -34,14 +33,15 @@ impl Reader:
     fn skip(edit self: Reader, amount: Int):
         self.cursor += amount
 
-    fn subview(edit self: Reader, len: Int) -> std.memory.ByteView:
+    fn subview(edit self: Reader, len: Int) -> View[U8, Contiguous]:
         let start = self.cursor
         let end = start + len
         self.cursor = end
         return self.view :: start, end :: subview
 
     fn read_u8(edit self: Reader) -> Int:
-        let value = self.view :: self.cursor :: at
+        let index = self.cursor
+        let value = Int :: (self.view :: index :: get) :: call
         self.cursor += 1
         return value
 
@@ -86,11 +86,8 @@ impl Writer:
         self.values :: ((value shr 8) & 255) :: push
         self.values :: (value & 255) :: push
 
-    fn into_array(read self: Writer) -> Array[Int]:
-        let mut out = std.collections.list.new[Int] :: :: call
-        for value in self.values:
-            out :: value :: push
-        return std.collections.array.from_list[Int] :: out :: call
+    fn into_bytes(read self: Writer) -> Bytes:
+        return self.values :: :: freeze
 
 export fn writer() -> std.binary.Writer:
-    return std.binary.Writer :: values = (std.collections.list.new[Int] :: :: call) :: call
+    return std.binary.Writer :: values = (std.text.byte_buffer_new :: :: call) :: call

@@ -1,4 +1,4 @@
-import std.bytes
+import std.text
 import std.text
 
 export fn utf8_char_len(first: Int) -> Int:
@@ -18,18 +18,18 @@ fn is_continuation_byte(value: Int) -> Bool:
 export fn previous_scalar_start(read text: Str, offset: Int) -> Int:
     if offset <= 0:
         return 0
-    let bytes = std.bytes.from_str_utf8 :: text :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
     let mut index = offset - 1
-    while index > 0 and (arcana_text.text_units.is_continuation_byte :: (std.bytes.at :: bytes, index :: call) :: call):
+    while index > 0 and (arcana_text.text_units.is_continuation_byte :: (std.text.bytes_at :: bytes, index :: call) :: call):
         index -= 1
     return index
 
 export fn next_scalar_end(read text: Str, offset: Int) -> Int:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     if offset >= total:
         return total
-    let count = arcana_text.text_units.utf8_char_len :: (std.bytes.at :: bytes, offset :: call) :: call
+    let count = arcana_text.text_units.utf8_char_len :: (std.text.bytes_at :: bytes, offset :: call) :: call
     let mut next = offset + count
     if next > total:
         next = total
@@ -43,19 +43,19 @@ export fn scalar_text_at(read text: Str, offset: Int) -> Str:
 
 export fn codepoint_at(read text: Str, offset: Int) -> Int:
     let scalar = arcana_text.text_units.scalar_text_at :: text, offset :: call
-    let bytes = std.bytes.from_str_utf8 :: scalar :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: scalar :: call
+    let total = std.text.bytes_len :: bytes :: call
     if total <= 0:
         return 0
-    let first = std.bytes.at :: bytes, 0 :: call
+    let first = std.text.bytes_at :: bytes, 0 :: call
     if first < 128:
         return first
     if total >= 2 and first < 224:
-        return ((first % 32) * 64) + ((std.bytes.at :: bytes, 1 :: call) % 64)
+        return ((first % 32) * 64) + ((std.text.bytes_at :: bytes, 1 :: call) % 64)
     if total >= 3 and first < 240:
-        return ((first % 16) * 4096) + (((std.bytes.at :: bytes, 1 :: call) % 64) * 64) + ((std.bytes.at :: bytes, 2 :: call) % 64)
+        return ((first % 16) * 4096) + (((std.text.bytes_at :: bytes, 1 :: call) % 64) * 64) + ((std.text.bytes_at :: bytes, 2 :: call) % 64)
     if total >= 4 and first < 248:
-        return ((first % 8) * 262144) + (((std.bytes.at :: bytes, 1 :: call) % 64) * 4096) + (((std.bytes.at :: bytes, 2 :: call) % 64) * 64) + ((std.bytes.at :: bytes, 3 :: call) % 64)
+        return ((first % 8) * 262144) + (((std.text.bytes_at :: bytes, 1 :: call) % 64) * 4096) + (((std.text.bytes_at :: bytes, 2 :: call) % 64) * 64) + ((std.text.bytes_at :: bytes, 3 :: call) % 64)
     return first
 
 export fn is_combining_mark(codepoint: Int) -> Bool:

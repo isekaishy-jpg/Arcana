@@ -297,7 +297,7 @@ mod tests {
                     item_count: 5,
                     line_count: 6,
                     non_empty_line_count: 5,
-                    directive_rows: vec!["module=winspell.window:import:std.canvas:".to_string()],
+                    directive_rows: vec!["module=winspell.window:import:std.text:".to_string()],
                     lang_item_rows: Vec::new(),
                     exported_surface_rows: Vec::new(),
                 },
@@ -305,10 +305,10 @@ mod tests {
             dependency_edge_count: 2,
             dependency_rows: vec![
                 "source=winspell:reexport:winspell.window:".to_string(),
-                "source=winspell.window:import:std.canvas:".to_string(),
+                "source=winspell.window:import:std.text:".to_string(),
             ],
             exported_surface_rows: vec!["module=winspell:export:fn:fn open() -> Int:".to_string()],
-            runtime_requirements: vec!["std.canvas".to_string()],
+            runtime_requirements: vec!["std.text".to_string()],
             foreword_index: Vec::new(),
             foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
@@ -919,10 +919,8 @@ mod tests {
                     is_async: false,
                     type_params: Vec::new(),
                     behavior_attrs: BTreeMap::new(),
-                    params: test_params(&["mode=read:name=bytes:ty=Array[Int]".to_string()]),
-                    return_type: test_return_type(
-                        "fn prefix(read bytes: Array[Int]) -> Array[Int]:",
-                    ),
+                    params: test_params(&["mode=read:name=bytes:ty=Bytes".to_string()]),
+                    return_type: test_return_type("fn prefix(read bytes: Bytes) -> Bytes:"),
                     intrinsic_impl: None,
                     native_impl: None,
                     impl_target_type: None,
@@ -962,11 +960,8 @@ mod tests {
         assert_eq!(manifest.launch.exports[1].export_name, "prefix");
         assert_eq!(manifest.launch.exports[1].params[0].source_mode, "read");
         assert_eq!(manifest.launch.exports[1].params[0].pass_mode, "in");
-        assert_eq!(
-            manifest.launch.exports[1].params[0].input_type,
-            "Array[Int]"
-        );
-        assert_eq!(manifest.launch.exports[1].return_type, "Array[Int]");
+        assert_eq!(manifest.launch.exports[1].params[0].input_type, "Bytes");
+        assert_eq!(manifest.launch.exports[1].return_type, "Bytes");
     }
 
     #[test]
@@ -1444,11 +1439,11 @@ mod tests {
             ),
             module_count: 1,
             dependency_edge_count: 1,
-            dependency_rows: vec!["source=tool:import:std.io:".to_string()],
+            dependency_rows: vec!["source=tool:import:arcana_process.io:".to_string()],
             exported_surface_rows: vec![
                 "module=tool:export:fn:fn main(x: Int) -> Int:".to_string(),
             ],
-            runtime_requirements: vec!["std.io".to_string()],
+            runtime_requirements: vec!["arcana_process.io".to_string()],
             foreword_index: Vec::new(),
             foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {

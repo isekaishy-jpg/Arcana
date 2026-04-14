@@ -1,2 +1,6 @@
 name = "app"
 kind = "app"
+
+[deps]
+arcana_process = { path = "../../../../grimoires/arcana/process" }
+arcana_winapi = { path = "../../../../grimoires/arcana/winapi" }

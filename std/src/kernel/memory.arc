@@ -69,8 +69,8 @@ intrinsic fn ring_borrow_read['ring, T](read arena: std.memory.RingBuffer[T], id
 intrinsic fn ring_borrow_edit['ring, T](edit arena: std.memory.RingBuffer[T], id: std.memory.RingId[T]) -> &'ring mut T = MemoryRingBorrowEdit
 intrinsic fn ring_set[T](edit arena: std.memory.RingBuffer[T], id: std.memory.RingId[T], take value: T) = MemoryRingSet
 intrinsic fn ring_reset[T](edit arena: std.memory.RingBuffer[T]) = MemoryRingReset
-intrinsic fn ring_window_read[T](read arena: std.memory.RingBuffer[T], start: Int, len: Int) -> std.memory.ReadView[T] = MemoryRingWindowRead
-intrinsic fn ring_window_edit[T](edit arena: std.memory.RingBuffer[T], start: Int, len: Int) -> std.memory.EditView[T] = MemoryRingWindowEdit
+intrinsic fn ring_window_read[T](read arena: std.memory.RingBuffer[T], start: Int, len: Int) -> View[T, Strided] = MemoryRingWindowRead
+intrinsic fn ring_window_edit[T](edit arena: std.memory.RingBuffer[T], start: Int, len: Int) -> View[T, Strided] = MemoryRingWindowEdit
 
 intrinsic fn slab_new[T](capacity: Int) -> std.memory.Slab[T] = MemorySlabNew
 intrinsic fn slab_alloc[T](edit arena: std.memory.Slab[T], take value: T) -> std.memory.SlabId[T] = MemorySlabAlloc
@@ -87,33 +87,11 @@ intrinsic fn slab_unseal[T](edit arena: std.memory.Slab[T]) = MemorySlabUnseal
 intrinsic fn slab_is_sealed[T](read arena: std.memory.Slab[T]) -> Bool = MemorySlabIsSealed
 intrinsic fn slab_live_ids[T](read arena: std.memory.Slab[T]) -> List[std.memory.SlabId[T]] = MemorySlabLiveIds
 
-intrinsic fn array_view_read[T](read values: Array[T], start: Int, end: Int) -> std.memory.ReadView[T] = MemoryArrayViewRead
-intrinsic fn array_view_edit[T](edit values: Array[T], start: Int, end: Int) -> std.memory.EditView[T] = MemoryArrayViewEdit
-intrinsic fn bytes_view(read values: Array[Int], start: Int, end: Int) -> std.memory.ByteView = MemoryBytesView
-intrinsic fn bytes_view_edit(edit values: Array[Int], start: Int, end: Int) -> std.memory.ByteEditView = MemoryBytesViewEdit
-intrinsic fn str_view(read text: Str, start: Int, end: Int) -> std.memory.StrView = MemoryStrView
+intrinsic fn mapped_view(package: Str, handle: Int, len: Int) -> View[U8, Mapped] = MemoryMappedView
+intrinsic fn mapped_view_edit(package: Str, handle: Int, len: Int) -> View[U8, Mapped] = MemoryMappedViewEdit
 
-intrinsic fn view_len[T](read view: std.memory.ReadView[T]) -> Int = MemoryViewLen
-intrinsic fn view_get[T](read view: std.memory.ReadView[T], index: Int) -> T = MemoryViewGet
-intrinsic fn view_subview[T](read view: std.memory.ReadView[T], start: Int, end: Int) -> std.memory.ReadView[T] = MemoryViewSubview
-intrinsic fn edit_view_len[T](read view: std.memory.EditView[T]) -> Int = MemoryEditViewLen
-intrinsic fn edit_view_get[T](read view: std.memory.EditView[T], index: Int) -> T = MemoryEditViewGet
-intrinsic fn edit_view_set[T](edit view: std.memory.EditView[T], index: Int, take value: T) = MemoryEditViewSet
-intrinsic fn edit_view_subview_read[T](read view: std.memory.EditView[T], start: Int, end: Int) -> std.memory.ReadView[T] = MemoryEditViewSubviewRead
-intrinsic fn edit_view_subview_edit[T](edit view: std.memory.EditView[T], start: Int, end: Int) -> std.memory.EditView[T] = MemoryEditViewSubviewEdit
-
-intrinsic fn byte_view_len(read view: std.memory.ByteView) -> Int = MemoryByteViewLen
-intrinsic fn byte_view_at(read view: std.memory.ByteView, index: Int) -> Int = MemoryByteViewAt
-intrinsic fn byte_view_subview(read view: std.memory.ByteView, start: Int, end: Int) -> std.memory.ByteView = MemoryByteViewSubview
-intrinsic fn byte_view_to_array(read view: std.memory.ByteView) -> Array[Int] = MemoryByteViewToArray
-intrinsic fn byte_edit_view_len(read view: std.memory.ByteEditView) -> Int = MemoryByteEditViewLen
-intrinsic fn byte_edit_view_at(read view: std.memory.ByteEditView, index: Int) -> Int = MemoryByteEditViewAt
-intrinsic fn byte_edit_view_set(edit view: std.memory.ByteEditView, index: Int, value: Int) = MemoryByteEditViewSet
-intrinsic fn byte_edit_view_subview_read(read view: std.memory.ByteEditView, start: Int, end: Int) -> std.memory.ByteView = MemoryByteEditViewSubviewRead
-intrinsic fn byte_edit_view_subview_edit(edit view: std.memory.ByteEditView, start: Int, end: Int) -> std.memory.ByteEditView = MemoryByteEditViewSubviewEdit
-intrinsic fn byte_edit_view_to_array(read view: std.memory.ByteEditView) -> Array[Int] = MemoryByteEditViewToArray
-
-intrinsic fn str_view_len_bytes(read view: std.memory.StrView) -> Int = MemoryStrViewLenBytes
-intrinsic fn str_view_byte_at(read view: std.memory.StrView, index: Int) -> Int = MemoryStrViewByteAt
-intrinsic fn str_view_subview(read view: std.memory.StrView, start: Int, end: Int) -> std.memory.StrView = MemoryStrViewSubview
-intrinsic fn str_view_to_str(read view: std.memory.StrView) -> Str = MemoryStrViewToStr
+intrinsic fn view_len[T, F](read view: View[T, F]) -> Int = MemoryViewLen
+intrinsic fn view_get[T, F](read view: View[T, F], index: Int) -> T = MemoryViewGet
+intrinsic fn view_set[T, F](edit view: View[T, F], index: Int, take value: T) = MemoryEditViewSet
+intrinsic fn view_subview[T, F](read view: View[T, F], start: Int, end: Int) -> View[T, F] = MemoryViewSubview
+intrinsic fn view_to_str(read view: View[U8, Contiguous]) -> Str = MemoryStrViewToStr

@@ -7,7 +7,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::fs;
-use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -15,13 +14,15 @@ use arcana_aot::{
     AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
 use arcana_cabi::{
-    ArcanaBytesView, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam,
-    ArcanaCabiBindingPayloadV1, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
-    ArcanaCabiBindingSignature, ArcanaCabiBindingType, ArcanaCabiBindingValueTag,
-    ArcanaCabiBindingValueV1, ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn,
-    ArcanaCabiParamSourceMode, ArcanaStrView, binding_write_back_slots, clone_owned_binding_bytes,
-    clone_owned_binding_str, into_owned_bytes, into_owned_str, release_binding_output_value,
-    validate_binding_transport_type,
+    ARCANA_CABI_VIEW_FLAG_UTF8, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutKind,
+    ArcanaCabiBindingParam, ArcanaCabiBindingPayloadV1, ArcanaCabiBindingRawType,
+    ArcanaCabiBindingScalarType, ArcanaCabiBindingSignature, ArcanaCabiBindingType,
+    ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiBindingViewType,
+    ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode,
+    ArcanaCabiViewFamily, ArcanaViewV1, binding_write_back_slots, clone_binding_view_bytes,
+    clone_owned_binding_bytes, clone_owned_binding_str, contiguous_u8_view, into_owned_bytes,
+    into_owned_str, raw_view, release_binding_output_value, validate_binding_transport_type,
+    view_total_bytes,
 };
 
 use arcana_ir::{
@@ -40,7 +41,8 @@ use arcana_ir::{
     ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
     ExecMatchPattern as ParsedMatchPattern, ExecMemorySpecDecl as ParsedMemorySpecDecl,
     ExecNamedBindingId as ParsedNamedBindingId, ExecPhraseArg as ParsedPhraseArg,
-    ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecRecordRegion as ParsedRecordRegion,
+    ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
+    ExecProjectionFamily as ParsedProjectionFamily, ExecRecordRegion as ParsedRecordRegion,
     ExecRecycleLineKind as ParsedRecycleLineKind, ExecStmt as ParsedStmt,
     ExecStructBitfieldFieldLayout, ExecStructBitfieldLayout, ExecUnaryOp as ParsedUnaryOp,
     IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row, parse_routine_type_text,
@@ -50,23 +52,36 @@ use arcana_language_law::{
     MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
     memory_family_descriptor,
 };
-use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stacker::grow;
 
+#[cfg(test)]
+mod app_input;
+mod binding_transport;
+mod core_intrinsics;
+mod evaluator;
+mod intrinsic_resolution;
 mod json_abi;
 mod native_abi;
-#[cfg(windows)]
-mod native_host;
 mod native_product_loader;
 mod package_image;
+mod process_runtime_host;
 mod routine_plan;
-mod text_engine;
+mod runtime_intrinsics;
+mod runtime_types;
+mod view_runtime;
+#[cfg(test)]
+pub use app_input::BufferedHost;
 pub use arcana_ir::{
     IrForewordArg, IrForewordEntryKind, IrForewordGeneratedBy, IrForewordMetadata,
     IrForewordRegistrationRow, IrForewordRetention,
 };
+use binding_transport::*;
+use core_intrinsics::*;
+use evaluator::*;
+pub use evaluator::{execute_entrypoint_routine, execute_main};
+use intrinsic_resolution::*;
 pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
@@ -74,8 +89,6 @@ pub use native_abi::{
     RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack,
     execute_cleanup_runtime_abi_routine, execute_exported_abi_routine,
 };
-#[cfg(windows)]
-pub use native_host::NativeProcessHost;
 use native_product_loader::{RuntimeBindingCallbackRegistrationSpec, RuntimeBindingImportOutcome};
 pub use native_product_loader::{
     RuntimeChildBindingInfo, RuntimeNativePluginHandle, RuntimeNativeProductCatalog,
@@ -85,10 +98,14 @@ pub use native_product_loader::{
 pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
+use process_runtime_host::ProcessRuntimeHost;
 pub use routine_plan::{
     RuntimeEntrypointPlan, RuntimeNativeCallbackPlan, RuntimeParamPlan, RuntimeRoutinePlan,
 };
 use routine_plan::{lower_entrypoint, lower_native_callback, lower_routine};
+use runtime_intrinsics::*;
+use runtime_types::*;
+use view_runtime::*;
 
 const MODULE_MEMORY_SPEC_ALIAS_PREFIX: &str = "@memory_spec:";
 const MODULE_BITFIELD_LAYOUT_SCOPE: &str = "@meta.bitfield";
@@ -99,6 +116,23 @@ pub const ARCANA_NATIVE_BUNDLE_MANIFEST_ENV: &str = "ARCANA_NATIVE_BUNDLE_MANIFE
 thread_local! {
     static ACTIVE_RUNTIME_NATIVE_PRODUCTS: RefCell<Option<RuntimeNativeProductCatalog>> = const { RefCell::new(None) };
     static ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT: RefCell<Option<RuntimeBindingCallbackContext>> = const { RefCell::new(None) };
+}
+
+pub fn current_process_core_host() -> Result<Box<dyn RuntimeCoreHost>, String> {
+    Ok(Box::new(ProcessRuntimeHost::current_process()))
+}
+
+pub fn execute_current_bundle_entrypoint(
+    package_image_text: &str,
+    routine_key: &str,
+) -> Result<i32, String> {
+    let mut native_products = activate_current_bundle_native_products()?;
+    if let Some(code) = native_products.run_child_entrypoint(package_image_text, routine_key)? {
+        return Ok(code);
+    }
+    let plan = parse_runtime_package_image(package_image_text)?;
+    let mut host = current_process_core_host()?;
+    execute_entrypoint_routine(&plan, routine_key, host.as_mut())
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +151,22 @@ struct RuntimeBindingCallbackThunkData {
 struct RuntimeBindingArgStorage {
     strings: Vec<String>,
     bytes: Vec<Vec<u8>>,
+    in_place_edits: BTreeMap<usize, RuntimeBindingInPlaceEdit>,
+}
+
+#[derive(Clone, Debug)]
+enum RuntimeBindingInPlaceEdit {
+    ByteBuffer {
+        bytes_index: usize,
+    },
+    Utf16Buffer {
+        bytes_index: usize,
+    },
+    View {
+        original: RuntimeValue,
+        bytes_index: usize,
+        expected_type: String,
+    },
 }
 
 struct RuntimeBindingCallbackOutcome {
@@ -179,6 +229,17 @@ pub struct RuntimePackagePlan {
     pub binding_layouts: Vec<ArcanaCabiBindingLayout>,
     pub owners: Vec<RuntimeOwnerPlan>,
 }
+
+const RETIRED_BINDING_OPAQUE_LANG_ITEMS: &[&str] = &[
+    "file_stream_handle",
+    "window_handle",
+    "app_frame_handle",
+    "app_session_handle",
+    "wake_handle",
+    "audio_device_handle",
+    "audio_buffer_handle",
+    "audio_playback_handle",
+];
 
 impl RuntimePackagePlan {
     pub fn main_entrypoint(&self) -> Option<&RuntimeEntrypointPlan> {
@@ -326,33 +387,6 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
     }
     normalized
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeFileStreamHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeWindowHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeImageHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeAppFrameHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeAppSessionHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeWakeHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeAudioDeviceHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeAudioBufferHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeAudioPlaybackHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeChannelHandle(u64);
@@ -575,15 +609,6 @@ struct RuntimeBindingOpaqueValue {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeOpaqueValue {
-    FileStream(RuntimeFileStreamHandle),
-    Window(RuntimeWindowHandle),
-    Image(RuntimeImageHandle),
-    AppFrame(RuntimeAppFrameHandle),
-    AppSession(RuntimeAppSessionHandle),
-    Wake(RuntimeWakeHandle),
-    AudioDevice(RuntimeAudioDeviceHandle),
-    AudioBuffer(RuntimeAudioBufferHandle),
-    AudioPlayback(RuntimeAudioPlaybackHandle),
     Channel(RuntimeChannelHandle),
     Mutex(RuntimeMutexHandle),
     AtomicInt(RuntimeAtomicIntHandle),
@@ -615,15 +640,6 @@ enum RuntimeOpaqueValue {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeOpaqueFamily {
-    FileStream,
-    Window,
-    Image,
-    AppFrame,
-    AppSession,
-    Wake,
-    AudioDevice,
-    AudioBuffer,
-    AudioPlayback,
     Channel,
     Mutex,
     AtomicInt,
@@ -651,17 +667,28 @@ enum RuntimeOpaqueFamily {
     Thread,
 }
 
+fn retired_binding_opaque_lang_item(name: &str) -> bool {
+    RETIRED_BINDING_OPAQUE_LANG_ITEMS.contains(&name)
+}
+
+fn tracked_opaque_lang_item(name: &str) -> bool {
+    RuntimeOpaqueFamily::from_lang_item_name(name).is_some()
+        || retired_binding_opaque_lang_item(name)
+}
+
+pub(crate) fn retired_binding_opaque_type_matches(
+    plan: &RuntimePackagePlan,
+    rendered: &str,
+) -> bool {
+    RETIRED_BINDING_OPAQUE_LANG_ITEMS.iter().any(|name| {
+        plan.opaque_family_types
+            .get(*name)
+            .is_some_and(|entries| entries.iter().any(|entry| entry == rendered))
+    })
+}
+
 impl RuntimeOpaqueFamily {
-    const ALL: [Self; 34] = [
-        Self::FileStream,
-        Self::Window,
-        Self::Image,
-        Self::AppFrame,
-        Self::AppSession,
-        Self::Wake,
-        Self::AudioDevice,
-        Self::AudioBuffer,
-        Self::AudioPlayback,
+    const ALL: [Self; 25] = [
         Self::Channel,
         Self::Mutex,
         Self::AtomicInt,
@@ -691,15 +718,6 @@ impl RuntimeOpaqueFamily {
 
     const fn lang_item_name(self) -> &'static str {
         match self {
-            Self::FileStream => "file_stream_handle",
-            Self::Window => "window_handle",
-            Self::Image => "image_handle",
-            Self::AppFrame => "app_frame_handle",
-            Self::AppSession => "app_session_handle",
-            Self::Wake => "wake_handle",
-            Self::AudioDevice => "audio_device_handle",
-            Self::AudioBuffer => "audio_buffer_handle",
-            Self::AudioPlayback => "audio_playback_handle",
             Self::Channel => "channel_handle",
             Self::Mutex => "mutex_handle",
             Self::AtomicInt => "atomic_int_handle",
@@ -718,11 +736,11 @@ impl RuntimeOpaqueFamily {
             Self::RingId => "ring_id_handle",
             Self::Slab => "slab_handle",
             Self::SlabId => "slab_id_handle",
-            Self::ReadView => "read_view_handle",
-            Self::EditView => "edit_view_handle",
-            Self::ByteView => "byte_view_handle",
-            Self::ByteEditView => "byte_edit_view_handle",
-            Self::StrView => "str_view_handle",
+            Self::ReadView => "contiguous_view_handle",
+            Self::EditView => "contiguous_view_edit_handle",
+            Self::ByteView => "u8_view_handle",
+            Self::ByteEditView => "u8_view_edit_handle",
+            Self::StrView => "text_bytes_view_handle",
             Self::Task => "task_handle",
             Self::Thread => "thread_handle",
         }
@@ -730,15 +748,6 @@ impl RuntimeOpaqueFamily {
 
     const fn canonical_type_name(self) -> &'static str {
         match self {
-            Self::FileStream => "std.fs.FileStream",
-            Self::Window => "std.window.Window",
-            Self::Image => "std.canvas.Image",
-            Self::AppFrame => "std.events.AppFrame",
-            Self::AppSession => "std.events.AppSession",
-            Self::Wake => "std.events.WakeHandle",
-            Self::AudioDevice => "std.audio.AudioDevice",
-            Self::AudioBuffer => "std.audio.AudioBuffer",
-            Self::AudioPlayback => "std.audio.AudioPlayback",
             Self::Channel => "std.concurrent.Channel",
             Self::Mutex => "std.concurrent.Mutex",
             Self::AtomicInt => "std.concurrent.AtomicInt",
@@ -757,11 +766,11 @@ impl RuntimeOpaqueFamily {
             Self::RingId => "std.memory.RingId",
             Self::Slab => "std.memory.Slab",
             Self::SlabId => "std.memory.SlabId",
-            Self::ReadView => "std.memory.ReadView",
-            Self::EditView => "std.memory.EditView",
-            Self::ByteView => "std.memory.ByteView",
-            Self::ByteEditView => "std.memory.ByteEditView",
-            Self::StrView => "std.memory.StrView",
+            Self::ReadView => "View",
+            Self::EditView => "View",
+            Self::ByteView => "View",
+            Self::ByteEditView => "View",
+            Self::StrView => "View",
             Self::Task => "std.concurrent.Task",
             Self::Thread => "std.concurrent.Thread",
         }
@@ -769,15 +778,6 @@ impl RuntimeOpaqueFamily {
 
     fn from_lang_item_name(name: &str) -> Option<Self> {
         match name {
-            "file_stream_handle" => Some(Self::FileStream),
-            "window_handle" => Some(Self::Window),
-            "image_handle" => Some(Self::Image),
-            "app_frame_handle" => Some(Self::AppFrame),
-            "app_session_handle" => Some(Self::AppSession),
-            "wake_handle" => Some(Self::Wake),
-            "audio_device_handle" => Some(Self::AudioDevice),
-            "audio_buffer_handle" => Some(Self::AudioBuffer),
-            "audio_playback_handle" => Some(Self::AudioPlayback),
             "channel_handle" => Some(Self::Channel),
             "mutex_handle" => Some(Self::Mutex),
             "atomic_int_handle" => Some(Self::AtomicInt),
@@ -796,11 +796,11 @@ impl RuntimeOpaqueFamily {
             "ring_id_handle" => Some(Self::RingId),
             "slab_handle" => Some(Self::Slab),
             "slab_id_handle" => Some(Self::SlabId),
-            "read_view_handle" => Some(Self::ReadView),
-            "edit_view_handle" => Some(Self::EditView),
-            "byte_view_handle" => Some(Self::ByteView),
-            "byte_edit_view_handle" => Some(Self::ByteEditView),
-            "str_view_handle" => Some(Self::StrView),
+            "contiguous_view_handle" => Some(Self::ReadView),
+            "contiguous_view_edit_handle" => Some(Self::EditView),
+            "u8_view_handle" => Some(Self::ByteView),
+            "u8_view_edit_handle" => Some(Self::ByteEditView),
+            "text_bytes_view_handle" => Some(Self::StrView),
             "task_handle" => Some(Self::Task),
             "thread_handle" => Some(Self::Thread),
             _ => None,
@@ -809,15 +809,6 @@ impl RuntimeOpaqueFamily {
 
     const fn from_opaque_value(value: &RuntimeOpaqueValue) -> Self {
         match value {
-            RuntimeOpaqueValue::FileStream(_) => Self::FileStream,
-            RuntimeOpaqueValue::Window(_) => Self::Window,
-            RuntimeOpaqueValue::Image(_) => Self::Image,
-            RuntimeOpaqueValue::AppFrame(_) => Self::AppFrame,
-            RuntimeOpaqueValue::AppSession(_) => Self::AppSession,
-            RuntimeOpaqueValue::Wake(_) => Self::Wake,
-            RuntimeOpaqueValue::AudioDevice(_) => Self::AudioDevice,
-            RuntimeOpaqueValue::AudioBuffer(_) => Self::AudioBuffer,
-            RuntimeOpaqueValue::AudioPlayback(_) => Self::AudioPlayback,
             RuntimeOpaqueValue::Channel(_) => Self::Channel,
             RuntimeOpaqueValue::Mutex(_) => Self::Mutex,
             RuntimeOpaqueValue::AtomicInt(_) => Self::AtomicInt,
@@ -849,7 +840,7 @@ impl RuntimeOpaqueFamily {
     }
 }
 
-pub trait RuntimeHost {
+pub trait RuntimeCoreHost {
     fn supports_runtime_requirement(&self, requirement: &str) -> bool {
         let _ = requirement;
         true
@@ -863,3629 +854,17 @@ pub trait RuntimeHost {
         Ok(())
     }
     fn stdin_read_line(&mut self) -> Result<String, String> {
-        Err("runtime host stdin_read_line is not implemented".to_string())
-    }
-    fn arg_count(&mut self) -> Result<usize, String> {
-        Ok(0)
-    }
-    fn arg_get(&mut self, index: usize) -> Result<String, String> {
-        Ok(self
-            .arg_count()?
-            .checked_sub(index + 1)
-            .map(|_| String::new())
-            .unwrap_or_default())
-    }
-    fn env_has(&mut self, name: &str) -> Result<bool, String> {
-        let _ = name;
-        Ok(false)
-    }
-    fn env_get(&mut self, name: &str) -> Result<String, String> {
-        let _ = name;
-        Ok(String::new())
-    }
-    fn cwd(&mut self) -> Result<String, String> {
-        Err("runtime host cwd is not implemented".to_string())
-    }
-    fn path_join(&mut self, a: &str, b: &str) -> Result<String, String> {
-        let _ = (a, b);
-        Err("runtime host path_join is not implemented".to_string())
-    }
-    fn path_normalize(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host path_normalize is not implemented".to_string())
-    }
-    fn path_parent(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host path_parent is not implemented".to_string())
-    }
-    fn path_file_name(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host path_file_name is not implemented".to_string())
-    }
-    fn path_ext(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host path_ext is not implemented".to_string())
-    }
-    fn path_is_absolute(&mut self, path: &str) -> Result<bool, String> {
-        let _ = path;
-        Err("runtime host path_is_absolute is not implemented".to_string())
-    }
-    fn path_stem(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host path_stem is not implemented".to_string())
-    }
-    fn path_with_ext(&mut self, path: &str, ext: &str) -> Result<String, String> {
-        let _ = (path, ext);
-        Err("runtime host path_with_ext is not implemented".to_string())
-    }
-    fn path_relative_to(&mut self, path: &str, base: &str) -> Result<String, String> {
-        let _ = (path, base);
-        Err("runtime host path_relative_to is not implemented".to_string())
-    }
-    fn path_canonicalize(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host path_canonicalize is not implemented".to_string())
-    }
-    fn path_strip_prefix(&mut self, path: &str, prefix: &str) -> Result<String, String> {
-        let _ = (path, prefix);
-        Err("runtime host path_strip_prefix is not implemented".to_string())
-    }
-    fn fs_exists(&mut self, path: &str) -> Result<bool, String> {
-        let _ = path;
-        Err("runtime host fs_exists is not implemented".to_string())
-    }
-    fn fs_is_file(&mut self, path: &str) -> Result<bool, String> {
-        let _ = path;
-        Err("runtime host fs_is_file is not implemented".to_string())
-    }
-    fn fs_is_dir(&mut self, path: &str) -> Result<bool, String> {
-        let _ = path;
-        Err("runtime host fs_is_dir is not implemented".to_string())
-    }
-    fn fs_read_text(&mut self, path: &str) -> Result<String, String> {
-        let _ = path;
-        Err("runtime host fs_read_text is not implemented".to_string())
-    }
-    fn fs_read_bytes(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        let _ = path;
-        Err("runtime host fs_read_bytes is not implemented".to_string())
-    }
-    fn fs_stream_open_read(&mut self, path: &str) -> Result<RuntimeFileStreamHandle, String> {
-        let _ = path;
-        Err("runtime host fs_stream_open_read is not implemented".to_string())
-    }
-    fn fs_stream_open_write(
-        &mut self,
-        path: &str,
-        append: bool,
-    ) -> Result<RuntimeFileStreamHandle, String> {
-        let _ = (path, append);
-        Err("runtime host fs_stream_open_write is not implemented".to_string())
-    }
-    fn fs_stream_read(
-        &mut self,
-        stream: RuntimeFileStreamHandle,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, String> {
-        let _ = (stream, max_bytes);
-        Err("runtime host fs_stream_read is not implemented".to_string())
-    }
-    fn fs_stream_write(
-        &mut self,
-        stream: RuntimeFileStreamHandle,
-        bytes: &[u8],
-    ) -> Result<usize, String> {
-        let _ = (stream, bytes);
-        Err("runtime host fs_stream_write is not implemented".to_string())
-    }
-    fn fs_stream_eof(&mut self, stream: RuntimeFileStreamHandle) -> Result<bool, String> {
-        let _ = stream;
-        Err("runtime host fs_stream_eof is not implemented".to_string())
-    }
-    fn fs_stream_close(&mut self, stream: RuntimeFileStreamHandle) -> Result<(), String> {
-        let _ = stream;
-        Err("runtime host fs_stream_close is not implemented".to_string())
-    }
-    fn fs_write_text(&mut self, path: &str, text: &str) -> Result<(), String> {
-        let _ = (path, text);
-        Err("runtime host fs_write_text is not implemented".to_string())
-    }
-    fn fs_write_bytes(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
-        let _ = (path, bytes);
-        Err("runtime host fs_write_bytes is not implemented".to_string())
-    }
-    fn fs_list_dir(&mut self, path: &str) -> Result<Vec<String>, String> {
-        let _ = path;
-        Err("runtime host fs_list_dir is not implemented".to_string())
-    }
-    fn fs_mkdir_all(&mut self, path: &str) -> Result<(), String> {
-        let _ = path;
-        Err("runtime host fs_mkdir_all is not implemented".to_string())
-    }
-    fn fs_create_dir(&mut self, path: &str) -> Result<(), String> {
-        let _ = path;
-        Err("runtime host fs_create_dir is not implemented".to_string())
-    }
-    fn fs_remove_file(&mut self, path: &str) -> Result<(), String> {
-        let _ = path;
-        Err("runtime host fs_remove_file is not implemented".to_string())
-    }
-    fn fs_remove_dir(&mut self, path: &str) -> Result<(), String> {
-        let _ = path;
-        Err("runtime host fs_remove_dir is not implemented".to_string())
-    }
-    fn fs_remove_dir_all(&mut self, path: &str) -> Result<(), String> {
-        let _ = path;
-        Err("runtime host fs_remove_dir_all is not implemented".to_string())
-    }
-    fn fs_copy_file(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let _ = (from, to);
-        Err("runtime host fs_copy_file is not implemented".to_string())
-    }
-    fn fs_rename(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let _ = (from, to);
-        Err("runtime host fs_rename is not implemented".to_string())
-    }
-    fn fs_file_size(&mut self, path: &str) -> Result<i64, String> {
-        let _ = path;
-        Err("runtime host fs_file_size is not implemented".to_string())
-    }
-    fn fs_modified_unix_ms(&mut self, path: &str) -> Result<i64, String> {
-        let _ = path;
-        Err("runtime host fs_modified_unix_ms is not implemented".to_string())
-    }
-    fn window_open(
-        &mut self,
-        title: &str,
-        width: i64,
-        height: i64,
-    ) -> Result<RuntimeWindowHandle, String> {
-        let _ = (title, width, height);
-        Err("runtime host window_open is not implemented".to_string())
-    }
-    fn window_alive(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_alive is not implemented".to_string())
-    }
-    fn window_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host window_size is not implemented".to_string())
-    }
-    fn window_resized(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_resized is not implemented".to_string())
-    }
-    fn window_fullscreen(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_fullscreen is not implemented".to_string())
-    }
-    fn window_minimized(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_minimized is not implemented".to_string())
-    }
-    fn window_maximized(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_maximized is not implemented".to_string())
-    }
-    fn window_focused(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_focused is not implemented".to_string())
-    }
-    fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_id is not implemented".to_string())
-    }
-    fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host window_position is not implemented".to_string())
-    }
-    fn window_title(&mut self, window: RuntimeWindowHandle) -> Result<String, String> {
-        let _ = window;
-        Err("runtime host window_title is not implemented".to_string())
-    }
-    fn window_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_visible is not implemented".to_string())
-    }
-    fn window_decorated(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_decorated is not implemented".to_string())
-    }
-    fn window_resizable(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_resizable is not implemented".to_string())
-    }
-    fn window_topmost(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_topmost is not implemented".to_string())
-    }
-    fn window_cursor_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_cursor_visible is not implemented".to_string())
-    }
-    fn window_min_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host window_min_size is not implemented".to_string())
-    }
-    fn window_max_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host window_max_size is not implemented".to_string())
-    }
-    fn window_scale_factor_milli(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_scale_factor_milli is not implemented".to_string())
-    }
-    fn window_theme_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_theme_code is not implemented".to_string())
-    }
-    fn window_transparent(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_transparent is not implemented".to_string())
-    }
-    fn window_theme_override_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_theme_override_code is not implemented".to_string())
-    }
-    fn window_cursor_icon_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_cursor_icon_code is not implemented".to_string())
-    }
-    fn window_cursor_grab_mode(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_cursor_grab_mode is not implemented".to_string())
-    }
-    fn window_cursor_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host window_cursor_position is not implemented".to_string())
-    }
-    fn window_text_input_enabled(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host window_text_input_enabled is not implemented".to_string())
-    }
-    fn window_current_monitor_index(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        let _ = window;
-        Err("runtime host window_current_monitor_index is not implemented".to_string())
-    }
-    fn window_primary_monitor_index(&mut self) -> Result<i64, String> {
-        Err("runtime host window_primary_monitor_index is not implemented".to_string())
-    }
-    fn window_monitor_count(&mut self) -> Result<i64, String> {
-        Err("runtime host window_monitor_count is not implemented".to_string())
-    }
-    fn window_monitor_name(&mut self, index: i64) -> Result<String, String> {
-        let _ = index;
-        Err("runtime host window_monitor_name is not implemented".to_string())
-    }
-    fn window_monitor_position(&mut self, index: i64) -> Result<(i64, i64), String> {
-        let _ = index;
-        Err("runtime host window_monitor_position is not implemented".to_string())
-    }
-    fn window_monitor_size(&mut self, index: i64) -> Result<(i64, i64), String> {
-        let _ = index;
-        Err("runtime host window_monitor_size is not implemented".to_string())
-    }
-    fn window_monitor_scale_factor_milli(&mut self, index: i64) -> Result<i64, String> {
-        let _ = index;
-        Err("runtime host window_monitor_scale_factor_milli is not implemented".to_string())
-    }
-    fn window_monitor_is_primary(&mut self, index: i64) -> Result<bool, String> {
-        let _ = index;
-        Err("runtime host window_monitor_is_primary is not implemented".to_string())
-    }
-    fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
-        let _ = (window, title);
-        Err("runtime host window_set_title is not implemented".to_string())
-    }
-    fn window_set_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x, y);
-        Err("runtime host window_set_position is not implemented".to_string())
-    }
-    fn window_set_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        let _ = (window, width, height);
-        Err("runtime host window_set_size is not implemented".to_string())
-    }
-    fn window_set_visible(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_visible is not implemented".to_string())
-    }
-    fn window_set_decorated(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_decorated is not implemented".to_string())
-    }
-    fn window_set_resizable(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_resizable is not implemented".to_string())
-    }
-    fn window_set_min_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        let _ = (window, width, height);
-        Err("runtime host window_set_min_size is not implemented".to_string())
-    }
-    fn window_set_max_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        let _ = (window, width, height);
-        Err("runtime host window_set_max_size is not implemented".to_string())
-    }
-    fn window_set_fullscreen(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_fullscreen is not implemented".to_string())
-    }
-    fn window_set_minimized(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_minimized is not implemented".to_string())
-    }
-    fn window_set_maximized(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_maximized is not implemented".to_string())
-    }
-    fn window_set_topmost(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_topmost is not implemented".to_string())
-    }
-    fn window_set_cursor_visible(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_cursor_visible is not implemented".to_string())
-    }
-    fn window_set_transparent(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_transparent is not implemented".to_string())
-    }
-    fn window_set_theme_override_code(
-        &mut self,
-        window: RuntimeWindowHandle,
-        code: i64,
-    ) -> Result<(), String> {
-        let _ = (window, code);
-        Err("runtime host window_set_theme_override_code is not implemented".to_string())
-    }
-    fn window_set_cursor_icon_code(
-        &mut self,
-        window: RuntimeWindowHandle,
-        code: i64,
-    ) -> Result<(), String> {
-        let _ = (window, code);
-        Err("runtime host window_set_cursor_icon_code is not implemented".to_string())
-    }
-    fn window_set_cursor_grab_mode(
-        &mut self,
-        window: RuntimeWindowHandle,
-        mode: i64,
-    ) -> Result<(), String> {
-        let _ = (window, mode);
-        Err("runtime host window_set_cursor_grab_mode is not implemented".to_string())
-    }
-    fn window_set_cursor_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x, y);
-        Err("runtime host window_set_cursor_position is not implemented".to_string())
-    }
-    fn window_set_text_input_enabled(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_set_text_input_enabled is not implemented".to_string())
-    }
-    fn window_request_redraw(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        let _ = window;
-        Err("runtime host window_request_redraw is not implemented".to_string())
-    }
-    fn window_request_attention(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let _ = (window, enabled);
-        Err("runtime host window_request_attention is not implemented".to_string())
-    }
-    fn window_close(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        let _ = window;
-        Err("runtime host window_close is not implemented".to_string())
-    }
-    fn canvas_fill(&mut self, window: RuntimeWindowHandle, color: i64) -> Result<(), String> {
-        let _ = (window, color);
-        Err("runtime host canvas_fill is not implemented".to_string())
-    }
-    fn canvas_rect(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        color: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x, y, w, h, color);
-        Err("runtime host canvas_rect is not implemented".to_string())
-    }
-    fn canvas_line(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x1: i64,
-        y1: i64,
-        x2: i64,
-        y2: i64,
-        color: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x1, y1, x2, y2, color);
-        Err("runtime host canvas_line is not implemented".to_string())
-    }
-    fn canvas_circle_fill(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        radius: i64,
-        color: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x, y, radius, color);
-        Err("runtime host canvas_circle_fill is not implemented".to_string())
-    }
-    fn canvas_label(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        text: &str,
-        color: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x, y, text, color);
-        Err("runtime host canvas_label is not implemented".to_string())
-    }
-    fn canvas_label_size(&mut self, text: &str) -> Result<(i64, i64), String> {
-        let _ = text;
-        Err("runtime host canvas_label_size is not implemented".to_string())
-    }
-    fn canvas_present(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        let _ = window;
-        Err("runtime host canvas_present is not implemented".to_string())
-    }
-    fn canvas_rgb(&mut self, r: i64, g: i64, b: i64) -> Result<i64, String> {
-        let _ = (r, g, b);
-        Err("runtime host canvas_rgb is not implemented".to_string())
-    }
-    fn image_load(&mut self, path: &str) -> Result<RuntimeImageHandle, String> {
-        let _ = path;
-        Err("runtime host image_load is not implemented".to_string())
-    }
-    fn canvas_image_create(
-        &mut self,
-        width: i64,
-        height: i64,
-    ) -> Result<RuntimeImageHandle, String> {
-        let _ = (width, height);
-        Err("runtime host canvas_image_create is not implemented".to_string())
-    }
-    fn canvas_image_replace_rgba(
-        &mut self,
-        image: RuntimeImageHandle,
-        rgba: &[u8],
-    ) -> Result<(), String> {
-        let _ = (image, rgba);
-        Err("runtime host canvas_image_replace_rgba is not implemented".to_string())
-    }
-    fn canvas_image_size(&mut self, image: RuntimeImageHandle) -> Result<(i64, i64), String> {
-        let _ = image;
-        Err("runtime host canvas_image_size is not implemented".to_string())
-    }
-    fn canvas_blit(
-        &mut self,
-        window: RuntimeWindowHandle,
-        image: RuntimeImageHandle,
-        x: i64,
-        y: i64,
-    ) -> Result<(), String> {
-        let _ = (window, image, x, y);
-        Err("runtime host canvas_blit is not implemented".to_string())
-    }
-    fn canvas_blit_scaled(
-        &mut self,
-        window: RuntimeWindowHandle,
-        image: RuntimeImageHandle,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-    ) -> Result<(), String> {
-        let _ = (window, image, x, y, w, h);
-        Err("runtime host canvas_blit_scaled is not implemented".to_string())
-    }
-    fn canvas_blit_region(
-        &mut self,
-        window: RuntimeWindowHandle,
-        image: RuntimeImageHandle,
-        sx: i64,
-        sy: i64,
-        sw: i64,
-        sh: i64,
-        dx: i64,
-        dy: i64,
-        dw: i64,
-        dh: i64,
-    ) -> Result<(), String> {
-        let _ = (window, image, sx, sy, sw, sh, dx, dy, dw, dh);
-        Err("runtime host canvas_blit_region is not implemented".to_string())
-    }
-    fn events_pump(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<RuntimeAppFrameHandle, String> {
-        let _ = window;
-        Err("runtime host events_pump is not implemented".to_string())
-    }
-    fn events_poll(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-    ) -> Result<Option<RuntimeEventRecord>, String> {
-        let _ = frame;
-        Err("runtime host events_poll is not implemented".to_string())
-    }
-    fn events_session_open(&mut self) -> Result<RuntimeAppSessionHandle, String> {
-        Err("runtime host events_session_open is not implemented".to_string())
-    }
-    fn events_session_close(&mut self, session: RuntimeAppSessionHandle) -> Result<(), String> {
-        let _ = session;
-        Err("runtime host events_session_close is not implemented".to_string())
-    }
-    fn events_session_attach_window(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        window: RuntimeWindowHandle,
-    ) -> Result<(), String> {
-        let _ = (session, window);
-        Err("runtime host events_session_attach_window is not implemented".to_string())
-    }
-    fn events_session_detach_window(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        window: RuntimeWindowHandle,
-    ) -> Result<(), String> {
-        let _ = (session, window);
-        Err("runtime host events_session_detach_window is not implemented".to_string())
-    }
-    fn events_session_window_by_id(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        window_id: i64,
-    ) -> Result<Option<RuntimeWindowHandle>, String> {
-        let _ = (session, window_id);
-        Err("runtime host events_session_window_by_id is not implemented".to_string())
-    }
-    fn events_session_window_ids(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<Vec<i64>, String> {
-        let _ = session;
-        Err("runtime host events_session_window_ids is not implemented".to_string())
-    }
-    fn events_session_pump(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<RuntimeAppFrameHandle, String> {
-        let _ = session;
-        Err("runtime host events_session_pump is not implemented".to_string())
-    }
-    fn events_session_wait(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        timeout_ms: i64,
-    ) -> Result<RuntimeAppFrameHandle, String> {
-        let _ = (session, timeout_ms);
-        Err("runtime host events_session_wait is not implemented".to_string())
-    }
-    fn events_session_device_events(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<i64, String> {
-        let _ = session;
-        Err("runtime host events_session_device_events is not implemented".to_string())
-    }
-    fn events_session_set_device_events(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        policy: i64,
-    ) -> Result<(), String> {
-        let _ = (session, policy);
-        Err("runtime host events_session_set_device_events is not implemented".to_string())
-    }
-    fn events_session_create_wake(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<RuntimeWakeHandle, String> {
-        let _ = session;
-        Err("runtime host events_session_create_wake is not implemented".to_string())
-    }
-    fn events_wake_signal(&mut self, wake: RuntimeWakeHandle) -> Result<(), String> {
-        let _ = wake;
-        Err("runtime host events_wake_signal is not implemented".to_string())
-    }
-    fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
-        let _ = name;
-        Err("runtime host input_key_code is not implemented".to_string())
-    }
-    fn input_key_down(&mut self, frame: RuntimeAppFrameHandle, key: i64) -> Result<bool, String> {
-        let _ = (frame, key);
-        Err("runtime host input_key_down is not implemented".to_string())
-    }
-    fn input_key_pressed(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        key: i64,
-    ) -> Result<bool, String> {
-        let _ = (frame, key);
-        Err("runtime host input_key_pressed is not implemented".to_string())
-    }
-    fn input_key_released(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        key: i64,
-    ) -> Result<bool, String> {
-        let _ = (frame, key);
-        Err("runtime host input_key_released is not implemented".to_string())
-    }
-    fn input_mouse_button_code(&mut self, name: &str) -> Result<i64, String> {
-        let _ = name;
-        Err("runtime host input_mouse_button_code is not implemented".to_string())
-    }
-    fn input_mouse_pos(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64), String> {
-        let _ = frame;
-        Err("runtime host input_mouse_pos is not implemented".to_string())
-    }
-    fn input_mouse_down(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        button: i64,
-    ) -> Result<bool, String> {
-        let _ = (frame, button);
-        Err("runtime host input_mouse_down is not implemented".to_string())
-    }
-    fn input_mouse_pressed(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        button: i64,
-    ) -> Result<bool, String> {
-        let _ = (frame, button);
-        Err("runtime host input_mouse_pressed is not implemented".to_string())
-    }
-    fn input_mouse_released(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        button: i64,
-    ) -> Result<bool, String> {
-        let _ = (frame, button);
-        Err("runtime host input_mouse_released is not implemented".to_string())
-    }
-    fn input_mouse_wheel_y(&mut self, frame: RuntimeAppFrameHandle) -> Result<i64, String> {
-        let _ = frame;
-        Err("runtime host input_mouse_wheel_y is not implemented".to_string())
-    }
-    fn input_mouse_in_window(&mut self, frame: RuntimeAppFrameHandle) -> Result<bool, String> {
-        let _ = frame;
-        Err("runtime host input_mouse_in_window is not implemented".to_string())
-    }
-    fn clipboard_read_text(&mut self) -> Result<String, String> {
-        Err("runtime host clipboard_read_text is not implemented".to_string())
-    }
-    fn clipboard_write_text(&mut self, text: &str) -> Result<(), String> {
-        let _ = text;
-        Err("runtime host clipboard_write_text is not implemented".to_string())
-    }
-    fn clipboard_read_bytes(&mut self) -> Result<Vec<u8>, String> {
-        Err("runtime host clipboard_read_bytes is not implemented".to_string())
-    }
-    fn clipboard_write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let _ = bytes;
-        Err("runtime host clipboard_write_bytes is not implemented".to_string())
-    }
-    fn text_input_composition_area_active(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<bool, String> {
-        let _ = window;
-        Err("runtime host text_input_composition_area_active is not implemented".to_string())
-    }
-    fn text_input_composition_area_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host text_input_composition_area_position is not implemented".to_string())
-    }
-    fn text_input_composition_area_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(i64, i64), String> {
-        let _ = window;
-        Err("runtime host text_input_composition_area_size is not implemented".to_string())
-    }
-    fn text_input_set_composition_area(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        let _ = (window, x, y, width, height);
-        Err("runtime host text_input_set_composition_area is not implemented".to_string())
-    }
-    fn text_input_clear_composition_area(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(), String> {
-        let _ = window;
-        Err("runtime host text_input_clear_composition_area is not implemented".to_string())
-    }
-    fn audio_default_output(&mut self) -> Result<RuntimeAudioDeviceHandle, String> {
-        Err("runtime host audio_default_output is not implemented".to_string())
-    }
-    fn audio_output_close(&mut self, device: RuntimeAudioDeviceHandle) -> Result<(), String> {
-        let _ = device;
-        Err("runtime host audio_output_close is not implemented".to_string())
-    }
-    fn audio_output_sample_rate_hz(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-    ) -> Result<i64, String> {
-        let _ = device;
-        Err("runtime host audio_output_sample_rate_hz is not implemented".to_string())
-    }
-    fn audio_output_channels(&mut self, device: RuntimeAudioDeviceHandle) -> Result<i64, String> {
-        let _ = device;
-        Err("runtime host audio_output_channels is not implemented".to_string())
-    }
-    fn audio_buffer_load_wav(&mut self, path: &str) -> Result<RuntimeAudioBufferHandle, String> {
-        let _ = path;
-        Err("runtime host audio_buffer_load_wav is not implemented".to_string())
-    }
-    fn audio_buffer_frames(&mut self, buffer: RuntimeAudioBufferHandle) -> Result<i64, String> {
-        let _ = buffer;
-        Err("runtime host audio_buffer_frames is not implemented".to_string())
-    }
-    fn audio_buffer_channels(&mut self, buffer: RuntimeAudioBufferHandle) -> Result<i64, String> {
-        let _ = buffer;
-        Err("runtime host audio_buffer_channels is not implemented".to_string())
-    }
-    fn audio_buffer_sample_rate_hz(
-        &mut self,
-        buffer: RuntimeAudioBufferHandle,
-    ) -> Result<i64, String> {
-        let _ = buffer;
-        Err("runtime host audio_buffer_sample_rate_hz is not implemented".to_string())
-    }
-    fn audio_play_buffer(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-        buffer: RuntimeAudioBufferHandle,
-    ) -> Result<RuntimeAudioPlaybackHandle, String> {
-        let _ = (device, buffer);
-        Err("runtime host audio_play_buffer is not implemented".to_string())
-    }
-    fn audio_output_set_gain_milli(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-        milli: i64,
-    ) -> Result<(), String> {
-        let _ = (device, milli);
-        Err("runtime host audio_output_set_gain_milli is not implemented".to_string())
-    }
-    fn audio_playback_stop(&mut self, playback: RuntimeAudioPlaybackHandle) -> Result<(), String> {
-        let _ = playback;
-        Err("runtime host audio_playback_stop is not implemented".to_string())
-    }
-    fn audio_playback_pause(&mut self, playback: RuntimeAudioPlaybackHandle) -> Result<(), String> {
-        let _ = playback;
-        Err("runtime host audio_playback_pause is not implemented".to_string())
-    }
-    fn audio_playback_resume(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<(), String> {
-        let _ = playback;
-        Err("runtime host audio_playback_resume is not implemented".to_string())
-    }
-    fn audio_playback_playing(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        let _ = playback;
-        Err("runtime host audio_playback_playing is not implemented".to_string())
-    }
-    fn audio_playback_paused(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        let _ = playback;
-        Err("runtime host audio_playback_paused is not implemented".to_string())
-    }
-    fn audio_playback_finished(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        let _ = playback;
-        Err("runtime host audio_playback_finished is not implemented".to_string())
-    }
-    fn audio_playback_set_gain_milli(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-        milli: i64,
-    ) -> Result<(), String> {
-        let _ = (playback, milli);
-        Err("runtime host audio_playback_set_gain_milli is not implemented".to_string())
-    }
-    fn audio_playback_set_looping(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-        looping: bool,
-    ) -> Result<(), String> {
-        let _ = (playback, looping);
-        Err("runtime host audio_playback_set_looping is not implemented".to_string())
-    }
-    fn audio_playback_looping(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        let _ = playback;
-        Err("runtime host audio_playback_looping is not implemented".to_string())
-    }
-    fn audio_playback_position_frames(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<i64, String> {
-        let _ = playback;
-        Err("runtime host audio_playback_position_frames is not implemented".to_string())
+        Err("runtime core host stdin_read_line is not implemented".to_string())
     }
     fn monotonic_now_ms(&mut self) -> Result<i64, String> {
-        Err("runtime host monotonic_now_ms is not implemented".to_string())
+        Err("runtime core host monotonic_now_ms is not implemented".to_string())
     }
     fn monotonic_now_ns(&mut self) -> Result<i64, String> {
-        Err("runtime host monotonic_now_ns is not implemented".to_string())
+        Err("runtime core host monotonic_now_ns is not implemented".to_string())
     }
     fn sleep_ms(&mut self, ms: i64) -> Result<(), String> {
         let _ = ms;
-        Err("runtime host sleep_ms is not implemented".to_string())
-    }
-    fn process_exec_status(&mut self, program: &str, args: &[String]) -> Result<i64, String> {
-        let _ = (program, args);
-        Err("process execution is disabled on this runtime host".to_string())
-    }
-    fn process_exec_capture(
-        &mut self,
-        program: &str,
-        args: &[String],
-    ) -> Result<(i64, Vec<u8>, Vec<u8>, bool, bool), String> {
-        let _ = (program, args);
-        Err("process execution is disabled on this runtime host".to_string())
-    }
-    fn text_len_bytes(&mut self, text: &str) -> Result<i64, String> {
-        i64::try_from(text.len()).map_err(|_| "text length does not fit in i64".to_string())
-    }
-    fn text_byte_at(&mut self, text: &str, index: usize) -> Result<i64, String> {
-        let bytes = text.as_bytes();
-        let byte = bytes
-            .get(index)
-            .copied()
-            .ok_or_else(|| format!("text byte index `{index}` is out of bounds"))?;
-        Ok(i64::from(byte))
-    }
-    fn text_slice_bytes(&mut self, text: &str, start: usize, end: usize) -> Result<String, String> {
-        let bytes = text.as_bytes();
-        let slice = bytes
-            .get(start..end)
-            .ok_or_else(|| format!("text byte slice `{start}..{end}` is out of bounds"))?;
-        std::str::from_utf8(slice)
-            .map(|slice| slice.to_string())
-            .map_err(|_| format!("text byte slice `{start}..{end}` is not valid UTF-8"))
-    }
-    fn text_starts_with(&mut self, text: &str, prefix: &str) -> Result<bool, String> {
-        Ok(text.starts_with(prefix))
-    }
-    fn text_ends_with(&mut self, text: &str, suffix: &str) -> Result<bool, String> {
-        Ok(text.ends_with(suffix))
-    }
-    fn text_split_lines(&mut self, text: &str) -> Result<Vec<String>, String> {
-        Ok(text.lines().map(ToString::to_string).collect())
-    }
-    fn text_from_int(&mut self, value: i64) -> Result<String, String> {
-        Ok(value.to_string())
-    }
-    fn bytes_from_str_utf8(&mut self, text: &str) -> Result<Vec<u8>, String> {
-        Ok(text.as_bytes().to_vec())
-    }
-    fn bytes_to_str_utf8(&mut self, bytes: &[u8]) -> Result<String, String> {
-        Ok(String::from_utf8_lossy(bytes).into_owned())
-    }
-    fn bytes_sha256_hex(&mut self, bytes: &[u8]) -> Result<String, String> {
-        let digest = Sha256::digest(bytes);
-        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-    }
-}
-
-#[derive(Debug)]
-struct BufferedFileStream {
-    path: String,
-    file: fs::File,
-    readable: bool,
-    writable: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeEventRecord {
-    kind: i64,
-    window_id: i64,
-    a: i64,
-    b: i64,
-    flags: i64,
-    text: String,
-    key_code: i64,
-    physical_key: i64,
-    logical_key: i64,
-    key_location: i64,
-    pointer_x: i64,
-    pointer_y: i64,
-    repeated: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-struct BufferedEvent {
-    kind: i64,
-    window_id: i64,
-    a: i64,
-    b: i64,
-    flags: i64,
-    text: String,
-    key_code: i64,
-    physical_key: i64,
-    logical_key: i64,
-    key_location: i64,
-    pointer_x: i64,
-    pointer_y: i64,
-    repeated: bool,
-}
-
-fn prioritize_buffered_close_requested(events: &mut Vec<BufferedEvent>) {
-    let Some(index) = events.iter().position(|event| event.kind == 2) else {
-        return;
-    };
-    if index == 0 {
-        return;
-    }
-    let event = events.remove(index);
-    events.insert(0, event);
-}
-
-fn buffered_device_events_allowed(policy: i64, any_window_focused: bool) -> bool {
-    match policy {
-        0 => false,
-        2 => true,
-        _ => any_window_focused,
-    }
-}
-
-fn buffered_device_event_kind(kind: i64) -> bool {
-    matches!(kind, 18 | 19 | 28 | 29)
-}
-
-pub(crate) fn common_named_key_code(name: &str) -> i64 {
-    match name {
-        "Backspace" | "backspace" => 8,
-        "Tab" | "tab" => 9,
-        "Enter" | "enter" => 13,
-        "Shift" | "shift" => 16,
-        "ShiftLeft" | "shiftleft" | "LShift" | "lshift" => 160,
-        "ShiftRight" | "shiftright" | "RShift" | "rshift" => 161,
-        "Control" | "control" | "Ctrl" | "ctrl" => 17,
-        "ControlLeft" | "controlleft" | "CtrlLeft" | "ctrlleft" | "LControl" | "lcontrol"
-        | "LCtrl" | "lctrl" => 162,
-        "ControlRight" | "controlright" | "CtrlRight" | "ctrlright" | "RControl" | "rcontrol"
-        | "RCtrl" | "rctrl" => 163,
-        "Alt" | "alt" => 18,
-        "AltLeft" | "altleft" | "LAlt" | "lalt" => 164,
-        "AltRight" | "altright" | "RAlt" | "ralt" => 165,
-        "Pause" | "pause" => 19,
-        "CapsLock" | "capslock" => 20,
-        "Escape" | "escape" => 27,
-        "Space" | "space" => 32,
-        "PageUp" | "pageup" => 33,
-        "PageDown" | "pagedown" => 34,
-        "End" | "end" => 35,
-        "Home" | "home" => 36,
-        "Left" | "left" => 37,
-        "Up" | "up" => 38,
-        "Right" | "right" => 39,
-        "Down" | "down" => 40,
-        "Insert" | "insert" => 45,
-        "Delete" | "delete" => 46,
-        "Meta" | "meta" | "Super" | "super" | "Command" | "command" => 91,
-        "MetaLeft" | "metaleft" | "SuperLeft" | "superleft" | "CommandLeft" | "commandleft" => 91,
-        "MetaRight" | "metaright" | "SuperRight" | "superright" | "CommandRight"
-        | "commandright" => 92,
-        "Select" | "select" => 93,
-        "NumLock" | "numlock" => 144,
-        "ScrollLock" | "scrolllock" => 145,
-        "Numpad0" | "numpad0" => 96,
-        "Numpad1" | "numpad1" => 97,
-        "Numpad2" | "numpad2" => 98,
-        "Numpad3" | "numpad3" => 99,
-        "Numpad4" | "numpad4" => 100,
-        "Numpad5" | "numpad5" => 101,
-        "Numpad6" | "numpad6" => 102,
-        "Numpad7" | "numpad7" => 103,
-        "Numpad8" | "numpad8" => 104,
-        "Numpad9" | "numpad9" => 105,
-        "NumpadMultiply" | "numpadmultiply" => 106,
-        "NumpadAdd" | "numpadadd" => 107,
-        "NumpadSubtract" | "numpadsubtract" => 109,
-        "NumpadDecimal" | "numpaddecimal" => 110,
-        "NumpadDivide" | "numpaddivide" => 111,
-        "F1" | "f1" => 112,
-        "F2" | "f2" => 113,
-        "F3" | "f3" => 114,
-        "F4" | "f4" => 115,
-        "F5" | "f5" => 116,
-        "F6" | "f6" => 117,
-        "F7" | "f7" => 118,
-        "F8" | "f8" => 119,
-        "F9" | "f9" => 120,
-        "F10" | "f10" => 121,
-        "F11" | "f11" => 122,
-        "F12" | "f12" => 123,
-        "Semicolon" | "semicolon" => 186,
-        "Equal" | "equal" | "Equals" | "equals" => 187,
-        "Comma" | "comma" => 188,
-        "Minus" | "minus" => 189,
-        "Period" | "period" => 190,
-        "Slash" | "slash" => 191,
-        "Backquote" | "backquote" | "Grave" | "grave" => 192,
-        "BracketLeft" | "bracketleft" => 219,
-        "Backslash" | "backslash" => 220,
-        "BracketRight" | "bracketright" => 221,
-        "Quote" | "quote" | "Apostrophe" | "apostrophe" => 222,
-        _ if name.len() == 1 => name.chars().next().unwrap().to_ascii_uppercase() as i64,
-        _ => -1,
-    }
-}
-
-pub(crate) fn common_named_mouse_button_code(name: &str) -> i64 {
-    match name {
-        "Left" | "left" => 1,
-        "Right" | "right" => 2,
-        "Middle" | "middle" => 3,
-        "Back" | "back" | "X1" | "x1" => 4,
-        "Forward" | "forward" | "X2" | "x2" => 5,
-        _ => -1,
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct BufferedFrameInput {
-    key_down: Vec<i64>,
-    key_pressed: Vec<i64>,
-    key_released: Vec<i64>,
-    modifiers: i64,
-    mouse_pos: (i64, i64),
-    mouse_down: Vec<i64>,
-    mouse_pressed: Vec<i64>,
-    mouse_released: Vec<i64>,
-    mouse_wheel_y: i64,
-    mouse_in_window: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct BufferedWindow {
-    title: String,
-    width: i64,
-    height: i64,
-    position: (i64, i64),
-    min_size: (i64, i64),
-    max_size: (i64, i64),
-    scale_factor_milli: i64,
-    theme_code: i64,
-    theme_override_code: i64,
-    resized: bool,
-    fullscreen: bool,
-    minimized: bool,
-    maximized: bool,
-    focused: bool,
-    visible: bool,
-    resizable: bool,
-    decorated: bool,
-    topmost: bool,
-    transparent: bool,
-    cursor_visible: bool,
-    cursor_icon_code: i64,
-    cursor_grab_mode: i64,
-    cursor_position: (i64, i64),
-    text_input_enabled: bool,
-    composition_area_active: bool,
-    composition_area_position: (i64, i64),
-    composition_area_size: (i64, i64),
-    attention_requested: bool,
-    redraw_pending: bool,
-    draw_log: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedImage {
-    path: String,
-    width: i64,
-    height: i64,
-    pixels: Vec<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedAppFrame {
-    events: VecDeque<BufferedEvent>,
-    input: BufferedFrameInput,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedSession {
-    windows: Vec<RuntimeWindowHandle>,
-    resumed: bool,
-    suspended: bool,
-    pending_wakes: usize,
-    device_events_policy: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedWake {
-    session: RuntimeAppSessionHandle,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedAudioDevice {
-    sample_rate_hz: i64,
-    channels: i64,
-    gain_milli: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedAudioBuffer {
-    path: String,
-    frames: i64,
-    channels: i64,
-    sample_rate_hz: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedAudioPlayback {
-    device: RuntimeAudioDeviceHandle,
-    buffer: RuntimeAudioBufferHandle,
-    paused: bool,
-    finished: bool,
-    gain_milli: i64,
-    looping: bool,
-    position_frames: i64,
-}
-
-#[derive(Debug, Default)]
-pub struct BufferedHost {
-    pub stdout: Vec<String>,
-    pub stderr: Vec<String>,
-    pub stdout_flushes: usize,
-    pub stderr_flushes: usize,
-    pub stdin: Vec<String>,
-    pub args: Vec<String>,
-    pub env: BTreeMap<String, String>,
-    pub supported_runtime_requirements: Option<BTreeSet<String>>,
-    pub allow_process: bool,
-    pub cwd: String,
-    pub sandbox_root: String,
-    next_stream_handle: u64,
-    streams: BTreeMap<RuntimeFileStreamHandle, BufferedFileStream>,
-    next_window_handle: u64,
-    windows: BTreeMap<RuntimeWindowHandle, BufferedWindow>,
-    next_image_handle: u64,
-    images: BTreeMap<RuntimeImageHandle, BufferedImage>,
-    next_frame_handle: u64,
-    frames: BTreeMap<RuntimeAppFrameHandle, BufferedAppFrame>,
-    next_session_handle: u64,
-    sessions: BTreeMap<RuntimeAppSessionHandle, BufferedSession>,
-    next_wake_handle: u64,
-    wakes: BTreeMap<RuntimeWakeHandle, BufferedWake>,
-    next_frame_events: Vec<BufferedEvent>,
-    next_frame_input: BufferedFrameInput,
-    clipboard_text: String,
-    clipboard_bytes: Vec<u8>,
-    next_audio_device_handle: u64,
-    audio_devices: BTreeMap<RuntimeAudioDeviceHandle, BufferedAudioDevice>,
-    next_audio_buffer_handle: u64,
-    audio_buffers: BTreeMap<RuntimeAudioBufferHandle, BufferedAudioBuffer>,
-    next_audio_playback_handle: u64,
-    audio_playbacks: BTreeMap<RuntimeAudioPlaybackHandle, BufferedAudioPlayback>,
-    pub monotonic_now_ms: i64,
-    pub monotonic_now_ns: i64,
-    pub monotonic_step_ms: i64,
-    pub monotonic_step_ns: i64,
-    pub sleep_log_ms: Vec<i64>,
-    pub canvas_log: Vec<String>,
-    pub audio_log: Vec<String>,
-}
-
-impl BufferedHost {
-    fn current_working_dir(&self) -> Result<PathBuf, String> {
-        if !self.cwd.is_empty() {
-            return Ok(normalize_lexical_path(Path::new(&self.cwd)));
-        }
-        std::env::current_dir()
-            .map(|path| normalize_lexical_path(&path))
-            .map_err(|err| format!("failed to resolve current directory: {err}"))
-    }
-
-    fn sandbox_root_path(&self) -> Result<Option<PathBuf>, String> {
-        if self.sandbox_root.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(normalize_lexical_path(Path::new(&self.sandbox_root))))
-    }
-
-    fn sandbox_checked_real_path(&self, path: &Path) -> Result<PathBuf, String> {
-        let mut current = Some(path);
-        while let Some(candidate) = current {
-            if candidate.exists() {
-                let real = fs::canonicalize(candidate).map_err(|err| {
-                    format!(
-                        "failed to canonicalize `{}`: {err}",
-                        runtime_path_string(candidate)
-                    )
-                })?;
-                let suffix = path.strip_prefix(candidate).map_err(|_| {
-                    format!(
-                        "failed to make `{}` relative to checked ancestor `{}`",
-                        runtime_path_string(path),
-                        runtime_path_string(candidate)
-                    )
-                })?;
-                return Ok(normalize_lexical_path(&real.join(suffix)));
-            }
-            current = candidate.parent();
-        }
-        Ok(normalize_lexical_path(path))
-    }
-
-    fn resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
-        let requested = PathBuf::from(path);
-        let candidate = if requested.is_absolute() {
-            normalize_lexical_path(&requested)
-        } else {
-            normalize_lexical_path(&self.current_working_dir()?.join(requested))
-        };
-        if let Some(root) = self.sandbox_root_path()? {
-            if !candidate.starts_with(&root) {
-                return Err(format!(
-                    "path `{}` escapes sandbox root `{}`",
-                    runtime_path_string(&candidate),
-                    runtime_path_string(&root)
-                ));
-            }
-            let real_root = self.sandbox_checked_real_path(&root)?;
-            let real_candidate = self.sandbox_checked_real_path(&candidate)?;
-            if !real_candidate.starts_with(&real_root) {
-                return Err(format!(
-                    "path `{}` escapes sandbox root `{}` via real path `{}`",
-                    runtime_path_string(&candidate),
-                    runtime_path_string(&root),
-                    runtime_path_string(&real_candidate)
-                ));
-            }
-        }
-        Ok(candidate)
-    }
-
-    fn insert_stream(
-        &mut self,
-        path: &Path,
-        file: fs::File,
-        readable: bool,
-        writable: bool,
-    ) -> RuntimeFileStreamHandle {
-        let handle = RuntimeFileStreamHandle(self.next_stream_handle);
-        self.next_stream_handle += 1;
-        self.streams.insert(
-            handle,
-            BufferedFileStream {
-                path: runtime_path_string(path),
-                file,
-                readable,
-                writable,
-            },
-        );
-        handle
-    }
-
-    fn stream_mut(
-        &mut self,
-        handle: RuntimeFileStreamHandle,
-    ) -> Result<&mut BufferedFileStream, String> {
-        self.streams
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid FileStream handle `{}`", handle.0))
-    }
-
-    fn insert_window(&mut self, title: &str, width: i64, height: i64) -> RuntimeWindowHandle {
-        let handle = RuntimeWindowHandle(self.next_window_handle);
-        self.next_window_handle += 1;
-        self.windows.insert(
-            handle,
-            BufferedWindow {
-                title: title.to_string(),
-                width,
-                height,
-                min_size: (0, 0),
-                max_size: (0, 0),
-                scale_factor_milli: 1000,
-                theme_code: 1,
-                theme_override_code: 0,
-                visible: true,
-                focused: true,
-                resizable: true,
-                decorated: true,
-                transparent: false,
-                cursor_visible: true,
-                cursor_icon_code: 0,
-                cursor_grab_mode: 0,
-                cursor_position: (0, 0),
-                text_input_enabled: false,
-                composition_area_active: false,
-                composition_area_position: (0, 0),
-                composition_area_size: (0, 0),
-                ..BufferedWindow::default()
-            },
-        );
-        handle
-    }
-
-    fn window_mut(&mut self, handle: RuntimeWindowHandle) -> Result<&mut BufferedWindow, String> {
-        self.windows
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid Window handle `{}`", handle.0))
-    }
-
-    fn window_ref(&self, handle: RuntimeWindowHandle) -> Result<&BufferedWindow, String> {
-        self.windows
-            .get(&handle)
-            .ok_or_else(|| format!("invalid Window handle `{}`", handle.0))
-    }
-
-    fn insert_image(&mut self, path: &str, width: i64, height: i64) -> RuntimeImageHandle {
-        let handle = RuntimeImageHandle(self.next_image_handle);
-        self.next_image_handle += 1;
-        self.images.insert(
-            handle,
-            BufferedImage {
-                path: path.to_string(),
-                width,
-                height,
-                pixels: vec![
-                    0;
-                    usize::try_from(width.max(0).saturating_mul(height.max(0)))
-                        .unwrap_or(0)
-                ],
-            },
-        );
-        handle
-    }
-
-    fn image_mut(&mut self, handle: RuntimeImageHandle) -> Result<&mut BufferedImage, String> {
-        self.images
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid Image handle `{}`", handle.0))
-    }
-
-    fn image_ref(&self, handle: RuntimeImageHandle) -> Result<&BufferedImage, String> {
-        self.images
-            .get(&handle)
-            .ok_or_else(|| format!("invalid Image handle `{}`", handle.0))
-    }
-
-    fn insert_frame(
-        &mut self,
-        events: Vec<BufferedEvent>,
-        input: BufferedFrameInput,
-    ) -> RuntimeAppFrameHandle {
-        let handle = RuntimeAppFrameHandle(self.next_frame_handle);
-        self.next_frame_handle += 1;
-        self.frames.insert(
-            handle,
-            BufferedAppFrame {
-                events: VecDeque::from(events),
-                input,
-            },
-        );
-        handle
-    }
-
-    fn frame_mut(
-        &mut self,
-        handle: RuntimeAppFrameHandle,
-    ) -> Result<&mut BufferedAppFrame, String> {
-        self.frames
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid AppFrame handle `{}`", handle.0))
-    }
-
-    fn frame_ref(&self, handle: RuntimeAppFrameHandle) -> Result<&BufferedAppFrame, String> {
-        self.frames
-            .get(&handle)
-            .ok_or_else(|| format!("invalid AppFrame handle `{}`", handle.0))
-    }
-
-    fn insert_session(&mut self) -> RuntimeAppSessionHandle {
-        let handle = RuntimeAppSessionHandle(self.next_session_handle);
-        self.next_session_handle += 1;
-        self.sessions.insert(
-            handle,
-            BufferedSession {
-                windows: Vec::new(),
-                resumed: false,
-                suspended: false,
-                pending_wakes: 0,
-                device_events_policy: 1,
-            },
-        );
-        handle
-    }
-
-    fn session_mut(
-        &mut self,
-        handle: RuntimeAppSessionHandle,
-    ) -> Result<&mut BufferedSession, String> {
-        self.sessions
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid AppSession handle `{}`", handle.0))
-    }
-
-    fn session_ref(&self, handle: RuntimeAppSessionHandle) -> Result<&BufferedSession, String> {
-        self.sessions
-            .get(&handle)
-            .ok_or_else(|| format!("invalid AppSession handle `{}`", handle.0))
-    }
-
-    fn detach_window_from_sessions(&mut self, window: RuntimeWindowHandle) {
-        for session in self.sessions.values_mut() {
-            session.windows.retain(|candidate| *candidate != window);
-        }
-    }
-
-    fn remove_session_wakes(&mut self, session: RuntimeAppSessionHandle) {
-        self.wakes.retain(|_, wake| wake.session != session);
-    }
-
-    fn prune_missing_session_windows(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<(), String> {
-        let live_windows = self.windows.keys().copied().collect::<BTreeSet<_>>();
-        let session_state = self.session_mut(session)?;
-        session_state
-            .windows
-            .retain(|candidate| live_windows.contains(candidate));
-        Ok(())
-    }
-
-    fn session_window_ids(
-        &self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<BTreeSet<i64>, String> {
-        let mut ids = BTreeSet::new();
-        for window in &self.session_ref(session)?.windows {
-            if !self.windows.contains_key(window) {
-                continue;
-            }
-            let Ok(id) = i64::try_from(window.0) else {
-                continue;
-            };
-            ids.insert(id);
-        }
-        Ok(ids)
-    }
-
-    fn session_has_ready_events(&self, session: RuntimeAppSessionHandle) -> Result<bool, String> {
-        let session_state = self.session_ref(session)?;
-        if !session_state.resumed || session_state.pending_wakes > 0 {
-            return Ok(true);
-        }
-        if session_state.resumed && !session_state.suspended && session_state.windows.is_empty() {
-            return Ok(true);
-        }
-        let session_window_ids = self.session_window_ids(session)?;
-        Ok(self
-            .next_frame_events
-            .iter()
-            .any(|event| event.window_id == 0 || session_window_ids.contains(&event.window_id)))
-    }
-
-    fn insert_wake(&mut self, session: RuntimeAppSessionHandle) -> RuntimeWakeHandle {
-        let handle = RuntimeWakeHandle(self.next_wake_handle);
-        self.next_wake_handle += 1;
-        self.wakes.insert(handle, BufferedWake { session });
-        handle
-    }
-
-    fn wake_ref(&self, handle: RuntimeWakeHandle) -> Result<&BufferedWake, String> {
-        self.wakes
-            .get(&handle)
-            .ok_or_else(|| format!("invalid Wake handle `{}`", handle.0))
-    }
-
-    fn insert_audio_device(
-        &mut self,
-        sample_rate_hz: i64,
-        channels: i64,
-    ) -> RuntimeAudioDeviceHandle {
-        let handle = RuntimeAudioDeviceHandle(self.next_audio_device_handle);
-        self.next_audio_device_handle += 1;
-        self.audio_devices.insert(
-            handle,
-            BufferedAudioDevice {
-                sample_rate_hz,
-                channels,
-                gain_milli: 1000,
-            },
-        );
-        handle
-    }
-
-    fn audio_device_mut(
-        &mut self,
-        handle: RuntimeAudioDeviceHandle,
-    ) -> Result<&mut BufferedAudioDevice, String> {
-        self.audio_devices
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid AudioDevice handle `{}`", handle.0))
-    }
-
-    fn audio_device_ref(
-        &self,
-        handle: RuntimeAudioDeviceHandle,
-    ) -> Result<&BufferedAudioDevice, String> {
-        self.audio_devices
-            .get(&handle)
-            .ok_or_else(|| format!("invalid AudioDevice handle `{}`", handle.0))
-    }
-
-    fn insert_audio_buffer(
-        &mut self,
-        path: &str,
-        frames: i64,
-        channels: i64,
-        sample_rate_hz: i64,
-    ) -> RuntimeAudioBufferHandle {
-        let handle = RuntimeAudioBufferHandle(self.next_audio_buffer_handle);
-        self.next_audio_buffer_handle += 1;
-        self.audio_buffers.insert(
-            handle,
-            BufferedAudioBuffer {
-                path: path.to_string(),
-                frames,
-                channels,
-                sample_rate_hz,
-            },
-        );
-        handle
-    }
-
-    fn audio_buffer_ref(
-        &self,
-        handle: RuntimeAudioBufferHandle,
-    ) -> Result<&BufferedAudioBuffer, String> {
-        self.audio_buffers
-            .get(&handle)
-            .ok_or_else(|| format!("invalid AudioBuffer handle `{}`", handle.0))
-    }
-
-    fn insert_audio_playback(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-        buffer: RuntimeAudioBufferHandle,
-    ) -> Result<RuntimeAudioPlaybackHandle, String> {
-        let gain_milli = self.audio_device_ref(device)?.gain_milli;
-        let handle = RuntimeAudioPlaybackHandle(self.next_audio_playback_handle);
-        self.next_audio_playback_handle += 1;
-        self.audio_playbacks.insert(
-            handle,
-            BufferedAudioPlayback {
-                device,
-                buffer,
-                paused: false,
-                finished: false,
-                gain_milli,
-                looping: false,
-                position_frames: 0,
-            },
-        );
-        Ok(handle)
-    }
-
-    fn audio_playback_mut(
-        &mut self,
-        handle: RuntimeAudioPlaybackHandle,
-    ) -> Result<&mut BufferedAudioPlayback, String> {
-        self.audio_playbacks
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid AudioPlayback handle `{}`", handle.0))
-    }
-
-    fn audio_playback_ref(
-        &self,
-        handle: RuntimeAudioPlaybackHandle,
-    ) -> Result<&BufferedAudioPlayback, String> {
-        self.audio_playbacks
-            .get(&handle)
-            .ok_or_else(|| format!("invalid AudioPlayback handle `{}`", handle.0))
-    }
-}
-
-impl RuntimeHost for BufferedHost {
-    fn supports_runtime_requirement(&self, requirement: &str) -> bool {
-        self.supported_runtime_requirements
-            .as_ref()
-            .is_none_or(|supported| supported.contains(requirement))
-    }
-
-    fn print(&mut self, text: &str) -> Result<(), String> {
-        self.stdout.push(text.to_string());
-        Ok(())
-    }
-
-    fn eprint(&mut self, text: &str) -> Result<(), String> {
-        self.stderr.push(text.to_string());
-        Ok(())
-    }
-
-    fn flush_stdout(&mut self) -> Result<(), String> {
-        self.stdout_flushes += 1;
-        Ok(())
-    }
-
-    fn flush_stderr(&mut self) -> Result<(), String> {
-        self.stderr_flushes += 1;
-        Ok(())
-    }
-
-    fn stdin_read_line(&mut self) -> Result<String, String> {
-        if self.stdin.is_empty() {
-            return Err("stdin has no queued line".to_string());
-        }
-        Ok(self.stdin.remove(0))
-    }
-
-    fn arg_count(&mut self) -> Result<usize, String> {
-        Ok(self.args.len())
-    }
-
-    fn arg_get(&mut self, index: usize) -> Result<String, String> {
-        Ok(self.args.get(index).cloned().unwrap_or_default())
-    }
-
-    fn env_has(&mut self, name: &str) -> Result<bool, String> {
-        Ok(self.env.contains_key(name))
-    }
-
-    fn env_get(&mut self, name: &str) -> Result<String, String> {
-        Ok(self.env.get(name).cloned().unwrap_or_default())
-    }
-
-    fn cwd(&mut self) -> Result<String, String> {
-        Ok(runtime_path_string(&self.current_working_dir()?))
-    }
-
-    fn path_join(&mut self, a: &str, b: &str) -> Result<String, String> {
-        Ok(runtime_path_string(&normalize_lexical_path(
-            &Path::new(a).join(b),
-        )))
-    }
-
-    fn path_normalize(&mut self, path: &str) -> Result<String, String> {
-        Ok(runtime_path_string(&normalize_lexical_path(Path::new(
-            path,
-        ))))
-    }
-
-    fn path_parent(&mut self, path: &str) -> Result<String, String> {
-        Ok(Path::new(path)
-            .parent()
-            .map(runtime_path_string)
-            .unwrap_or_default())
-    }
-
-    fn path_file_name(&mut self, path: &str) -> Result<String, String> {
-        Ok(Path::new(path)
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default())
-    }
-
-    fn path_ext(&mut self, path: &str) -> Result<String, String> {
-        Ok(Path::new(path)
-            .extension()
-            .map(|ext| ext.to_string_lossy().to_string())
-            .unwrap_or_default())
-    }
-
-    fn path_is_absolute(&mut self, path: &str) -> Result<bool, String> {
-        Ok(Path::new(path).is_absolute())
-    }
-
-    fn path_stem(&mut self, path: &str) -> Result<String, String> {
-        Path::new(path)
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .ok_or_else(|| format!("path `{path}` has no stem"))
-    }
-
-    fn path_with_ext(&mut self, path: &str, ext: &str) -> Result<String, String> {
-        let mut updated = PathBuf::from(path);
-        updated.set_extension(ext);
-        Ok(runtime_path_string(&updated))
-    }
-
-    fn path_relative_to(&mut self, path: &str, base: &str) -> Result<String, String> {
-        let path = normalize_lexical_path(Path::new(path));
-        let base = normalize_lexical_path(Path::new(base));
-        diff_paths(&path, &base)
-            .map(|relative| runtime_path_string(&relative))
-            .ok_or_else(|| {
-                format!(
-                    "failed to make `{}` relative to `{}`",
-                    runtime_path_string(&path),
-                    runtime_path_string(&base)
-                )
-            })
-    }
-
-    fn path_canonicalize(&mut self, path: &str) -> Result<String, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::canonicalize(&resolved)
-            .map(|path| runtime_path_string(&normalize_lexical_path(&path)))
-            .map_err(|err| format!("failed to canonicalize `{path}`: {err}"))
-    }
-
-    fn path_strip_prefix(&mut self, path: &str, prefix: &str) -> Result<String, String> {
-        let path = normalize_lexical_path(Path::new(path));
-        let prefix = normalize_lexical_path(Path::new(prefix));
-        path.strip_prefix(&prefix)
-            .map(runtime_path_string)
-            .map_err(|_| {
-                format!(
-                    "path `{}` does not start with `{}`",
-                    runtime_path_string(&path),
-                    runtime_path_string(&prefix)
-                )
-            })
-    }
-
-    fn fs_exists(&mut self, path: &str) -> Result<bool, String> {
-        Ok(self.resolve_fs_path(path)?.exists())
-    }
-
-    fn fs_is_file(&mut self, path: &str) -> Result<bool, String> {
-        Ok(self.resolve_fs_path(path)?.is_file())
-    }
-
-    fn fs_is_dir(&mut self, path: &str) -> Result<bool, String> {
-        Ok(self.resolve_fs_path(path)?.is_dir())
-    }
-
-    fn fs_read_text(&mut self, path: &str) -> Result<String, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::read_to_string(&resolved)
-            .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
-    }
-
-    fn fs_read_bytes(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::read(&resolved)
-            .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
-    }
-
-    fn fs_stream_open_read(&mut self, path: &str) -> Result<RuntimeFileStreamHandle, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        let file = fs::File::open(&resolved).map_err(|err| {
-            format!(
-                "failed to open `{}` for reading: {err}",
-                runtime_path_string(&resolved)
-            )
-        })?;
-        Ok(self.insert_stream(&resolved, file, true, false))
-    }
-
-    fn fs_stream_open_write(
-        &mut self,
-        path: &str,
-        append: bool,
-    ) -> Result<RuntimeFileStreamHandle, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-            })?;
-        }
-        let mut options = fs::OpenOptions::new();
-        options.create(true).write(true);
-        if append {
-            options.append(true);
-        } else {
-            options.truncate(true);
-        }
-        let file = options.open(&resolved).map_err(|err| {
-            format!(
-                "failed to open `{}` for writing: {err}",
-                runtime_path_string(&resolved)
-            )
-        })?;
-        Ok(self.insert_stream(&resolved, file, false, true))
-    }
-
-    fn fs_stream_read(
-        &mut self,
-        stream: RuntimeFileStreamHandle,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, String> {
-        let stream = self.stream_mut(stream)?;
-        if !stream.readable {
-            return Err(format!(
-                "FileStream `{}` is not opened for reading",
-                stream.path
-            ));
-        }
-        let mut buffer = vec![0_u8; max_bytes];
-        let read = stream
-            .file
-            .read(&mut buffer)
-            .map_err(|err| format!("failed to read from FileStream `{}`: {err}", stream.path))?;
-        buffer.truncate(read);
-        Ok(buffer)
-    }
-
-    fn fs_stream_write(
-        &mut self,
-        stream: RuntimeFileStreamHandle,
-        bytes: &[u8],
-    ) -> Result<usize, String> {
-        let stream = self.stream_mut(stream)?;
-        if !stream.writable {
-            return Err(format!(
-                "FileStream `{}` is not opened for writing",
-                stream.path
-            ));
-        }
-        stream
-            .file
-            .write_all(bytes)
-            .map_err(|err| format!("failed to write to FileStream `{}`: {err}", stream.path))?;
-        Ok(bytes.len())
-    }
-
-    fn fs_stream_eof(&mut self, stream: RuntimeFileStreamHandle) -> Result<bool, String> {
-        let stream = self.stream_mut(stream)?;
-        if !stream.readable {
-            return Err(format!(
-                "FileStream `{}` is not opened for reading",
-                stream.path
-            ));
-        }
-        let position = stream
-            .file
-            .stream_position()
-            .map_err(|err| format!("failed to inspect FileStream `{}`: {err}", stream.path))?;
-        let len = stream
-            .file
-            .metadata()
-            .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
-            .len();
-        Ok(position >= len)
-    }
-
-    fn fs_stream_close(&mut self, stream: RuntimeFileStreamHandle) -> Result<(), String> {
-        let Some(mut stream) = self.streams.remove(&stream) else {
-            return Err(format!("invalid FileStream handle `{}`", stream.0));
-        };
-        if stream.writable {
-            stream.file.flush().map_err(|err| {
-                format!(
-                    "failed to flush FileStream `{}` during close: {err}",
-                    stream.path
-                )
-            })?;
-        }
-        Ok(())
-    }
-
-    fn fs_write_text(&mut self, path: &str, text: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-            })?;
-        }
-        fs::write(&resolved, text).map_err(|err| {
-            format!(
-                "failed to write `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_write_bytes(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-            })?;
-        }
-        fs::write(&resolved, bytes).map_err(|err| {
-            format!(
-                "failed to write `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_list_dir(&mut self, path: &str) -> Result<Vec<String>, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        let mut entries = fs::read_dir(&resolved)
-            .map_err(|err| format!("failed to list `{}`: {err}", runtime_path_string(&resolved)))?
-            .map(|entry| {
-                entry
-                    .map(|entry| runtime_path_string(&normalize_lexical_path(&entry.path())))
-                    .map_err(|err| {
-                        format!(
-                            "failed to read directory entry in `{}`: {err}",
-                            runtime_path_string(&resolved)
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        entries.sort();
-        Ok(entries)
-    }
-
-    fn fs_mkdir_all(&mut self, path: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::create_dir_all(&resolved).map_err(|err| {
-            format!(
-                "failed to create `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_create_dir(&mut self, path: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::create_dir(&resolved).map_err(|err| {
-            format!(
-                "failed to create directory `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_remove_file(&mut self, path: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::remove_file(&resolved).map_err(|err| {
-            format!(
-                "failed to remove file `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_remove_dir(&mut self, path: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::remove_dir(&resolved).map_err(|err| {
-            format!(
-                "failed to remove directory `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_remove_dir_all(&mut self, path: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::remove_dir_all(&resolved).map_err(|err| {
-            format!(
-                "failed to remove directory tree `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn fs_copy_file(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let from_resolved = self.resolve_fs_path(from)?;
-        let to_resolved = self.resolve_fs_path(to)?;
-        if let Some(parent) = to_resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-            })?;
-        }
-        fs::copy(&from_resolved, &to_resolved).map_err(|err| {
-            format!(
-                "failed to copy `{}` to `{}`: {err}",
-                runtime_path_string(&from_resolved),
-                runtime_path_string(&to_resolved)
-            )
-        })?;
-        Ok(())
-    }
-
-    fn fs_rename(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let from_resolved = self.resolve_fs_path(from)?;
-        let to_resolved = self.resolve_fs_path(to)?;
-        if let Some(parent) = to_resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-            })?;
-        }
-        fs::rename(&from_resolved, &to_resolved).map_err(|err| {
-            format!(
-                "failed to rename `{}` to `{}`: {err}",
-                runtime_path_string(&from_resolved),
-                runtime_path_string(&to_resolved)
-            )
-        })
-    }
-
-    fn fs_file_size(&mut self, path: &str) -> Result<i64, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        let len = fs::metadata(&resolved)
-            .map_err(|err| format!("failed to stat `{}`: {err}", runtime_path_string(&resolved)))?
-            .len();
-        i64::try_from(len).map_err(|_| format!("file size for `{}` does not fit in i64", path))
-    }
-
-    fn fs_modified_unix_ms(&mut self, path: &str) -> Result<i64, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        let modified = fs::metadata(&resolved)
-            .map_err(|err| format!("failed to stat `{}`: {err}", runtime_path_string(&resolved)))?
-            .modified()
-            .map_err(|err| {
-                format!(
-                    "failed to read modified time for `{}`: {err}",
-                    runtime_path_string(&resolved)
-                )
-            })?;
-        let duration = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|err| {
-                format!(
-                    "modified time for `{}` predates unix epoch: {err}",
-                    runtime_path_string(&resolved)
-                )
-            })?;
-        i64::try_from(duration.as_millis()).map_err(|_| {
-            format!(
-                "modified time for `{}` does not fit in i64 milliseconds",
-                runtime_path_string(&resolved)
-            )
-        })
-    }
-
-    fn window_open(
-        &mut self,
-        title: &str,
-        width: i64,
-        height: i64,
-    ) -> Result<RuntimeWindowHandle, String> {
-        Ok(self.insert_window(title, width, height))
-    }
-
-    fn window_alive(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.windows.contains_key(&window))
-    }
-
-    fn window_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        let window = self.window_ref(window)?;
-        Ok((window.width, window.height))
-    }
-
-    fn window_resized(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.resized)
-    }
-
-    fn window_fullscreen(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.fullscreen)
-    }
-
-    fn window_minimized(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.minimized)
-    }
-
-    fn window_maximized(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.maximized)
-    }
-
-    fn window_focused(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.focused)
-    }
-
-    fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        self.window_ref(window)?;
-        i64::try_from(window.0)
-            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
-    }
-
-    fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        Ok(self.window_ref(window)?.position)
-    }
-
-    fn window_title(&mut self, window: RuntimeWindowHandle) -> Result<String, String> {
-        Ok(self.window_ref(window)?.title.clone())
-    }
-
-    fn window_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.visible)
-    }
-
-    fn window_decorated(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.decorated)
-    }
-
-    fn window_resizable(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.resizable)
-    }
-
-    fn window_topmost(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.topmost)
-    }
-
-    fn window_cursor_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.cursor_visible)
-    }
-
-    fn window_min_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        Ok(self.window_ref(window)?.min_size)
-    }
-
-    fn window_max_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
-        Ok(self.window_ref(window)?.max_size)
-    }
-
-    fn window_scale_factor_milli(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        Ok(self.window_ref(window)?.scale_factor_milli)
-    }
-
-    fn window_theme_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        Ok(self.window_ref(window)?.theme_code)
-    }
-
-    fn window_transparent(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.transparent)
-    }
-
-    fn window_theme_override_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        Ok(self.window_ref(window)?.theme_override_code)
-    }
-
-    fn window_cursor_icon_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        Ok(self.window_ref(window)?.cursor_icon_code)
-    }
-
-    fn window_cursor_grab_mode(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        Ok(self.window_ref(window)?.cursor_grab_mode)
-    }
-
-    fn window_cursor_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(i64, i64), String> {
-        Ok(self.window_ref(window)?.cursor_position)
-    }
-
-    fn window_text_input_enabled(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.text_input_enabled)
-    }
-
-    fn window_current_monitor_index(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
-        self.window_ref(window)?;
-        Ok(0)
-    }
-
-    fn window_primary_monitor_index(&mut self) -> Result<i64, String> {
-        Ok(0)
-    }
-
-    fn window_monitor_count(&mut self) -> Result<i64, String> {
-        Ok(1)
-    }
-
-    fn window_monitor_name(&mut self, index: i64) -> Result<String, String> {
-        if index != 0 {
-            return Err(format!("invalid monitor index `{index}`"));
-        }
-        Ok("Primary".to_string())
-    }
-
-    fn window_monitor_position(&mut self, index: i64) -> Result<(i64, i64), String> {
-        if index != 0 {
-            return Err(format!("invalid monitor index `{index}`"));
-        }
-        Ok((0, 0))
-    }
-
-    fn window_monitor_size(&mut self, index: i64) -> Result<(i64, i64), String> {
-        if index != 0 {
-            return Err(format!("invalid monitor index `{index}`"));
-        }
-        Ok((1920, 1080))
-    }
-
-    fn window_monitor_scale_factor_milli(&mut self, index: i64) -> Result<i64, String> {
-        if index != 0 {
-            return Err(format!("invalid monitor index `{index}`"));
-        }
-        Ok(1000)
-    }
-
-    fn window_monitor_is_primary(&mut self, index: i64) -> Result<bool, String> {
-        if index != 0 {
-            return Err(format!("invalid monitor index `{index}`"));
-        }
-        Ok(true)
-    }
-
-    fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
-        let state = self.window_mut(window)?;
-        if state.title == title {
-            return Ok(());
-        }
-        state.title = title.to_string();
-        Ok(())
-    }
-
-    fn window_set_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.position = (x, y);
-        Ok(())
-    }
-
-    fn window_set_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        window.width = width.max(1);
-        window.height = height.max(1);
-        window.resized = true;
-        Ok(())
-    }
-
-    fn window_set_visible(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.visible = enabled;
-        Ok(())
-    }
-
-    fn window_set_decorated(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.decorated = enabled;
-        Ok(())
-    }
-
-    fn window_set_resizable(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.resizable = enabled;
-        Ok(())
-    }
-
-    fn window_set_min_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.min_size = (width.max(0), height.max(0));
-        Ok(())
-    }
-
-    fn window_set_max_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.max_size = (width.max(0), height.max(0));
-        Ok(())
-    }
-
-    fn window_set_fullscreen(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.fullscreen = enabled;
-        Ok(())
-    }
-
-    fn window_set_minimized(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.minimized = enabled;
-        Ok(())
-    }
-
-    fn window_set_maximized(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.maximized = enabled;
-        Ok(())
-    }
-
-    fn window_set_topmost(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.topmost = enabled;
-        Ok(())
-    }
-
-    fn window_set_cursor_visible(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.cursor_visible = enabled;
-        Ok(())
-    }
-
-    fn window_set_transparent(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.transparent = enabled;
-        Ok(())
-    }
-
-    fn window_set_theme_override_code(
-        &mut self,
-        window: RuntimeWindowHandle,
-        code: i64,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.theme_override_code = code;
-        Ok(())
-    }
-
-    fn window_set_cursor_icon_code(
-        &mut self,
-        window: RuntimeWindowHandle,
-        code: i64,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.cursor_icon_code = code;
-        Ok(())
-    }
-
-    fn window_set_cursor_grab_mode(
-        &mut self,
-        window: RuntimeWindowHandle,
-        mode: i64,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.cursor_grab_mode = mode;
-        Ok(())
-    }
-
-    fn window_set_cursor_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-    ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        window.cursor_position = (x, y);
-        window.draw_log.push(format!("cursor_position:{x},{y}"));
-        Ok(())
-    }
-
-    fn window_set_text_input_enabled(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.text_input_enabled = enabled;
-        Ok(())
-    }
-
-    fn window_request_redraw(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        let window_id = i64::try_from(window.0)
-            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))?;
-        if self.window_ref(window)?.redraw_pending {
-            return Ok(());
-        }
-        self.window_mut(window)?.redraw_pending = true;
-        self.next_frame_events.push(BufferedEvent {
-            kind: 13,
-            window_id,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        });
-        Ok(())
-    }
-
-    fn window_request_attention(
-        &mut self,
-        window: RuntimeWindowHandle,
-        enabled: bool,
-    ) -> Result<(), String> {
-        self.window_mut(window)?.attention_requested = enabled;
-        Ok(())
-    }
-
-    fn window_close(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        self.window_ref(window)?;
-        self.detach_window_from_sessions(window);
-        self.windows
-            .remove(&window)
-            .map(|_| ())
-            .ok_or_else(|| format!("invalid Window handle `{}`", window.0))
-    }
-
-    fn canvas_fill(&mut self, window: RuntimeWindowHandle, color: i64) -> Result<(), String> {
-        let entry = format!("fill:{color}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_rect(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        color: i64,
-    ) -> Result<(), String> {
-        let entry = format!("rect:{x},{y},{w},{h},{color}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_line(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x1: i64,
-        y1: i64,
-        x2: i64,
-        y2: i64,
-        color: i64,
-    ) -> Result<(), String> {
-        let entry = format!("line:{x1},{y1},{x2},{y2},{color}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_circle_fill(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        radius: i64,
-        color: i64,
-    ) -> Result<(), String> {
-        let entry = format!("circle:{x},{y},{radius},{color}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_label(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        text: &str,
-        color: i64,
-    ) -> Result<(), String> {
-        let entry = format!("label:{x},{y},{text},{color}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_label_size(&mut self, text: &str) -> Result<(i64, i64), String> {
-        Ok(text_engine::measure_plain_text(
-            text,
-            text_engine::DEFAULT_FONT_SIZE,
-        ))
-    }
-
-    fn canvas_present(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        let entry = "present".to_string();
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_rgb(&mut self, r: i64, g: i64, b: i64) -> Result<i64, String> {
-        let clamp = |value: i64| value.clamp(0, 255);
-        Ok((clamp(r) << 16) | (clamp(g) << 8) | clamp(b))
-    }
-
-    fn image_load(&mut self, path: &str) -> Result<RuntimeImageHandle, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if !resolved.is_file() {
-            return Err(format!(
-                "image `{}` does not exist",
-                runtime_path_string(&resolved)
-            ));
-        }
-        Ok(self.insert_image(&runtime_path_string(&resolved), 16, 16))
-    }
-
-    fn canvas_image_create(
-        &mut self,
-        width: i64,
-        height: i64,
-    ) -> Result<RuntimeImageHandle, String> {
-        if width < 0 || height < 0 {
-            return Err("canvas_image_create expects non-negative dimensions".to_string());
-        }
-        Ok(self.insert_image(&format!("<generated:{}x{}>", width, height), width, height))
-    }
-
-    fn canvas_image_replace_rgba(
-        &mut self,
-        image: RuntimeImageHandle,
-        rgba: &[u8],
-    ) -> Result<(), String> {
-        let image = self.image_mut(image)?;
-        let expected = usize::try_from(image.width.max(0).saturating_mul(image.height.max(0)))
-            .unwrap_or(0)
-            .saturating_mul(4);
-        if rgba.len() != expected {
-            return Err(format!(
-                "canvas_image_replace_rgba expected {expected} bytes for {}x{} image, got {}",
-                image.width,
-                image.height,
-                rgba.len()
-            ));
-        }
-        image.pixels.clear();
-        image.pixels.reserve(expected / 4);
-        for chunk in rgba.chunks_exact(4) {
-            image.pixels.push(
-                (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]),
-            );
-        }
-        Ok(())
-    }
-
-    fn canvas_image_size(&mut self, image: RuntimeImageHandle) -> Result<(i64, i64), String> {
-        let image = self.image_ref(image)?;
-        Ok((image.width, image.height))
-    }
-
-    fn canvas_blit(
-        &mut self,
-        window: RuntimeWindowHandle,
-        image: RuntimeImageHandle,
-        x: i64,
-        y: i64,
-    ) -> Result<(), String> {
-        let image_path = self.image_ref(image)?.path.clone();
-        let entry = format!("blit:{image_path},{x},{y}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_blit_scaled(
-        &mut self,
-        window: RuntimeWindowHandle,
-        image: RuntimeImageHandle,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-    ) -> Result<(), String> {
-        let image_path = self.image_ref(image)?.path.clone();
-        let entry = format!("blit_scaled:{image_path},{x},{y},{w},{h}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn canvas_blit_region(
-        &mut self,
-        window: RuntimeWindowHandle,
-        image: RuntimeImageHandle,
-        sx: i64,
-        sy: i64,
-        sw: i64,
-        sh: i64,
-        dx: i64,
-        dy: i64,
-        dw: i64,
-        dh: i64,
-    ) -> Result<(), String> {
-        let image_path = self.image_ref(image)?.path.clone();
-        let entry = format!("blit_region:{image_path},{sx},{sy},{sw},{sh},{dx},{dy},{dw},{dh}");
-        self.window_mut(window)?.draw_log.push(entry.clone());
-        self.canvas_log.push(entry);
-        Ok(())
-    }
-
-    fn events_pump(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<RuntimeAppFrameHandle, String> {
-        if !self.windows.contains_key(&window) {
-            return Err(format!("invalid Window handle `{}`", window.0));
-        }
-        let state = self.window_mut(window)?;
-        state.resized = false;
-        state.redraw_pending = false;
-        let events = std::mem::take(&mut self.next_frame_events);
-        let input = std::mem::take(&mut self.next_frame_input);
-        Ok(self.insert_frame(events, input))
-    }
-
-    fn events_poll(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-    ) -> Result<Option<RuntimeEventRecord>, String> {
-        let frame = self.frame_mut(frame)?;
-        let Some(event) = frame.events.pop_front() else {
-            return Ok(None);
-        };
-        Ok(Some(RuntimeEventRecord {
-            kind: event.kind,
-            window_id: event.window_id,
-            a: event.a,
-            b: event.b,
-            flags: event.flags,
-            text: event.text,
-            key_code: event.key_code,
-            physical_key: event.physical_key,
-            logical_key: event.logical_key,
-            key_location: event.key_location,
-            pointer_x: event.pointer_x,
-            pointer_y: event.pointer_y,
-            repeated: event.repeated,
-        }))
-    }
-
-    fn events_session_open(&mut self) -> Result<RuntimeAppSessionHandle, String> {
-        Ok(self.insert_session())
-    }
-
-    fn events_session_close(&mut self, session: RuntimeAppSessionHandle) -> Result<(), String> {
-        let mut windows = self.session_ref(session)?.windows.clone();
-        windows.reverse();
-        self.remove_session_wakes(session);
-        self.sessions.remove(&session);
-        for window in windows {
-            let _ = self.window_close(window);
-        }
-        Ok(())
-    }
-
-    fn events_session_attach_window(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        window: RuntimeWindowHandle,
-    ) -> Result<(), String> {
-        self.window_ref(window)?;
-        let session_state = self.session_mut(session)?;
-        if !session_state.windows.contains(&window) {
-            session_state.windows.push(window);
-            if session_state.suspended {
-                session_state.resumed = false;
-                session_state.suspended = false;
-            }
-        }
-        Ok(())
-    }
-
-    fn events_session_detach_window(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        window: RuntimeWindowHandle,
-    ) -> Result<(), String> {
-        let session_state = self.session_mut(session)?;
-        session_state
-            .windows
-            .retain(|candidate| *candidate != window);
-        Ok(())
-    }
-
-    fn events_session_window_by_id(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        window_id: i64,
-    ) -> Result<Option<RuntimeWindowHandle>, String> {
-        self.prune_missing_session_windows(session)?;
-        let session_windows = self.session_ref(session)?.windows.clone();
-        for window in session_windows {
-            let Ok(id) = self.window_id(window) else {
-                continue;
-            };
-            if id == window_id {
-                return Ok(Some(window));
-            }
-        }
-        Ok(None)
-    }
-
-    fn events_session_window_ids(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<Vec<i64>, String> {
-        self.prune_missing_session_windows(session)?;
-        let session_windows = self.session_ref(session)?.windows.clone();
-        let mut ids = Vec::new();
-        for window in session_windows {
-            let Ok(id) = self.window_id(window) else {
-                continue;
-            };
-            ids.push(id);
-        }
-        Ok(ids)
-    }
-
-    fn events_session_pump(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<RuntimeAppFrameHandle, String> {
-        self.prune_missing_session_windows(session)?;
-        let mut window_events = Vec::new();
-        let mut input = self.next_frame_input.clone();
-        let session_windows = self.session_ref(session)?.windows.clone();
-        let session_window_ids = self.session_window_ids(session)?;
-        let any_window_focused = session_windows.iter().any(|window| {
-            self.windows
-                .get(window)
-                .map(|state| state.focused)
-                .unwrap_or(false)
-        });
-        for window in &session_windows {
-            if let Ok(state) = self.window_mut(*window) {
-                state.resized = false;
-                state.redraw_pending = false;
-            }
-        }
-        let mut remaining_events = Vec::new();
-        let mut pending_events = Vec::new();
-        for event in std::mem::take(&mut self.next_frame_events) {
-            if buffered_device_event_kind(event.kind)
-                || event.window_id == 0
-                || session_window_ids.contains(&event.window_id)
-            {
-                pending_events.push(event);
-            } else {
-                remaining_events.push(event);
-            }
-        }
-        self.next_frame_events = remaining_events;
-        prioritize_buffered_close_requested(&mut pending_events);
-        let device_events_policy = self.session_ref(session)?.device_events_policy;
-        pending_events.retain(|event| {
-            !buffered_device_event_kind(event.kind)
-                || buffered_device_events_allowed(device_events_policy, any_window_focused)
-        });
-        window_events.extend(pending_events);
-        let live_windows = session_windows
-            .iter()
-            .filter(|window| self.windows.contains_key(window))
-            .count();
-        let mut events = Vec::new();
-        {
-            let session_state = self.session_mut(session)?;
-            if !session_state.resumed && live_windows > 0 {
-                events.push(BufferedEvent {
-                    kind: 20,
-                    window_id: 0,
-                    a: 0,
-                    b: 0,
-                    flags: 0,
-                    text: String::new(),
-                    ..BufferedEvent::default()
-                });
-                session_state.resumed = true;
-                session_state.suspended = false;
-            }
-            while session_state.pending_wakes > 0 {
-                session_state.pending_wakes -= 1;
-                events.push(BufferedEvent {
-                    kind: 21,
-                    window_id: 0,
-                    a: 0,
-                    b: 0,
-                    flags: 0,
-                    text: String::new(),
-                    ..BufferedEvent::default()
-                });
-            }
-        }
-        events.extend(window_events);
-        if live_windows == 0 {
-            let session_state = self.session_mut(session)?;
-            if session_state.resumed && !session_state.suspended {
-                events.push(BufferedEvent {
-                    kind: 22,
-                    window_id: 0,
-                    a: 0,
-                    b: 0,
-                    flags: 0,
-                    text: String::new(),
-                    ..BufferedEvent::default()
-                });
-                session_state.suspended = true;
-            }
-        }
-        events.push(BufferedEvent {
-            kind: 23,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        });
-        if input.modifiers == 0 {
-            input.modifiers = 0;
-        }
-        Ok(self.insert_frame(events, input))
-    }
-
-    fn events_session_device_events(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<i64, String> {
-        Ok(self.session_ref(session)?.device_events_policy)
-    }
-
-    fn events_session_set_device_events(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        policy: i64,
-    ) -> Result<(), String> {
-        if !(0..=2).contains(&policy) {
-            return Err(format!("invalid device events policy `{policy}`"));
-        }
-        self.session_mut(session)?.device_events_policy = policy;
-        Ok(())
-    }
-
-    fn events_session_wait(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-        timeout_ms: i64,
-    ) -> Result<RuntimeAppFrameHandle, String> {
-        if !self.session_has_ready_events(session)? {
-            if timeout_ms < 0 {
-                self.sleep_log_ms.push(-1);
-            } else if timeout_ms > 0 {
-                self.sleep_log_ms.push(timeout_ms);
-                self.monotonic_now_ms = self.monotonic_now_ms.saturating_add(timeout_ms);
-                self.monotonic_now_ns = self
-                    .monotonic_now_ns
-                    .saturating_add(timeout_ms.saturating_mul(1_000_000));
-            }
-        }
-        self.events_session_pump(session)
-    }
-
-    fn events_session_create_wake(
-        &mut self,
-        session: RuntimeAppSessionHandle,
-    ) -> Result<RuntimeWakeHandle, String> {
-        self.session_ref(session)?;
-        Ok(self.insert_wake(session))
-    }
-
-    fn events_wake_signal(&mut self, wake: RuntimeWakeHandle) -> Result<(), String> {
-        let session = self.wake_ref(wake)?.session;
-        self.session_mut(session)?.pending_wakes += 1;
-        Ok(())
-    }
-
-    fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
-        Ok(common_named_key_code(name))
-    }
-
-    fn input_key_down(&mut self, frame: RuntimeAppFrameHandle, key: i64) -> Result<bool, String> {
-        Ok(self.frame_ref(frame)?.input.key_down.contains(&key))
-    }
-
-    fn input_key_pressed(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        key: i64,
-    ) -> Result<bool, String> {
-        Ok(self.frame_ref(frame)?.input.key_pressed.contains(&key))
-    }
-
-    fn input_key_released(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        key: i64,
-    ) -> Result<bool, String> {
-        Ok(self.frame_ref(frame)?.input.key_released.contains(&key))
-    }
-
-    fn input_mouse_button_code(&mut self, name: &str) -> Result<i64, String> {
-        Ok(common_named_mouse_button_code(name))
-    }
-
-    fn input_mouse_pos(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64), String> {
-        Ok(self.frame_ref(frame)?.input.mouse_pos)
-    }
-
-    fn input_mouse_down(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        button: i64,
-    ) -> Result<bool, String> {
-        Ok(self.frame_ref(frame)?.input.mouse_down.contains(&button))
-    }
-
-    fn input_mouse_pressed(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        button: i64,
-    ) -> Result<bool, String> {
-        Ok(self.frame_ref(frame)?.input.mouse_pressed.contains(&button))
-    }
-
-    fn input_mouse_released(
-        &mut self,
-        frame: RuntimeAppFrameHandle,
-        button: i64,
-    ) -> Result<bool, String> {
-        Ok(self
-            .frame_ref(frame)?
-            .input
-            .mouse_released
-            .contains(&button))
-    }
-
-    fn input_mouse_wheel_y(&mut self, frame: RuntimeAppFrameHandle) -> Result<i64, String> {
-        Ok(self.frame_ref(frame)?.input.mouse_wheel_y)
-    }
-
-    fn input_mouse_in_window(&mut self, frame: RuntimeAppFrameHandle) -> Result<bool, String> {
-        Ok(self.frame_ref(frame)?.input.mouse_in_window)
-    }
-
-    fn clipboard_read_text(&mut self) -> Result<String, String> {
-        Ok(self.clipboard_text.clone())
-    }
-
-    fn clipboard_write_text(&mut self, text: &str) -> Result<(), String> {
-        self.clipboard_text = text.to_string();
-        Ok(())
-    }
-
-    fn clipboard_read_bytes(&mut self) -> Result<Vec<u8>, String> {
-        Ok(self.clipboard_bytes.clone())
-    }
-
-    fn clipboard_write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.clipboard_bytes = bytes.to_vec();
-        Ok(())
-    }
-
-    fn text_input_composition_area_active(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<bool, String> {
-        Ok(self.window_ref(window)?.composition_area_active)
-    }
-
-    fn text_input_composition_area_position(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(i64, i64), String> {
-        Ok(self.window_ref(window)?.composition_area_position)
-    }
-
-    fn text_input_composition_area_size(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(i64, i64), String> {
-        Ok(self.window_ref(window)?.composition_area_size)
-    }
-
-    fn text_input_set_composition_area(
-        &mut self,
-        window: RuntimeWindowHandle,
-        x: i64,
-        y: i64,
-        width: i64,
-        height: i64,
-    ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        window.composition_area_active = true;
-        window.composition_area_position = (x, y);
-        window.composition_area_size = (width.max(0), height.max(0));
-        Ok(())
-    }
-
-    fn text_input_clear_composition_area(
-        &mut self,
-        window: RuntimeWindowHandle,
-    ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        window.composition_area_active = false;
-        window.composition_area_position = (0, 0);
-        window.composition_area_size = (0, 0);
-        Ok(())
-    }
-
-    fn audio_default_output(&mut self) -> Result<RuntimeAudioDeviceHandle, String> {
-        let handle = self.insert_audio_device(48_000, 2);
-        self.audio_log.push(format!("default_output:{}", handle.0));
-        Ok(handle)
-    }
-
-    fn audio_output_close(&mut self, device: RuntimeAudioDeviceHandle) -> Result<(), String> {
-        if !self.audio_devices.contains_key(&device) {
-            return Err(format!("invalid AudioDevice handle `{}`", device.0));
-        }
-        let playback_handles = self
-            .audio_playbacks
-            .iter()
-            .filter_map(|(handle, playback)| (playback.device == device).then_some(*handle))
-            .collect::<Vec<_>>();
-        for handle in playback_handles {
-            self.audio_playbacks.remove(&handle);
-        }
-        self.audio_devices.remove(&device);
-        self.audio_log.push(format!("output_close:{}", device.0));
-        Ok(())
-    }
-
-    fn audio_output_sample_rate_hz(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-    ) -> Result<i64, String> {
-        Ok(self.audio_device_ref(device)?.sample_rate_hz)
-    }
-
-    fn audio_output_channels(&mut self, device: RuntimeAudioDeviceHandle) -> Result<i64, String> {
-        Ok(self.audio_device_ref(device)?.channels)
-    }
-
-    fn audio_buffer_load_wav(&mut self, path: &str) -> Result<RuntimeAudioBufferHandle, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if !resolved.exists() {
-            return Err(format!(
-                "audio buffer path `{}` does not exist",
-                runtime_path_string(&resolved)
-            ));
-        }
-        let runtime_path = runtime_path_string(&resolved);
-        let handle = self.insert_audio_buffer(&runtime_path, 64, 2, 48_000);
-        self.audio_log
-            .push(format!("buffer_load_wav:{runtime_path}"));
-        Ok(handle)
-    }
-
-    fn audio_buffer_frames(&mut self, buffer: RuntimeAudioBufferHandle) -> Result<i64, String> {
-        Ok(self.audio_buffer_ref(buffer)?.frames)
-    }
-
-    fn audio_buffer_channels(&mut self, buffer: RuntimeAudioBufferHandle) -> Result<i64, String> {
-        Ok(self.audio_buffer_ref(buffer)?.channels)
-    }
-
-    fn audio_buffer_sample_rate_hz(
-        &mut self,
-        buffer: RuntimeAudioBufferHandle,
-    ) -> Result<i64, String> {
-        Ok(self.audio_buffer_ref(buffer)?.sample_rate_hz)
-    }
-
-    fn audio_play_buffer(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-        buffer: RuntimeAudioBufferHandle,
-    ) -> Result<RuntimeAudioPlaybackHandle, String> {
-        let device_state = self.audio_device_ref(device)?;
-        let buffer_state = self.audio_buffer_ref(buffer)?;
-        ensure_audio_buffer_matches_device(
-            device_state.sample_rate_hz,
-            device_state.channels,
-            buffer_state.sample_rate_hz,
-            buffer_state.channels,
-        )?;
-        let buffer_path = self.audio_buffer_ref(buffer)?.path.clone();
-        let handle = self.insert_audio_playback(device, buffer)?;
-        self.audio_log.push(format!(
-            "play_buffer:{},{},{}",
-            device.0, handle.0, buffer_path
-        ));
-        Ok(handle)
-    }
-
-    fn audio_output_set_gain_milli(
-        &mut self,
-        device: RuntimeAudioDeviceHandle,
-        milli: i64,
-    ) -> Result<(), String> {
-        self.audio_device_mut(device)?.gain_milli = milli;
-        self.audio_log
-            .push(format!("output_set_gain_milli:{},{}", device.0, milli));
-        Ok(())
-    }
-
-    fn audio_playback_stop(&mut self, playback: RuntimeAudioPlaybackHandle) -> Result<(), String> {
-        if self.audio_playbacks.remove(&playback).is_none() {
-            return Err(format!("invalid AudioPlayback handle `{}`", playback.0));
-        }
-        self.audio_log.push(format!("playback_stop:{}", playback.0));
-        Ok(())
-    }
-
-    fn audio_playback_pause(&mut self, playback: RuntimeAudioPlaybackHandle) -> Result<(), String> {
-        self.audio_playback_mut(playback)?.paused = true;
-        self.audio_log
-            .push(format!("playback_pause:{}", playback.0));
-        Ok(())
-    }
-
-    fn audio_playback_resume(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<(), String> {
-        self.audio_playback_mut(playback)?.paused = false;
-        self.audio_log
-            .push(format!("playback_resume:{}", playback.0));
-        Ok(())
-    }
-
-    fn audio_playback_playing(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        let playback = self.audio_playback_ref(playback)?;
-        Ok(!playback.paused && !playback.finished)
-    }
-
-    fn audio_playback_paused(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        Ok(self.audio_playback_ref(playback)?.paused)
-    }
-
-    fn audio_playback_finished(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        Ok(self.audio_playback_ref(playback)?.finished)
-    }
-
-    fn audio_playback_set_gain_milli(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-        milli: i64,
-    ) -> Result<(), String> {
-        self.audio_playback_mut(playback)?.gain_milli = milli;
-        self.audio_log
-            .push(format!("playback_set_gain_milli:{},{}", playback.0, milli));
-        Ok(())
-    }
-
-    fn audio_playback_set_looping(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-        looping: bool,
-    ) -> Result<(), String> {
-        self.audio_playback_mut(playback)?.looping = looping;
-        self.audio_log
-            .push(format!("playback_set_looping:{},{}", playback.0, looping));
-        Ok(())
-    }
-
-    fn audio_playback_looping(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<bool, String> {
-        Ok(self.audio_playback_ref(playback)?.looping)
-    }
-
-    fn audio_playback_position_frames(
-        &mut self,
-        playback: RuntimeAudioPlaybackHandle,
-    ) -> Result<i64, String> {
-        Ok(self.audio_playback_ref(playback)?.position_frames)
-    }
-
-    fn monotonic_now_ms(&mut self) -> Result<i64, String> {
-        let now = self.monotonic_now_ms;
-        self.monotonic_now_ms += self.monotonic_step_ms;
-        Ok(now)
-    }
-
-    fn monotonic_now_ns(&mut self) -> Result<i64, String> {
-        let now = self.monotonic_now_ns;
-        self.monotonic_now_ns += self.monotonic_step_ns;
-        Ok(now)
-    }
-
-    fn sleep_ms(&mut self, ms: i64) -> Result<(), String> {
-        self.sleep_log_ms.push(ms);
-        Ok(())
-    }
-
-    fn process_exec_status(&mut self, program: &str, args: &[String]) -> Result<i64, String> {
-        if !self.allow_process {
-            return Err("process execution is disabled on this runtime host".to_string());
-        }
-        let status = std::process::Command::new(program)
-            .args(args)
-            .status()
-            .map_err(|err| format!("failed to run process `{program}`: {err}"))?;
-        Ok(i64::from(status.code().unwrap_or(-1)))
-    }
-
-    fn process_exec_capture(
-        &mut self,
-        program: &str,
-        args: &[String],
-    ) -> Result<(i64, Vec<u8>, Vec<u8>, bool, bool), String> {
-        if !self.allow_process {
-            return Err("process execution is disabled on this runtime host".to_string());
-        }
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|err| format!("failed to run process `{program}`: {err}"))?;
-        let status = i64::from(output.status.code().unwrap_or(-1));
-        let stdout_utf8 = std::str::from_utf8(&output.stdout).is_ok();
-        let stderr_utf8 = std::str::from_utf8(&output.stderr).is_ok();
-        Ok((
-            status,
-            output.stdout,
-            output.stderr,
-            stdout_utf8,
-            stderr_utf8,
-        ))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RuntimeValue {
-    Int(i64),
-    Float {
-        text: String,
-        kind: ParsedFloatKind,
-    },
-    Bool(bool),
-    Str(String),
-    Pair(Box<RuntimeValue>, Box<RuntimeValue>),
-    Array(Vec<RuntimeValue>),
-    List(Vec<RuntimeValue>),
-    Map(Vec<(RuntimeValue, RuntimeValue)>),
-    Range {
-        start: Option<i64>,
-        end: Option<i64>,
-        inclusive_end: bool,
-    },
-    OwnerHandle(String),
-    Ref(RuntimeReferenceValue),
-    Opaque(RuntimeOpaqueValue),
-    Record {
-        name: String,
-        fields: BTreeMap<String, RuntimeValue>,
-    },
-    Variant {
-        name: String,
-        payload: Vec<RuntimeValue>,
-    },
-    Unit,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeCallArg {
-    name: Option<String>,
-    value: RuntimeValue,
-    source_expr: ParsedExpr,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BoundRuntimeArg {
-    value: RuntimeValue,
-    source_expr: ParsedExpr,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RoutineExecutionOutcome {
-    value: RuntimeValue,
-    final_args: Vec<RuntimeValue>,
-    control: Option<FlowSignal>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeLocal {
-    handle: RuntimeLocalHandle,
-    binding_id: u64,
-    mutable: bool,
-    moved: bool,
-    held: bool,
-    take_reserved: bool,
-    value: RuntimeValue,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeAttachedOwner {
-    owner_path: Vec<String>,
-    local_name: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeAttachedObject {
-    object_path: Vec<String>,
-    local_name: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeMemorySpecState {
-    spec: ParsedMemorySpecDecl,
-    handle: Option<RuntimeValue>,
-    handle_policy: Option<RuntimeMemoryHandlePolicy>,
-    owner_keys: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct RuntimeScope {
-    locals: BTreeMap<String, RuntimeLocal>,
-    memory_specs: BTreeMap<String, RuntimeMemorySpecState>,
-    deferred: Vec<ParsedDeferAction>,
-    attached_object_names: BTreeSet<String>,
-    attached_objects: Vec<RuntimeAttachedObject>,
-    attached_owners: Vec<RuntimeAttachedOwner>,
-    inherited_active_owner_keys: Vec<String>,
-    activated_owner_keys: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum FlowSignal {
-    Next,
-    Return(RuntimeValue),
-    Break,
-    Continue,
-    OwnerExit {
-        owner_key: String,
-        exit_name: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RuntimeEvalSignal {
-    Message(String),
-    Return(RuntimeValue),
-    OwnerExit {
-        owner_key: String,
-        exit_name: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeMemoryStrategy {
-    Alloc,
-    Grow,
-    Fixed,
-    Recycle,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeMemoryPressurePolicy {
-    Bounded,
-    Elastic,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeMemoryHandlePolicy {
-    Stable,
-    Unstable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeFrameRecyclePolicy {
-    Manual,
-    Frame,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimePoolRecyclePolicy {
-    FreeList,
-    Strict,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeResetOnPolicy {
-    Manual,
-    Frame,
-    OwnerExit,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeRingOverwritePolicy {
-    Oldest,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeArenaPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    handle: RuntimeMemoryHandlePolicy,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeFrameArenaPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    recycle: RuntimeFrameRecyclePolicy,
-    reset_on: RuntimeResetOnPolicy,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimePoolArenaPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    recycle: RuntimePoolRecyclePolicy,
-    handle: RuntimeMemoryHandlePolicy,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeTempArenaPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    reset_on: RuntimeResetOnPolicy,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeSessionArenaPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    handle: RuntimeMemoryHandlePolicy,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeRingBufferPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    overwrite: RuntimeRingOverwritePolicy,
-    window: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeSlabPolicy {
-    base_capacity: usize,
-    current_limit: usize,
-    growth_step: usize,
-    pressure: RuntimeMemoryPressurePolicy,
-    handle: RuntimeMemoryHandlePolicy,
-    page: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RuntimeMemorySpecMaterializationKind {
-    Arena(RuntimeArenaPolicy),
-    Frame(RuntimeFrameArenaPolicy),
-    Pool(RuntimePoolArenaPolicy),
-    Temp(RuntimeTempArenaPolicy),
-    Session(RuntimeSessionArenaPolicy),
-    Ring(RuntimeRingBufferPolicy),
-    Slab(RuntimeSlabPolicy),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeMemorySpecMaterialization {
-    hook_id: &'static str,
-    handle_policy: RuntimeMemoryHandlePolicy,
-    kind: RuntimeMemorySpecMaterializationKind,
-}
-
-type RuntimeEvalResult<T> = Result<T, RuntimeEvalSignal>;
-
-impl From<String> for RuntimeEvalSignal {
-    fn from(value: String) -> Self {
-        Self::Message(value)
+        Err("runtime core host sleep_ms is not implemented".to_string())
     }
 }
 
@@ -4688,19 +1067,19 @@ pub struct RuntimeExecutionState {
     slabs: BTreeMap<RuntimeSlabHandle, RuntimeSlabState>,
     next_element_view_buffer_handle: u64,
     element_view_buffers: BTreeMap<RuntimeElementViewBufferHandle, RuntimeElementViewBufferState>,
-    next_read_view_handle: u64,
+    next_contiguous_view_id: u64,
     read_views: BTreeMap<RuntimeReadViewHandle, RuntimeReadViewState>,
-    next_edit_view_handle: u64,
+    next_contiguous_edit_view_id: u64,
     edit_views: BTreeMap<RuntimeEditViewHandle, RuntimeEditViewState>,
     next_byte_view_buffer_handle: u64,
     byte_view_buffers: BTreeMap<RuntimeByteViewBufferHandle, RuntimeByteViewBufferState>,
-    next_byte_view_handle: u64,
+    next_u8_view_id: u64,
     byte_views: BTreeMap<RuntimeByteViewHandle, RuntimeByteViewState>,
-    next_byte_edit_view_handle: u64,
+    next_u8_edit_view_id: u64,
     byte_edit_views: BTreeMap<RuntimeByteEditViewHandle, RuntimeByteEditViewState>,
     next_str_view_buffer_handle: u64,
     str_view_buffers: BTreeMap<RuntimeStrViewBufferHandle, RuntimeStrViewBufferState>,
-    next_str_view_handle: u64,
+    next_text_view_id: u64,
     str_views: BTreeMap<RuntimeStrViewHandle, RuntimeStrViewState>,
     next_task_handle: u64,
     tasks: BTreeMap<RuntimeTaskHandle, RuntimeTaskState>,
@@ -4859,10 +1238,17 @@ struct RuntimeByteViewBufferState {
     values: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeForeignByteViewBacking {
+    package_id: &'static str,
+    handle: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeByteViewBacking {
     Buffer(RuntimeByteViewBufferHandle),
     Reference(RuntimeReferenceValue),
+    Foreign(RuntimeForeignByteViewBacking),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4965,372 +1351,6 @@ struct RuntimeTaskState {
 struct RuntimeThreadState {
     type_args: Vec<String>,
     state: RuntimePendingState,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeIntrinsic {
-    IoPrint,
-    IoPrintLine,
-    IoEprint,
-    IoEprintLine,
-    IoFlushStdout,
-    IoFlushStderr,
-    IoStdinReadLineTry,
-    ArgCount,
-    ArgGet,
-    EnvHas,
-    EnvGet,
-    PackageAssetRootTry,
-    PathCwd,
-    PathJoin,
-    PathNormalize,
-    PathParent,
-    PathFileName,
-    PathExt,
-    PathIsAbsolute,
-    PathStemTry,
-    PathWithExt,
-    PathRelativeToTry,
-    PathCanonicalizeTry,
-    PathStripPrefixTry,
-    FsExists,
-    FsIsFile,
-    FsIsDir,
-    FsReadTextTry,
-    FsReadBytesTry,
-    FsStreamOpenReadTry,
-    FsStreamOpenWriteTry,
-    FsStreamReadTry,
-    FsStreamWriteTry,
-    FsStreamEofTry,
-    FsStreamCloseTry,
-    FsWriteTextTry,
-    FsWriteBytesTry,
-    FsListDirTry,
-    FsMkdirAllTry,
-    FsCreateDirTry,
-    FsRemoveFileTry,
-    FsRemoveDirTry,
-    FsRemoveDirAllTry,
-    FsCopyFileTry,
-    FsRenameTry,
-    FsFileSizeTry,
-    FsModifiedUnixMsTry,
-    WindowOpenTry,
-    CanvasAlive,
-    CanvasFill,
-    CanvasRect,
-    CanvasLine,
-    CanvasCircleFill,
-    CanvasLabel,
-    CanvasLabelSize,
-    CanvasPresent,
-    CanvasRgb,
-    ImageLoadTry,
-    CanvasImageCreate,
-    CanvasImageReplaceRgba,
-    CanvasImageSize,
-    CanvasBlit,
-    CanvasBlitScaled,
-    CanvasBlitRegion,
-    WindowSize,
-    WindowResized,
-    WindowFullscreen,
-    WindowMinimized,
-    WindowMaximized,
-    WindowFocused,
-    WindowId,
-    WindowPosition,
-    WindowTitle,
-    WindowVisible,
-    WindowDecorated,
-    WindowResizable,
-    WindowTopmost,
-    WindowCursorVisible,
-    WindowMinSize,
-    WindowMaxSize,
-    WindowScaleFactorMilli,
-    WindowThemeCode,
-    WindowTransparent,
-    WindowThemeOverrideCode,
-    WindowCursorIconCode,
-    WindowCursorGrabMode,
-    WindowCursorPosition,
-    WindowTextInputEnabled,
-    WindowCurrentMonitorIndex,
-    WindowPrimaryMonitorIndex,
-    WindowMonitorCount,
-    WindowMonitorName,
-    WindowMonitorPosition,
-    WindowMonitorSize,
-    WindowMonitorScaleFactorMilli,
-    WindowMonitorIsPrimary,
-    WindowSetTitle,
-    WindowSetPosition,
-    WindowSetSize,
-    WindowSetVisible,
-    WindowSetDecorated,
-    WindowSetResizable,
-    WindowSetMinSize,
-    WindowSetMaxSize,
-    WindowSetFullscreen,
-    WindowSetMinimized,
-    WindowSetMaximized,
-    WindowSetTopmost,
-    WindowSetCursorVisible,
-    WindowSetTransparent,
-    WindowSetThemeOverrideCode,
-    WindowSetCursorIconCode,
-    WindowSetCursorGrabMode,
-    WindowSetCursorPosition,
-    WindowTextInputSetEnabled,
-    WindowRequestRedraw,
-    WindowRequestAttention,
-    WindowClose,
-    EventsPump,
-    EventsPoll,
-    EventsSessionOpen,
-    EventsSessionClose,
-    EventsSessionAttachWindow,
-    EventsSessionDetachWindow,
-    EventsSessionWindowById,
-    EventsSessionWindowIds,
-    EventsSessionPump,
-    EventsSessionWait,
-    EventsSessionDeviceEvents,
-    EventsSessionSetDeviceEvents,
-    EventsSessionCreateWake,
-    EventsWakeSignal,
-    InputKeyCode,
-    InputKeyDown,
-    InputKeyPressed,
-    InputKeyReleased,
-    InputMouseButtonCode,
-    InputMousePos,
-    InputMouseDown,
-    InputMousePressed,
-    InputMouseReleased,
-    InputMouseWheelY,
-    InputMouseInWindow,
-    ClipboardReadTextTry,
-    ClipboardWriteTextTry,
-    ClipboardReadBytesTry,
-    ClipboardWriteBytesTry,
-    TextInputCompositionAreaActive,
-    TextInputCompositionAreaPosition,
-    TextInputCompositionAreaSize,
-    TextInputSetCompositionArea,
-    TextInputClearCompositionArea,
-    StdTimeMonotonicNowMs,
-    TimeMonotonicNowMs,
-    TimeMonotonicNowNs,
-    ConcurrentSleep,
-    ConcurrentBehaviorStep,
-    ConcurrentThreadId,
-    ConcurrentTaskDone,
-    ConcurrentTaskJoin,
-    ConcurrentThreadDone,
-    ConcurrentThreadJoin,
-    ConcurrentChannelNew,
-    ConcurrentChannelSend,
-    ConcurrentChannelRecv,
-    ConcurrentMutexNew,
-    ConcurrentMutexTake,
-    ConcurrentMutexPut,
-    ConcurrentAtomicIntNew,
-    ConcurrentAtomicIntLoad,
-    ConcurrentAtomicIntStore,
-    ConcurrentAtomicIntAdd,
-    ConcurrentAtomicIntSub,
-    ConcurrentAtomicIntSwap,
-    ConcurrentAtomicBoolNew,
-    ConcurrentAtomicBoolLoad,
-    ConcurrentAtomicBoolStore,
-    ConcurrentAtomicBoolSwap,
-    MemoryArenaNew,
-    MemoryArenaAlloc,
-    MemoryArenaLen,
-    MemoryArenaHas,
-    MemoryArenaGet,
-    MemoryArenaBorrowRead,
-    MemoryArenaBorrowEdit,
-    MemoryArenaSet,
-    MemoryArenaRemove,
-    MemoryArenaReset,
-    MemoryFrameNew,
-    MemoryFrameAlloc,
-    MemoryFrameLen,
-    MemoryFrameHas,
-    MemoryFrameGet,
-    MemoryFrameBorrowRead,
-    MemoryFrameBorrowEdit,
-    MemoryFrameSet,
-    MemoryFrameReset,
-    MemoryPoolNew,
-    MemoryPoolAlloc,
-    MemoryPoolLen,
-    MemoryPoolHas,
-    MemoryPoolGet,
-    MemoryPoolBorrowRead,
-    MemoryPoolBorrowEdit,
-    MemoryPoolSet,
-    MemoryPoolRemove,
-    MemoryPoolReset,
-    MemoryPoolLiveIds,
-    MemoryPoolCompact,
-    MemoryTempNew,
-    MemoryTempAlloc,
-    MemoryTempLen,
-    MemoryTempHas,
-    MemoryTempGet,
-    MemoryTempBorrowRead,
-    MemoryTempBorrowEdit,
-    MemoryTempSet,
-    MemoryTempReset,
-    MemorySessionNew,
-    MemorySessionAlloc,
-    MemorySessionLen,
-    MemorySessionHas,
-    MemorySessionGet,
-    MemorySessionBorrowRead,
-    MemorySessionBorrowEdit,
-    MemorySessionSet,
-    MemorySessionReset,
-    MemorySessionSeal,
-    MemorySessionUnseal,
-    MemorySessionIsSealed,
-    MemorySessionLiveIds,
-    MemoryRingNew,
-    MemoryRingPush,
-    MemoryRingTryPop,
-    MemoryRingLen,
-    MemoryRingHas,
-    MemoryRingGet,
-    MemoryRingBorrowRead,
-    MemoryRingBorrowEdit,
-    MemoryRingSet,
-    MemoryRingReset,
-    MemoryRingWindowRead,
-    MemoryRingWindowEdit,
-    MemorySlabNew,
-    MemorySlabAlloc,
-    MemorySlabLen,
-    MemorySlabHas,
-    MemorySlabGet,
-    MemorySlabBorrowRead,
-    MemorySlabBorrowEdit,
-    MemorySlabSet,
-    MemorySlabRemove,
-    MemorySlabReset,
-    MemorySlabSeal,
-    MemorySlabUnseal,
-    MemorySlabIsSealed,
-    MemorySlabLiveIds,
-    MemoryArrayViewRead,
-    MemoryArrayViewEdit,
-    MemoryBytesView,
-    MemoryBytesViewEdit,
-    MemoryStrView,
-    MemoryViewLen,
-    MemoryViewGet,
-    MemoryViewSubview,
-    MemoryEditViewLen,
-    MemoryEditViewGet,
-    MemoryEditViewSet,
-    MemoryEditViewSubviewRead,
-    MemoryEditViewSubviewEdit,
-    MemoryByteViewLen,
-    MemoryByteViewAt,
-    MemoryByteViewSubview,
-    MemoryByteViewToArray,
-    MemoryByteEditViewLen,
-    MemoryByteEditViewAt,
-    MemoryByteEditViewSet,
-    MemoryByteEditViewSubviewRead,
-    MemoryByteEditViewSubviewEdit,
-    MemoryByteEditViewToArray,
-    MemoryStrViewLenBytes,
-    MemoryStrViewByteAt,
-    MemoryStrViewSubview,
-    MemoryStrViewToStr,
-    AudioDefaultOutputTry,
-    AudioOutputClose,
-    AudioOutputSampleRateHz,
-    AudioOutputChannels,
-    AudioBufferLoadWavTry,
-    AudioBufferFrames,
-    AudioBufferChannels,
-    AudioBufferSampleRateHz,
-    AudioPlayBufferTry,
-    AudioOutputSetGainMilli,
-    AudioPlaybackStop,
-    AudioPlaybackPause,
-    AudioPlaybackResume,
-    AudioPlaybackPlaying,
-    AudioPlaybackPaused,
-    AudioPlaybackFinished,
-    AudioPlaybackSetGainMilli,
-    AudioPlaybackSetLooping,
-    AudioPlaybackLooping,
-    AudioPlaybackPositionFrames,
-    ProcessExecStatusTry,
-    ProcessExecCaptureTry,
-    TextLenBytes,
-    TextByteAt,
-    TextSliceBytes,
-    TextStartsWith,
-    TextEndsWith,
-    TextFind,
-    TextContains,
-    TextTrimStart,
-    TextTrimEnd,
-    TextTrim,
-    TextSplit,
-    TextJoin,
-    TextRepeat,
-    TextSplitLines,
-    TextFromInt,
-    TextToIntTry,
-    BytesFromStrUtf8,
-    BytesToStrUtf8,
-    BytesLen,
-    BytesAt,
-    BytesSlice,
-    BytesSha256Hex,
-    OptionIsSome,
-    OptionIsNone,
-    OptionUnwrapOr,
-    ResultOk,
-    ResultErr,
-    ResultIsOk,
-    ResultIsErr,
-    ResultUnwrapOr,
-    ListNew,
-    ListLen,
-    ListIsEmpty,
-    ListPush,
-    ListPop,
-    ListTryPopOr,
-    ArrayNew,
-    ArrayLen,
-    ArrayFromList,
-    ArrayToList,
-    MapNew,
-    MapLen,
-    MapHas,
-    MapGet,
-    MapSet,
-    MapRemove,
-    MapTryGetOr,
-    EcsSetSingleton,
-    EcsHasSingleton,
-    EcsGetSingleton,
-    EcsSpawn,
-    EcsDespawn,
-    EcsSetComponentAt,
-    EcsHasComponentAt,
-    EcsGetComponentAt,
-    EcsRemoveComponentAt,
 }
 
 fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
@@ -5484,13 +1504,11 @@ fn build_opaque_family_types(
                     module.module_id
                 ));
             }
-            let Some(family) = RuntimeOpaqueFamily::from_lang_item_name(&name) else {
+            if !tracked_opaque_lang_item(&name) {
                 continue;
-            };
+            }
             let target_text = target.join(".");
-            let entries = families
-                .entry(family.lang_item_name().to_string())
-                .or_default();
+            let entries = families.entry(name).or_default();
             if !entries.contains(&target_text) {
                 entries.push(target_text);
             }
@@ -6240,919 +2258,44 @@ fn resolve_dynamic_method_candidate_indices(
         .collect()
 }
 
-fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeIntrinsic> {
-    let parts = callable_path.iter().map(String::as_str).collect::<Vec<_>>();
-    match parts.as_slice() {
-        ["std", "io", "print"] | ["std", "kernel", "io", "print"] => {
-            Some(RuntimeIntrinsic::IoPrint)
-        }
-        ["std", "io", "print_line"] => Some(RuntimeIntrinsic::IoPrintLine),
-        ["std", "io", "eprint"] | ["std", "kernel", "io", "eprint"] => {
-            Some(RuntimeIntrinsic::IoEprint)
-        }
-        ["std", "io", "eprint_line"] => Some(RuntimeIntrinsic::IoEprintLine),
-        ["std", "args", "count"] | ["std", "kernel", "args", "arg_count"] => {
-            Some(RuntimeIntrinsic::ArgCount)
-        }
-        ["std", "args", "get"] | ["std", "kernel", "args", "arg_get"] => {
-            Some(RuntimeIntrinsic::ArgGet)
-        }
-        ["std", "env", "has"] | ["std", "kernel", "env", "env_has"] => {
-            Some(RuntimeIntrinsic::EnvHas)
-        }
-        ["std", "env", "get"] | ["std", "kernel", "env", "env_get"] => {
-            Some(RuntimeIntrinsic::EnvGet)
-        }
-        ["std", "io", "flush_stdout"] | ["std", "kernel", "io", "flush_stdout"] => {
-            Some(RuntimeIntrinsic::IoFlushStdout)
-        }
-        ["std", "io", "flush_stderr"] | ["std", "kernel", "io", "flush_stderr"] => {
-            Some(RuntimeIntrinsic::IoFlushStderr)
-        }
-        ["std", "io", "read_line"] | ["std", "kernel", "io", "stdin_read_line"] => {
-            Some(RuntimeIntrinsic::IoStdinReadLineTry)
-        }
-        ["std", "path", "cwd"] | ["std", "kernel", "path", "path_cwd"] => {
-            Some(RuntimeIntrinsic::PathCwd)
-        }
-        ["std", "path", "join"] | ["std", "kernel", "path", "path_join"] => {
-            Some(RuntimeIntrinsic::PathJoin)
-        }
-        ["std", "path", "normalize"] | ["std", "kernel", "path", "path_normalize"] => {
-            Some(RuntimeIntrinsic::PathNormalize)
-        }
-        ["std", "path", "parent"] | ["std", "kernel", "path", "path_parent"] => {
-            Some(RuntimeIntrinsic::PathParent)
-        }
-        ["std", "path", "file_name"] | ["std", "kernel", "path", "path_file_name"] => {
-            Some(RuntimeIntrinsic::PathFileName)
-        }
-        ["std", "path", "ext"] | ["std", "kernel", "path", "path_ext"] => {
-            Some(RuntimeIntrinsic::PathExt)
-        }
-        ["std", "path", "is_absolute"] | ["std", "kernel", "path", "path_is_absolute"] => {
-            Some(RuntimeIntrinsic::PathIsAbsolute)
-        }
-        ["std", "path", "stem"] | ["std", "kernel", "path", "path_stem"] => {
-            Some(RuntimeIntrinsic::PathStemTry)
-        }
-        ["std", "path", "with_ext"] | ["std", "kernel", "path", "path_with_ext"] => {
-            Some(RuntimeIntrinsic::PathWithExt)
-        }
-        ["std", "path", "relative_to"] | ["std", "kernel", "path", "path_relative_to"] => {
-            Some(RuntimeIntrinsic::PathRelativeToTry)
-        }
-        ["std", "path", "canonicalize"] | ["std", "kernel", "path", "path_canonicalize"] => {
-            Some(RuntimeIntrinsic::PathCanonicalizeTry)
-        }
-        ["std", "path", "strip_prefix"] | ["std", "kernel", "path", "path_strip_prefix"] => {
-            Some(RuntimeIntrinsic::PathStripPrefixTry)
-        }
-        ["std", "fs", "exists"] | ["std", "kernel", "fs", "fs_exists"] => {
-            Some(RuntimeIntrinsic::FsExists)
-        }
-        ["std", "fs", "is_file"] | ["std", "kernel", "fs", "fs_is_file"] => {
-            Some(RuntimeIntrinsic::FsIsFile)
-        }
-        ["std", "fs", "is_dir"] | ["std", "kernel", "fs", "fs_is_dir"] => {
-            Some(RuntimeIntrinsic::FsIsDir)
-        }
-        ["std", "fs", "read_text"] | ["std", "kernel", "fs", "fs_read_text"] => {
-            Some(RuntimeIntrinsic::FsReadTextTry)
-        }
-        ["std", "fs", "read_bytes"] | ["std", "kernel", "fs", "fs_read_bytes"] => {
-            Some(RuntimeIntrinsic::FsReadBytesTry)
-        }
-        ["std", "fs", "stream_open_read"] | ["std", "kernel", "fs", "fs_stream_open_read"] => {
-            Some(RuntimeIntrinsic::FsStreamOpenReadTry)
-        }
-        ["std", "fs", "stream_open_write"] | ["std", "kernel", "fs", "fs_stream_open_write"] => {
-            Some(RuntimeIntrinsic::FsStreamOpenWriteTry)
-        }
-        ["std", "fs", "stream_read"] | ["std", "kernel", "fs", "fs_stream_read"] => {
-            Some(RuntimeIntrinsic::FsStreamReadTry)
-        }
-        ["std", "fs", "stream_write"] | ["std", "kernel", "fs", "fs_stream_write"] => {
-            Some(RuntimeIntrinsic::FsStreamWriteTry)
-        }
-        ["std", "fs", "stream_eof"] | ["std", "kernel", "fs", "fs_stream_eof"] => {
-            Some(RuntimeIntrinsic::FsStreamEofTry)
-        }
-        ["std", "fs", "stream_close"] | ["std", "kernel", "fs", "fs_stream_close"] => {
-            Some(RuntimeIntrinsic::FsStreamCloseTry)
-        }
-        ["std", "fs", "write_text"] | ["std", "kernel", "fs", "fs_write_text"] => {
-            Some(RuntimeIntrinsic::FsWriteTextTry)
-        }
-        ["std", "fs", "write_bytes"] | ["std", "kernel", "fs", "fs_write_bytes"] => {
-            Some(RuntimeIntrinsic::FsWriteBytesTry)
-        }
-        ["std", "fs", "list_dir"] | ["std", "kernel", "fs", "fs_list_dir"] => {
-            Some(RuntimeIntrinsic::FsListDirTry)
-        }
-        ["std", "fs", "mkdir_all"] | ["std", "kernel", "fs", "fs_mkdir_all"] => {
-            Some(RuntimeIntrinsic::FsMkdirAllTry)
-        }
-        ["std", "fs", "create_dir"] | ["std", "kernel", "fs", "fs_create_dir"] => {
-            Some(RuntimeIntrinsic::FsCreateDirTry)
-        }
-        ["std", "fs", "remove_file"] | ["std", "kernel", "fs", "fs_remove_file"] => {
-            Some(RuntimeIntrinsic::FsRemoveFileTry)
-        }
-        ["std", "fs", "remove_dir"] | ["std", "kernel", "fs", "fs_remove_dir"] => {
-            Some(RuntimeIntrinsic::FsRemoveDirTry)
-        }
-        ["std", "fs", "remove_dir_all"] | ["std", "kernel", "fs", "fs_remove_dir_all"] => {
-            Some(RuntimeIntrinsic::FsRemoveDirAllTry)
-        }
-        ["std", "fs", "copy_file"] | ["std", "kernel", "fs", "fs_copy_file"] => {
-            Some(RuntimeIntrinsic::FsCopyFileTry)
-        }
-        ["std", "fs", "rename"] | ["std", "kernel", "fs", "fs_rename"] => {
-            Some(RuntimeIntrinsic::FsRenameTry)
-        }
-        ["std", "fs", "file_size"] | ["std", "kernel", "fs", "fs_file_size"] => {
-            Some(RuntimeIntrinsic::FsFileSizeTry)
-        }
-        ["std", "fs", "modified_unix_ms"] | ["std", "kernel", "fs", "fs_modified_unix_ms"] => {
-            Some(RuntimeIntrinsic::FsModifiedUnixMsTry)
-        }
-        ["std", "process", "exec_status"] | ["std", "kernel", "process", "process_exec_status"] => {
-            Some(RuntimeIntrinsic::ProcessExecStatusTry)
-        }
-        ["std", "process", "exec_capture"]
-        | ["std", "kernel", "process", "process_exec_capture"] => {
-            Some(RuntimeIntrinsic::ProcessExecCaptureTry)
-        }
-        ["std", "concurrent", "channel"] | ["std", "kernel", "concurrency", "channel_new"] => {
-            Some(RuntimeIntrinsic::ConcurrentChannelNew)
-        }
-        ["std", "concurrent", "mutex"] | ["std", "kernel", "concurrency", "mutex_new"] => {
-            Some(RuntimeIntrinsic::ConcurrentMutexNew)
-        }
-        ["std", "concurrent", "atomic_int"]
-        | ["std", "kernel", "concurrency", "atomic_int_new"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicIntNew)
-        }
-        ["std", "concurrent", "atomic_bool"]
-        | ["std", "kernel", "concurrency", "atomic_bool_new"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicBoolNew)
-        }
-        ["std", "concurrent", "sleep"] | ["std", "kernel", "concurrency", "sleep"] => {
-            Some(RuntimeIntrinsic::ConcurrentSleep)
-        }
-        ["std", "concurrent", "thread_id"] | ["std", "kernel", "concurrency", "thread_id"] => {
-            Some(RuntimeIntrinsic::ConcurrentThreadId)
-        }
-        ["std", "time", "monotonic_now_ms"] => Some(RuntimeIntrinsic::StdTimeMonotonicNowMs),
-        ["std", "kernel", "time", "monotonic_now_ms"] => Some(RuntimeIntrinsic::TimeMonotonicNowMs),
-        ["std", "time", "monotonic_now_ns"] | ["std", "kernel", "time", "monotonic_now_ns"] => {
-            Some(RuntimeIntrinsic::TimeMonotonicNowNs)
-        }
-        ["std", "kernel", "concurrency", "task_done"] => Some(RuntimeIntrinsic::ConcurrentTaskDone),
-        ["std", "kernel", "concurrency", "task_join"] => Some(RuntimeIntrinsic::ConcurrentTaskJoin),
-        ["std", "kernel", "concurrency", "thread_done"] => {
-            Some(RuntimeIntrinsic::ConcurrentThreadDone)
-        }
-        ["std", "kernel", "concurrency", "thread_join"] => {
-            Some(RuntimeIntrinsic::ConcurrentThreadJoin)
-        }
-        ["std", "memory", "new"] | ["std", "kernel", "memory", "arena_new"] => {
-            Some(RuntimeIntrinsic::MemoryArenaNew)
-        }
-        ["std", "memory", "frame_new"] | ["std", "kernel", "memory", "frame_new"] => {
-            Some(RuntimeIntrinsic::MemoryFrameNew)
-        }
-        ["std", "memory", "pool_new"] | ["std", "kernel", "memory", "pool_new"] => {
-            Some(RuntimeIntrinsic::MemoryPoolNew)
-        }
-        ["std", "kernel", "memory", "arena_alloc"] => Some(RuntimeIntrinsic::MemoryArenaAlloc),
-        ["std", "kernel", "memory", "arena_len"] => Some(RuntimeIntrinsic::MemoryArenaLen),
-        ["std", "kernel", "memory", "arena_has"] => Some(RuntimeIntrinsic::MemoryArenaHas),
-        ["std", "kernel", "memory", "arena_get"] => Some(RuntimeIntrinsic::MemoryArenaGet),
-        ["std", "kernel", "memory", "arena_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemoryArenaBorrowRead)
-        }
-        ["std", "kernel", "memory", "arena_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemoryArenaBorrowEdit)
-        }
-        ["std", "kernel", "memory", "arena_set"] => Some(RuntimeIntrinsic::MemoryArenaSet),
-        ["std", "kernel", "memory", "arena_remove"] => Some(RuntimeIntrinsic::MemoryArenaRemove),
-        ["std", "kernel", "memory", "arena_reset"] => Some(RuntimeIntrinsic::MemoryArenaReset),
-        ["std", "kernel", "memory", "frame_alloc"] => Some(RuntimeIntrinsic::MemoryFrameAlloc),
-        ["std", "kernel", "memory", "frame_len"] => Some(RuntimeIntrinsic::MemoryFrameLen),
-        ["std", "kernel", "memory", "frame_has"] => Some(RuntimeIntrinsic::MemoryFrameHas),
-        ["std", "kernel", "memory", "frame_get"] => Some(RuntimeIntrinsic::MemoryFrameGet),
-        ["std", "kernel", "memory", "frame_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemoryFrameBorrowRead)
-        }
-        ["std", "kernel", "memory", "frame_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemoryFrameBorrowEdit)
-        }
-        ["std", "kernel", "memory", "frame_set"] => Some(RuntimeIntrinsic::MemoryFrameSet),
-        ["std", "kernel", "memory", "frame_reset"] => Some(RuntimeIntrinsic::MemoryFrameReset),
-        ["std", "kernel", "memory", "pool_alloc"] => Some(RuntimeIntrinsic::MemoryPoolAlloc),
-        ["std", "kernel", "memory", "pool_len"] => Some(RuntimeIntrinsic::MemoryPoolLen),
-        ["std", "kernel", "memory", "pool_has"] => Some(RuntimeIntrinsic::MemoryPoolHas),
-        ["std", "kernel", "memory", "pool_get"] => Some(RuntimeIntrinsic::MemoryPoolGet),
-        ["std", "kernel", "memory", "pool_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemoryPoolBorrowRead)
-        }
-        ["std", "kernel", "memory", "pool_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemoryPoolBorrowEdit)
-        }
-        ["std", "kernel", "memory", "pool_set"] => Some(RuntimeIntrinsic::MemoryPoolSet),
-        ["std", "kernel", "memory", "pool_remove"] => Some(RuntimeIntrinsic::MemoryPoolRemove),
-        ["std", "kernel", "memory", "pool_reset"] => Some(RuntimeIntrinsic::MemoryPoolReset),
-        ["std", "kernel", "memory", "pool_live_ids"] => Some(RuntimeIntrinsic::MemoryPoolLiveIds),
-        ["std", "kernel", "memory", "pool_compact"] => Some(RuntimeIntrinsic::MemoryPoolCompact),
-        ["std", "memory", "temp_new"] | ["std", "kernel", "memory", "temp_new"] => {
-            Some(RuntimeIntrinsic::MemoryTempNew)
-        }
-        ["std", "kernel", "memory", "temp_alloc"] => Some(RuntimeIntrinsic::MemoryTempAlloc),
-        ["std", "kernel", "memory", "temp_len"] => Some(RuntimeIntrinsic::MemoryTempLen),
-        ["std", "kernel", "memory", "temp_has"] => Some(RuntimeIntrinsic::MemoryTempHas),
-        ["std", "kernel", "memory", "temp_get"] => Some(RuntimeIntrinsic::MemoryTempGet),
-        ["std", "kernel", "memory", "temp_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemoryTempBorrowRead)
-        }
-        ["std", "kernel", "memory", "temp_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemoryTempBorrowEdit)
-        }
-        ["std", "kernel", "memory", "temp_set"] => Some(RuntimeIntrinsic::MemoryTempSet),
-        ["std", "kernel", "memory", "temp_reset"] => Some(RuntimeIntrinsic::MemoryTempReset),
-        ["std", "memory", "session_new"] | ["std", "kernel", "memory", "session_new"] => {
-            Some(RuntimeIntrinsic::MemorySessionNew)
-        }
-        ["std", "kernel", "memory", "session_alloc"] => Some(RuntimeIntrinsic::MemorySessionAlloc),
-        ["std", "kernel", "memory", "session_len"] => Some(RuntimeIntrinsic::MemorySessionLen),
-        ["std", "kernel", "memory", "session_has"] => Some(RuntimeIntrinsic::MemorySessionHas),
-        ["std", "kernel", "memory", "session_get"] => Some(RuntimeIntrinsic::MemorySessionGet),
-        ["std", "kernel", "memory", "session_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemorySessionBorrowRead)
-        }
-        ["std", "kernel", "memory", "session_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemorySessionBorrowEdit)
-        }
-        ["std", "kernel", "memory", "session_set"] => Some(RuntimeIntrinsic::MemorySessionSet),
-        ["std", "kernel", "memory", "session_reset"] => Some(RuntimeIntrinsic::MemorySessionReset),
-        ["std", "kernel", "memory", "session_seal"] => Some(RuntimeIntrinsic::MemorySessionSeal),
-        ["std", "kernel", "memory", "session_unseal"] => {
-            Some(RuntimeIntrinsic::MemorySessionUnseal)
-        }
-        ["std", "kernel", "memory", "session_is_sealed"] => {
-            Some(RuntimeIntrinsic::MemorySessionIsSealed)
-        }
-        ["std", "kernel", "memory", "session_live_ids"] => {
-            Some(RuntimeIntrinsic::MemorySessionLiveIds)
-        }
-        ["std", "memory", "ring_new"] | ["std", "kernel", "memory", "ring_new"] => {
-            Some(RuntimeIntrinsic::MemoryRingNew)
-        }
-        ["std", "kernel", "memory", "ring_push"] => Some(RuntimeIntrinsic::MemoryRingPush),
-        ["std", "kernel", "memory", "ring_try_pop"] => Some(RuntimeIntrinsic::MemoryRingTryPop),
-        ["std", "kernel", "memory", "ring_len"] => Some(RuntimeIntrinsic::MemoryRingLen),
-        ["std", "kernel", "memory", "ring_has"] => Some(RuntimeIntrinsic::MemoryRingHas),
-        ["std", "kernel", "memory", "ring_get"] => Some(RuntimeIntrinsic::MemoryRingGet),
-        ["std", "kernel", "memory", "ring_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemoryRingBorrowRead)
-        }
-        ["std", "kernel", "memory", "ring_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemoryRingBorrowEdit)
-        }
-        ["std", "kernel", "memory", "ring_set"] => Some(RuntimeIntrinsic::MemoryRingSet),
-        ["std", "kernel", "memory", "ring_reset"] => Some(RuntimeIntrinsic::MemoryRingReset),
-        ["std", "kernel", "memory", "ring_window_read"] => {
-            Some(RuntimeIntrinsic::MemoryRingWindowRead)
-        }
-        ["std", "kernel", "memory", "ring_window_edit"] => {
-            Some(RuntimeIntrinsic::MemoryRingWindowEdit)
-        }
-        ["std", "memory", "slab_new"] | ["std", "kernel", "memory", "slab_new"] => {
-            Some(RuntimeIntrinsic::MemorySlabNew)
-        }
-        ["std", "kernel", "memory", "slab_alloc"] => Some(RuntimeIntrinsic::MemorySlabAlloc),
-        ["std", "kernel", "memory", "slab_len"] => Some(RuntimeIntrinsic::MemorySlabLen),
-        ["std", "kernel", "memory", "slab_has"] => Some(RuntimeIntrinsic::MemorySlabHas),
-        ["std", "kernel", "memory", "slab_get"] => Some(RuntimeIntrinsic::MemorySlabGet),
-        ["std", "kernel", "memory", "slab_borrow_read"] => {
-            Some(RuntimeIntrinsic::MemorySlabBorrowRead)
-        }
-        ["std", "kernel", "memory", "slab_borrow_edit"] => {
-            Some(RuntimeIntrinsic::MemorySlabBorrowEdit)
-        }
-        ["std", "kernel", "memory", "slab_set"] => Some(RuntimeIntrinsic::MemorySlabSet),
-        ["std", "kernel", "memory", "slab_remove"] => Some(RuntimeIntrinsic::MemorySlabRemove),
-        ["std", "kernel", "memory", "slab_reset"] => Some(RuntimeIntrinsic::MemorySlabReset),
-        ["std", "kernel", "memory", "slab_seal"] => Some(RuntimeIntrinsic::MemorySlabSeal),
-        ["std", "kernel", "memory", "slab_unseal"] => Some(RuntimeIntrinsic::MemorySlabUnseal),
-        ["std", "kernel", "memory", "slab_is_sealed"] => Some(RuntimeIntrinsic::MemorySlabIsSealed),
-        ["std", "kernel", "memory", "slab_live_ids"] => Some(RuntimeIntrinsic::MemorySlabLiveIds),
-        ["std", "kernel", "memory", "array_view_read"] => {
-            Some(RuntimeIntrinsic::MemoryArrayViewRead)
-        }
-        ["std", "kernel", "memory", "array_view_edit"] => {
-            Some(RuntimeIntrinsic::MemoryArrayViewEdit)
-        }
-        ["std", "kernel", "memory", "bytes_view"] => Some(RuntimeIntrinsic::MemoryBytesView),
-        ["std", "kernel", "memory", "bytes_view_edit"] => {
-            Some(RuntimeIntrinsic::MemoryBytesViewEdit)
-        }
-        ["std", "kernel", "memory", "str_view"] => Some(RuntimeIntrinsic::MemoryStrView),
-        ["std", "kernel", "memory", "view_len"] => Some(RuntimeIntrinsic::MemoryViewLen),
-        ["std", "kernel", "memory", "view_get"] => Some(RuntimeIntrinsic::MemoryViewGet),
-        ["std", "kernel", "memory", "view_subview"] => Some(RuntimeIntrinsic::MemoryViewSubview),
-        ["std", "kernel", "memory", "edit_view_len"] => Some(RuntimeIntrinsic::MemoryEditViewLen),
-        ["std", "kernel", "memory", "edit_view_get"] => Some(RuntimeIntrinsic::MemoryEditViewGet),
-        ["std", "kernel", "memory", "edit_view_set"] => Some(RuntimeIntrinsic::MemoryEditViewSet),
-        ["std", "kernel", "memory", "edit_view_subview_read"] => {
-            Some(RuntimeIntrinsic::MemoryEditViewSubviewRead)
-        }
-        ["std", "kernel", "memory", "edit_view_subview_edit"] => {
-            Some(RuntimeIntrinsic::MemoryEditViewSubviewEdit)
-        }
-        ["std", "kernel", "memory", "byte_view_len"] => Some(RuntimeIntrinsic::MemoryByteViewLen),
-        ["std", "kernel", "memory", "byte_view_at"] => Some(RuntimeIntrinsic::MemoryByteViewAt),
-        ["std", "kernel", "memory", "byte_view_subview"] => {
-            Some(RuntimeIntrinsic::MemoryByteViewSubview)
-        }
-        ["std", "kernel", "memory", "byte_view_to_array"] => {
-            Some(RuntimeIntrinsic::MemoryByteViewToArray)
-        }
-        ["std", "kernel", "memory", "byte_edit_view_len"] => {
-            Some(RuntimeIntrinsic::MemoryByteEditViewLen)
-        }
-        ["std", "kernel", "memory", "byte_edit_view_at"] => {
-            Some(RuntimeIntrinsic::MemoryByteEditViewAt)
-        }
-        ["std", "kernel", "memory", "byte_edit_view_set"] => {
-            Some(RuntimeIntrinsic::MemoryByteEditViewSet)
-        }
-        ["std", "kernel", "memory", "byte_edit_view_subview_read"] => {
-            Some(RuntimeIntrinsic::MemoryByteEditViewSubviewRead)
-        }
-        ["std", "kernel", "memory", "byte_edit_view_subview_edit"] => {
-            Some(RuntimeIntrinsic::MemoryByteEditViewSubviewEdit)
-        }
-        ["std", "kernel", "memory", "byte_edit_view_to_array"] => {
-            Some(RuntimeIntrinsic::MemoryByteEditViewToArray)
-        }
-        ["std", "kernel", "memory", "str_view_len_bytes"] => {
-            Some(RuntimeIntrinsic::MemoryStrViewLenBytes)
-        }
-        ["std", "kernel", "memory", "str_view_byte_at"] => {
-            Some(RuntimeIntrinsic::MemoryStrViewByteAt)
-        }
-        ["std", "kernel", "memory", "str_view_subview"] => {
-            Some(RuntimeIntrinsic::MemoryStrViewSubview)
-        }
-        ["std", "kernel", "memory", "str_view_to_str"] => {
-            Some(RuntimeIntrinsic::MemoryStrViewToStr)
-        }
-        ["std", "kernel", "concurrency", "channel_send"] => {
-            Some(RuntimeIntrinsic::ConcurrentChannelSend)
-        }
-        ["std", "kernel", "concurrency", "channel_recv"] => {
-            Some(RuntimeIntrinsic::ConcurrentChannelRecv)
-        }
-        ["std", "kernel", "concurrency", "mutex_take"] => {
-            Some(RuntimeIntrinsic::ConcurrentMutexTake)
-        }
-        ["std", "kernel", "concurrency", "mutex_put"] => Some(RuntimeIntrinsic::ConcurrentMutexPut),
-        ["std", "kernel", "concurrency", "atomic_int_load"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicIntLoad)
-        }
-        ["std", "kernel", "concurrency", "atomic_int_store"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicIntStore)
-        }
-        ["std", "kernel", "concurrency", "atomic_int_add"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicIntAdd)
-        }
-        ["std", "kernel", "concurrency", "atomic_int_sub"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicIntSub)
-        }
-        ["std", "kernel", "concurrency", "atomic_int_swap"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicIntSwap)
-        }
-        ["std", "kernel", "concurrency", "atomic_bool_load"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicBoolLoad)
-        }
-        ["std", "kernel", "concurrency", "atomic_bool_store"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicBoolStore)
-        }
-        ["std", "kernel", "concurrency", "atomic_bool_swap"] => {
-            Some(RuntimeIntrinsic::ConcurrentAtomicBoolSwap)
-        }
-        ["std", "text", "len_bytes"] | ["std", "kernel", "text", "text_len_bytes"] => {
-            Some(RuntimeIntrinsic::TextLenBytes)
-        }
-        ["std", "text", "byte_at"] | ["std", "kernel", "text", "text_byte_at"] => {
-            Some(RuntimeIntrinsic::TextByteAt)
-        }
-        ["std", "text", "slice_bytes"] | ["std", "kernel", "text", "text_slice_bytes"] => {
-            Some(RuntimeIntrinsic::TextSliceBytes)
-        }
-        ["std", "text", "starts_with"] | ["std", "kernel", "text", "text_starts_with"] => {
-            Some(RuntimeIntrinsic::TextStartsWith)
-        }
-        ["std", "text", "ends_with"] | ["std", "kernel", "text", "text_ends_with"] => {
-            Some(RuntimeIntrinsic::TextEndsWith)
-        }
-        ["std", "text", "find"] => Some(RuntimeIntrinsic::TextFind),
-        ["std", "text", "contains"] => Some(RuntimeIntrinsic::TextContains),
-        ["std", "text", "trim_start"] => Some(RuntimeIntrinsic::TextTrimStart),
-        ["std", "text", "trim_end"] => Some(RuntimeIntrinsic::TextTrimEnd),
-        ["std", "text", "trim"] => Some(RuntimeIntrinsic::TextTrim),
-        ["std", "text", "split"] => Some(RuntimeIntrinsic::TextSplit),
-        ["std", "text", "join"] => Some(RuntimeIntrinsic::TextJoin),
-        ["std", "text", "repeat"] => Some(RuntimeIntrinsic::TextRepeat),
-        ["std", "text", "split_lines"] | ["std", "kernel", "text", "text_split_lines"] => {
-            Some(RuntimeIntrinsic::TextSplitLines)
-        }
-        ["std", "text", "from_int"] | ["std", "kernel", "text", "text_from_int"] => {
-            Some(RuntimeIntrinsic::TextFromInt)
-        }
-        ["std", "text", "to_int"] => Some(RuntimeIntrinsic::TextToIntTry),
-        ["std", "bytes", "from_str_utf8"] | ["std", "kernel", "text", "bytes_from_str_utf8"] => {
-            Some(RuntimeIntrinsic::BytesFromStrUtf8)
-        }
-        ["std", "bytes", "to_str_utf8"] | ["std", "kernel", "text", "bytes_to_str_utf8"] => {
-            Some(RuntimeIntrinsic::BytesToStrUtf8)
-        }
-        ["std", "bytes", "len"] | ["std", "kernel", "text", "bytes_len"] => {
-            Some(RuntimeIntrinsic::BytesLen)
-        }
-        ["std", "bytes", "at"] | ["std", "kernel", "text", "bytes_at"] => {
-            Some(RuntimeIntrinsic::BytesAt)
-        }
-        ["std", "bytes", "slice"] | ["std", "kernel", "text", "bytes_slice"] => {
-            Some(RuntimeIntrinsic::BytesSlice)
-        }
-        ["std", "bytes", "sha256_hex"] | ["std", "kernel", "text", "bytes_sha256_hex"] => {
-            Some(RuntimeIntrinsic::BytesSha256Hex)
-        }
-        ["std", "collections", "list", "new"] | ["std", "kernel", "collections", "list_new"] => {
-            Some(RuntimeIntrinsic::ListNew)
-        }
-        ["std", "collections", "list", "len"] | ["std", "kernel", "collections", "list_len"] => {
-            Some(RuntimeIntrinsic::ListLen)
-        }
-        ["std", "collections", "list", "is_empty"] => Some(RuntimeIntrinsic::ListIsEmpty),
-        ["std", "collections", "list", "push"] | ["std", "kernel", "collections", "list_push"] => {
-            Some(RuntimeIntrinsic::ListPush)
-        }
-        ["std", "collections", "list", "pop"] | ["std", "kernel", "collections", "list_pop"] => {
-            Some(RuntimeIntrinsic::ListPop)
-        }
-        ["std", "collections", "list", "try_pop_or"]
-        | ["std", "kernel", "collections", "list_try_pop_or"] => {
-            Some(RuntimeIntrinsic::ListTryPopOr)
-        }
-        ["std", "kernel", "collections", "array_new"] => Some(RuntimeIntrinsic::ArrayNew),
-        ["std", "kernel", "collections", "array_len"] => Some(RuntimeIntrinsic::ArrayLen),
-        ["std", "kernel", "collections", "array_from_list"] => {
-            Some(RuntimeIntrinsic::ArrayFromList)
-        }
-        ["std", "kernel", "collections", "array_to_list"] => Some(RuntimeIntrinsic::ArrayToList),
-        ["std", "kernel", "collections", "map_new"] => Some(RuntimeIntrinsic::MapNew),
-        ["std", "kernel", "collections", "map_len"] => Some(RuntimeIntrinsic::MapLen),
-        ["std", "kernel", "collections", "map_has"] => Some(RuntimeIntrinsic::MapHas),
-        ["std", "kernel", "collections", "map_get"] => Some(RuntimeIntrinsic::MapGet),
-        ["std", "kernel", "collections", "map_set"] => Some(RuntimeIntrinsic::MapSet),
-        ["std", "kernel", "collections", "map_remove"] => Some(RuntimeIntrinsic::MapRemove),
-        ["std", "kernel", "collections", "map_try_get_or"] => Some(RuntimeIntrinsic::MapTryGetOr),
-        ["std", "audio", "default_output"] | ["std", "kernel", "audio", "default_output"] => {
-            Some(RuntimeIntrinsic::AudioDefaultOutputTry)
-        }
-        ["std", "audio", "output_close"] | ["std", "kernel", "audio", "output_close"] => {
-            Some(RuntimeIntrinsic::AudioOutputClose)
-        }
-        ["std", "audio", "output_sample_rate_hz"]
-        | ["std", "kernel", "audio", "output_sample_rate_hz"] => {
-            Some(RuntimeIntrinsic::AudioOutputSampleRateHz)
-        }
-        ["std", "audio", "output_channels"] | ["std", "kernel", "audio", "output_channels"] => {
-            Some(RuntimeIntrinsic::AudioOutputChannels)
-        }
-        ["std", "audio", "buffer_load_wav"] | ["std", "kernel", "audio", "buffer_load_wav"] => {
-            Some(RuntimeIntrinsic::AudioBufferLoadWavTry)
-        }
-        ["std", "audio", "buffer_frames"] | ["std", "kernel", "audio", "buffer_frames"] => {
-            Some(RuntimeIntrinsic::AudioBufferFrames)
-        }
-        ["std", "audio", "buffer_channels"] | ["std", "kernel", "audio", "buffer_channels"] => {
-            Some(RuntimeIntrinsic::AudioBufferChannels)
-        }
-        ["std", "audio", "buffer_sample_rate_hz"]
-        | ["std", "kernel", "audio", "buffer_sample_rate_hz"] => {
-            Some(RuntimeIntrinsic::AudioBufferSampleRateHz)
-        }
-        ["std", "audio", "play_buffer"] | ["std", "kernel", "audio", "play_buffer"] => {
-            Some(RuntimeIntrinsic::AudioPlayBufferTry)
-        }
-        ["std", "audio", "output_set_gain_milli"]
-        | ["std", "kernel", "audio", "output_set_gain_milli"] => {
-            Some(RuntimeIntrinsic::AudioOutputSetGainMilli)
-        }
-        ["std", "audio", "stop"] | ["std", "kernel", "audio", "playback_stop"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackStop)
-        }
-        ["std", "audio", "pause"] | ["std", "kernel", "audio", "playback_pause"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackPause)
-        }
-        ["std", "audio", "resume"] | ["std", "kernel", "audio", "playback_resume"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackResume)
-        }
-        ["std", "audio", "playing"] | ["std", "kernel", "audio", "playback_playing"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackPlaying)
-        }
-        ["std", "audio", "paused"] | ["std", "kernel", "audio", "playback_paused"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackPaused)
-        }
-        ["std", "audio", "finished"] | ["std", "kernel", "audio", "playback_finished"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackFinished)
-        }
-        ["std", "audio", "set_gain_milli"]
-        | ["std", "kernel", "audio", "playback_set_gain_milli"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackSetGainMilli)
-        }
-        ["std", "audio", "set_looping"] | ["std", "kernel", "audio", "playback_set_looping"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackSetLooping)
-        }
-        ["std", "audio", "looping"] | ["std", "kernel", "audio", "playback_looping"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackLooping)
-        }
-        ["std", "audio", "position_frames"]
-        | ["std", "kernel", "audio", "playback_position_frames"] => {
-            Some(RuntimeIntrinsic::AudioPlaybackPositionFrames)
-        }
-        ["std", "option", "is_some"] => Some(RuntimeIntrinsic::OptionIsSome),
-        ["std", "option", "is_none"] => Some(RuntimeIntrinsic::OptionIsNone),
-        ["std", "option", "unwrap_or"] => Some(RuntimeIntrinsic::OptionUnwrapOr),
-        ["Result", "Ok"] | ["std", "result", "Result", "Ok"] => Some(RuntimeIntrinsic::ResultOk),
-        ["Result", "Err"] | ["std", "result", "Result", "Err"] => Some(RuntimeIntrinsic::ResultErr),
-        ["std", "result", "is_ok"] => Some(RuntimeIntrinsic::ResultIsOk),
-        ["std", "result", "is_err"] => Some(RuntimeIntrinsic::ResultIsErr),
-        ["std", "result", "unwrap_or"] => Some(RuntimeIntrinsic::ResultUnwrapOr),
-        _ => None,
-    }
-}
-
-fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrinsic> {
-    match intrinsic_impl {
-        "IoPrint" => Some(RuntimeIntrinsic::IoPrint),
-        "IoEprint" => Some(RuntimeIntrinsic::IoEprint),
-        "IoFlushStdout" => Some(RuntimeIntrinsic::IoFlushStdout),
-        "IoFlushStderr" => Some(RuntimeIntrinsic::IoFlushStderr),
-        "IoStdinReadLineTry" => Some(RuntimeIntrinsic::IoStdinReadLineTry),
-        "HostArgCount" => Some(RuntimeIntrinsic::ArgCount),
-        "HostArgGet" => Some(RuntimeIntrinsic::ArgGet),
-        "HostEnvHas" => Some(RuntimeIntrinsic::EnvHas),
-        "HostEnvGet" => Some(RuntimeIntrinsic::EnvGet),
-        "PackageCurrentAssetRootTry" => Some(RuntimeIntrinsic::PackageAssetRootTry),
-        "HostPathCwd" => Some(RuntimeIntrinsic::PathCwd),
-        "HostPathJoin" => Some(RuntimeIntrinsic::PathJoin),
-        "HostPathNormalize" => Some(RuntimeIntrinsic::PathNormalize),
-        "HostPathParent" => Some(RuntimeIntrinsic::PathParent),
-        "HostPathFileName" => Some(RuntimeIntrinsic::PathFileName),
-        "HostPathExt" => Some(RuntimeIntrinsic::PathExt),
-        "HostPathIsAbsolute" => Some(RuntimeIntrinsic::PathIsAbsolute),
-        "HostPathStemTry" => Some(RuntimeIntrinsic::PathStemTry),
-        "HostPathWithExt" => Some(RuntimeIntrinsic::PathWithExt),
-        "HostPathRelativeToTry" => Some(RuntimeIntrinsic::PathRelativeToTry),
-        "HostPathCanonicalizeTry" => Some(RuntimeIntrinsic::PathCanonicalizeTry),
-        "HostPathStripPrefixTry" => Some(RuntimeIntrinsic::PathStripPrefixTry),
-        "HostFsExists" => Some(RuntimeIntrinsic::FsExists),
-        "HostFsIsFile" => Some(RuntimeIntrinsic::FsIsFile),
-        "HostFsIsDir" => Some(RuntimeIntrinsic::FsIsDir),
-        "HostFsReadTextTry" => Some(RuntimeIntrinsic::FsReadTextTry),
-        "HostFsReadBytesTry" => Some(RuntimeIntrinsic::FsReadBytesTry),
-        "HostFsStreamOpenReadTry" => Some(RuntimeIntrinsic::FsStreamOpenReadTry),
-        "HostFsStreamOpenWriteTry" => Some(RuntimeIntrinsic::FsStreamOpenWriteTry),
-        "HostFsStreamReadTry" => Some(RuntimeIntrinsic::FsStreamReadTry),
-        "HostFsStreamWriteTry" => Some(RuntimeIntrinsic::FsStreamWriteTry),
-        "HostFsStreamEofTry" => Some(RuntimeIntrinsic::FsStreamEofTry),
-        "HostFsStreamCloseTry" => Some(RuntimeIntrinsic::FsStreamCloseTry),
-        "HostFsWriteTextTry" => Some(RuntimeIntrinsic::FsWriteTextTry),
-        "HostFsWriteBytesTry" => Some(RuntimeIntrinsic::FsWriteBytesTry),
-        "HostFsListDirTry" => Some(RuntimeIntrinsic::FsListDirTry),
-        "HostFsMkdirAllTry" => Some(RuntimeIntrinsic::FsMkdirAllTry),
-        "HostFsCreateDirTry" => Some(RuntimeIntrinsic::FsCreateDirTry),
-        "HostFsRemoveFileTry" => Some(RuntimeIntrinsic::FsRemoveFileTry),
-        "HostFsRemoveDirTry" => Some(RuntimeIntrinsic::FsRemoveDirTry),
-        "HostFsRemoveDirAllTry" => Some(RuntimeIntrinsic::FsRemoveDirAllTry),
-        "HostFsCopyFileTry" => Some(RuntimeIntrinsic::FsCopyFileTry),
-        "HostFsRenameTry" => Some(RuntimeIntrinsic::FsRenameTry),
-        "HostFsFileSizeTry" => Some(RuntimeIntrinsic::FsFileSizeTry),
-        "HostFsModifiedUnixMsTry" => Some(RuntimeIntrinsic::FsModifiedUnixMsTry),
-        "WindowOpenTry" => Some(RuntimeIntrinsic::WindowOpenTry),
-        "CanvasAlive" => Some(RuntimeIntrinsic::CanvasAlive),
-        "CanvasFill" => Some(RuntimeIntrinsic::CanvasFill),
-        "CanvasRect" => Some(RuntimeIntrinsic::CanvasRect),
-        "CanvasLine" => Some(RuntimeIntrinsic::CanvasLine),
-        "CanvasCircleFill" => Some(RuntimeIntrinsic::CanvasCircleFill),
-        "CanvasLabel" => Some(RuntimeIntrinsic::CanvasLabel),
-        "CanvasLabelSize" => Some(RuntimeIntrinsic::CanvasLabelSize),
-        "CanvasPresent" => Some(RuntimeIntrinsic::CanvasPresent),
-        "CanvasRgb" => Some(RuntimeIntrinsic::CanvasRgb),
-        "ImageLoadTry" => Some(RuntimeIntrinsic::ImageLoadTry),
-        "CanvasImageCreate" => Some(RuntimeIntrinsic::CanvasImageCreate),
-        "CanvasImageReplaceRgba" => Some(RuntimeIntrinsic::CanvasImageReplaceRgba),
-        "CanvasImageSize" => Some(RuntimeIntrinsic::CanvasImageSize),
-        "CanvasBlit" => Some(RuntimeIntrinsic::CanvasBlit),
-        "CanvasBlitScaled" => Some(RuntimeIntrinsic::CanvasBlitScaled),
-        "CanvasBlitRegion" => Some(RuntimeIntrinsic::CanvasBlitRegion),
-        "WindowSize" => Some(RuntimeIntrinsic::WindowSize),
-        "WindowResized" => Some(RuntimeIntrinsic::WindowResized),
-        "WindowFullscreen" => Some(RuntimeIntrinsic::WindowFullscreen),
-        "WindowMinimized" => Some(RuntimeIntrinsic::WindowMinimized),
-        "WindowMaximized" => Some(RuntimeIntrinsic::WindowMaximized),
-        "WindowFocused" => Some(RuntimeIntrinsic::WindowFocused),
-        "WindowId" => Some(RuntimeIntrinsic::WindowId),
-        "WindowPosition" => Some(RuntimeIntrinsic::WindowPosition),
-        "WindowTitle" => Some(RuntimeIntrinsic::WindowTitle),
-        "WindowVisible" => Some(RuntimeIntrinsic::WindowVisible),
-        "WindowDecorated" => Some(RuntimeIntrinsic::WindowDecorated),
-        "WindowResizable" => Some(RuntimeIntrinsic::WindowResizable),
-        "WindowTopmost" => Some(RuntimeIntrinsic::WindowTopmost),
-        "WindowCursorVisible" => Some(RuntimeIntrinsic::WindowCursorVisible),
-        "WindowMinSize" => Some(RuntimeIntrinsic::WindowMinSize),
-        "WindowMaxSize" => Some(RuntimeIntrinsic::WindowMaxSize),
-        "WindowScaleFactorMilli" => Some(RuntimeIntrinsic::WindowScaleFactorMilli),
-        "WindowThemeCode" => Some(RuntimeIntrinsic::WindowThemeCode),
-        "WindowTransparent" => Some(RuntimeIntrinsic::WindowTransparent),
-        "WindowThemeOverrideCode" => Some(RuntimeIntrinsic::WindowThemeOverrideCode),
-        "WindowCursorIconCode" => Some(RuntimeIntrinsic::WindowCursorIconCode),
-        "WindowCursorGrabMode" => Some(RuntimeIntrinsic::WindowCursorGrabMode),
-        "WindowCursorPosition" => Some(RuntimeIntrinsic::WindowCursorPosition),
-        "WindowTextInputEnabled" => Some(RuntimeIntrinsic::WindowTextInputEnabled),
-        "WindowCurrentMonitorIndex" => Some(RuntimeIntrinsic::WindowCurrentMonitorIndex),
-        "WindowPrimaryMonitorIndex" => Some(RuntimeIntrinsic::WindowPrimaryMonitorIndex),
-        "WindowMonitorCount" => Some(RuntimeIntrinsic::WindowMonitorCount),
-        "WindowMonitorName" => Some(RuntimeIntrinsic::WindowMonitorName),
-        "WindowMonitorPosition" => Some(RuntimeIntrinsic::WindowMonitorPosition),
-        "WindowMonitorSize" => Some(RuntimeIntrinsic::WindowMonitorSize),
-        "WindowMonitorScaleFactorMilli" => Some(RuntimeIntrinsic::WindowMonitorScaleFactorMilli),
-        "WindowMonitorIsPrimary" => Some(RuntimeIntrinsic::WindowMonitorIsPrimary),
-        "WindowSetTitle" => Some(RuntimeIntrinsic::WindowSetTitle),
-        "WindowSetPosition" => Some(RuntimeIntrinsic::WindowSetPosition),
-        "WindowSetSize" => Some(RuntimeIntrinsic::WindowSetSize),
-        "WindowSetVisible" => Some(RuntimeIntrinsic::WindowSetVisible),
-        "WindowSetDecorated" => Some(RuntimeIntrinsic::WindowSetDecorated),
-        "WindowSetResizable" => Some(RuntimeIntrinsic::WindowSetResizable),
-        "WindowSetMinSize" => Some(RuntimeIntrinsic::WindowSetMinSize),
-        "WindowSetMaxSize" => Some(RuntimeIntrinsic::WindowSetMaxSize),
-        "WindowSetFullscreen" => Some(RuntimeIntrinsic::WindowSetFullscreen),
-        "WindowSetMinimized" => Some(RuntimeIntrinsic::WindowSetMinimized),
-        "WindowSetMaximized" => Some(RuntimeIntrinsic::WindowSetMaximized),
-        "WindowSetTopmost" => Some(RuntimeIntrinsic::WindowSetTopmost),
-        "WindowSetCursorVisible" => Some(RuntimeIntrinsic::WindowSetCursorVisible),
-        "WindowSetTransparent" => Some(RuntimeIntrinsic::WindowSetTransparent),
-        "WindowSetThemeOverrideCode" => Some(RuntimeIntrinsic::WindowSetThemeOverrideCode),
-        "WindowSetCursorIconCode" => Some(RuntimeIntrinsic::WindowSetCursorIconCode),
-        "WindowSetCursorGrabMode" => Some(RuntimeIntrinsic::WindowSetCursorGrabMode),
-        "WindowSetCursorPosition" => Some(RuntimeIntrinsic::WindowSetCursorPosition),
-        "WindowTextInputSetEnabled" => Some(RuntimeIntrinsic::WindowTextInputSetEnabled),
-        "WindowRequestRedraw" => Some(RuntimeIntrinsic::WindowRequestRedraw),
-        "WindowRequestAttention" => Some(RuntimeIntrinsic::WindowRequestAttention),
-        "WindowClose" => Some(RuntimeIntrinsic::WindowClose),
-        "EventsPump" => Some(RuntimeIntrinsic::EventsPump),
-        "EventsPoll" => Some(RuntimeIntrinsic::EventsPoll),
-        "EventsSessionOpen" => Some(RuntimeIntrinsic::EventsSessionOpen),
-        "EventsSessionClose" => Some(RuntimeIntrinsic::EventsSessionClose),
-        "EventsSessionAttachWindow" => Some(RuntimeIntrinsic::EventsSessionAttachWindow),
-        "EventsSessionDetachWindow" => Some(RuntimeIntrinsic::EventsSessionDetachWindow),
-        "EventsSessionWindowById" => Some(RuntimeIntrinsic::EventsSessionWindowById),
-        "EventsSessionWindowIds" => Some(RuntimeIntrinsic::EventsSessionWindowIds),
-        "EventsSessionPump" => Some(RuntimeIntrinsic::EventsSessionPump),
-        "EventsSessionWait" => Some(RuntimeIntrinsic::EventsSessionWait),
-        "EventsSessionDeviceEvents" => Some(RuntimeIntrinsic::EventsSessionDeviceEvents),
-        "EventsSessionSetDeviceEvents" => Some(RuntimeIntrinsic::EventsSessionSetDeviceEvents),
-        "EventsSessionCreateWake" => Some(RuntimeIntrinsic::EventsSessionCreateWake),
-        "EventsWakeSignal" => Some(RuntimeIntrinsic::EventsWakeSignal),
-        "InputKeyCode" => Some(RuntimeIntrinsic::InputKeyCode),
-        "InputKeyDown" => Some(RuntimeIntrinsic::InputKeyDown),
-        "InputKeyPressed" => Some(RuntimeIntrinsic::InputKeyPressed),
-        "InputKeyReleased" => Some(RuntimeIntrinsic::InputKeyReleased),
-        "InputMouseButtonCode" => Some(RuntimeIntrinsic::InputMouseButtonCode),
-        "InputMousePos" => Some(RuntimeIntrinsic::InputMousePos),
-        "InputMouseDown" => Some(RuntimeIntrinsic::InputMouseDown),
-        "InputMousePressed" => Some(RuntimeIntrinsic::InputMousePressed),
-        "InputMouseReleased" => Some(RuntimeIntrinsic::InputMouseReleased),
-        "InputMouseWheelY" => Some(RuntimeIntrinsic::InputMouseWheelY),
-        "InputMouseInWindow" => Some(RuntimeIntrinsic::InputMouseInWindow),
-        "ClipboardReadTextTry" => Some(RuntimeIntrinsic::ClipboardReadTextTry),
-        "ClipboardWriteTextTry" => Some(RuntimeIntrinsic::ClipboardWriteTextTry),
-        "ClipboardReadBytesTry" => Some(RuntimeIntrinsic::ClipboardReadBytesTry),
-        "ClipboardWriteBytesTry" => Some(RuntimeIntrinsic::ClipboardWriteBytesTry),
-        "TextInputCompositionAreaActive" => Some(RuntimeIntrinsic::TextInputCompositionAreaActive),
-        "TextInputCompositionAreaPosition" => {
-            Some(RuntimeIntrinsic::TextInputCompositionAreaPosition)
-        }
-        "TextInputCompositionAreaSize" => Some(RuntimeIntrinsic::TextInputCompositionAreaSize),
-        "TextInputSetCompositionArea" => Some(RuntimeIntrinsic::TextInputSetCompositionArea),
-        "TextInputClearCompositionArea" => Some(RuntimeIntrinsic::TextInputClearCompositionArea),
-        "HostTimeMonotonicNowMs" => Some(RuntimeIntrinsic::TimeMonotonicNowMs),
-        "HostTimeMonotonicNowNs" => Some(RuntimeIntrinsic::TimeMonotonicNowNs),
-        "ConcurrentSleep" => Some(RuntimeIntrinsic::ConcurrentSleep),
-        "ConcurrentBehaviorStep" => Some(RuntimeIntrinsic::ConcurrentBehaviorStep),
-        "ConcurrentThreadId" => Some(RuntimeIntrinsic::ConcurrentThreadId),
-        "ConcurrentTaskDone" => Some(RuntimeIntrinsic::ConcurrentTaskDone),
-        "ConcurrentTaskJoin" => Some(RuntimeIntrinsic::ConcurrentTaskJoin),
-        "ConcurrentThreadDone" => Some(RuntimeIntrinsic::ConcurrentThreadDone),
-        "ConcurrentThreadJoin" => Some(RuntimeIntrinsic::ConcurrentThreadJoin),
-        "ConcurrentChannelNew" => Some(RuntimeIntrinsic::ConcurrentChannelNew),
-        "ConcurrentChannelSend" => Some(RuntimeIntrinsic::ConcurrentChannelSend),
-        "ConcurrentChannelRecv" => Some(RuntimeIntrinsic::ConcurrentChannelRecv),
-        "ConcurrentMutexNew" => Some(RuntimeIntrinsic::ConcurrentMutexNew),
-        "ConcurrentMutexTake" => Some(RuntimeIntrinsic::ConcurrentMutexTake),
-        "ConcurrentMutexPut" => Some(RuntimeIntrinsic::ConcurrentMutexPut),
-        "ConcurrentAtomicIntNew" => Some(RuntimeIntrinsic::ConcurrentAtomicIntNew),
-        "ConcurrentAtomicIntLoad" => Some(RuntimeIntrinsic::ConcurrentAtomicIntLoad),
-        "ConcurrentAtomicIntStore" => Some(RuntimeIntrinsic::ConcurrentAtomicIntStore),
-        "ConcurrentAtomicIntAdd" => Some(RuntimeIntrinsic::ConcurrentAtomicIntAdd),
-        "ConcurrentAtomicIntSub" => Some(RuntimeIntrinsic::ConcurrentAtomicIntSub),
-        "ConcurrentAtomicIntSwap" => Some(RuntimeIntrinsic::ConcurrentAtomicIntSwap),
-        "ConcurrentAtomicBoolNew" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolNew),
-        "ConcurrentAtomicBoolLoad" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolLoad),
-        "ConcurrentAtomicBoolStore" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolStore),
-        "ConcurrentAtomicBoolSwap" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolSwap),
-        "MemoryArenaNew" => Some(RuntimeIntrinsic::MemoryArenaNew),
-        "MemoryArenaAlloc" => Some(RuntimeIntrinsic::MemoryArenaAlloc),
-        "MemoryArenaLen" => Some(RuntimeIntrinsic::MemoryArenaLen),
-        "MemoryArenaHas" => Some(RuntimeIntrinsic::MemoryArenaHas),
-        "MemoryArenaGet" => Some(RuntimeIntrinsic::MemoryArenaGet),
-        "MemoryArenaBorrowRead" => Some(RuntimeIntrinsic::MemoryArenaBorrowRead),
-        "MemoryArenaBorrowEdit" => Some(RuntimeIntrinsic::MemoryArenaBorrowEdit),
-        "MemoryArenaSet" => Some(RuntimeIntrinsic::MemoryArenaSet),
-        "MemoryArenaRemove" => Some(RuntimeIntrinsic::MemoryArenaRemove),
-        "MemoryArenaReset" => Some(RuntimeIntrinsic::MemoryArenaReset),
-        "MemoryFrameNew" => Some(RuntimeIntrinsic::MemoryFrameNew),
-        "MemoryFrameAlloc" => Some(RuntimeIntrinsic::MemoryFrameAlloc),
-        "MemoryFrameLen" => Some(RuntimeIntrinsic::MemoryFrameLen),
-        "MemoryFrameHas" => Some(RuntimeIntrinsic::MemoryFrameHas),
-        "MemoryFrameGet" => Some(RuntimeIntrinsic::MemoryFrameGet),
-        "MemoryFrameBorrowRead" => Some(RuntimeIntrinsic::MemoryFrameBorrowRead),
-        "MemoryFrameBorrowEdit" => Some(RuntimeIntrinsic::MemoryFrameBorrowEdit),
-        "MemoryFrameSet" => Some(RuntimeIntrinsic::MemoryFrameSet),
-        "MemoryFrameReset" => Some(RuntimeIntrinsic::MemoryFrameReset),
-        "MemoryPoolNew" => Some(RuntimeIntrinsic::MemoryPoolNew),
-        "MemoryPoolAlloc" => Some(RuntimeIntrinsic::MemoryPoolAlloc),
-        "MemoryPoolLen" => Some(RuntimeIntrinsic::MemoryPoolLen),
-        "MemoryPoolHas" => Some(RuntimeIntrinsic::MemoryPoolHas),
-        "MemoryPoolGet" => Some(RuntimeIntrinsic::MemoryPoolGet),
-        "MemoryPoolBorrowRead" => Some(RuntimeIntrinsic::MemoryPoolBorrowRead),
-        "MemoryPoolBorrowEdit" => Some(RuntimeIntrinsic::MemoryPoolBorrowEdit),
-        "MemoryPoolSet" => Some(RuntimeIntrinsic::MemoryPoolSet),
-        "MemoryPoolRemove" => Some(RuntimeIntrinsic::MemoryPoolRemove),
-        "MemoryPoolReset" => Some(RuntimeIntrinsic::MemoryPoolReset),
-        "MemoryPoolLiveIds" => Some(RuntimeIntrinsic::MemoryPoolLiveIds),
-        "MemoryPoolCompact" => Some(RuntimeIntrinsic::MemoryPoolCompact),
-        "MemoryTempNew" => Some(RuntimeIntrinsic::MemoryTempNew),
-        "MemoryTempAlloc" => Some(RuntimeIntrinsic::MemoryTempAlloc),
-        "MemoryTempLen" => Some(RuntimeIntrinsic::MemoryTempLen),
-        "MemoryTempHas" => Some(RuntimeIntrinsic::MemoryTempHas),
-        "MemoryTempGet" => Some(RuntimeIntrinsic::MemoryTempGet),
-        "MemoryTempBorrowRead" => Some(RuntimeIntrinsic::MemoryTempBorrowRead),
-        "MemoryTempBorrowEdit" => Some(RuntimeIntrinsic::MemoryTempBorrowEdit),
-        "MemoryTempSet" => Some(RuntimeIntrinsic::MemoryTempSet),
-        "MemoryTempReset" => Some(RuntimeIntrinsic::MemoryTempReset),
-        "MemorySessionNew" => Some(RuntimeIntrinsic::MemorySessionNew),
-        "MemorySessionAlloc" => Some(RuntimeIntrinsic::MemorySessionAlloc),
-        "MemorySessionLen" => Some(RuntimeIntrinsic::MemorySessionLen),
-        "MemorySessionHas" => Some(RuntimeIntrinsic::MemorySessionHas),
-        "MemorySessionGet" => Some(RuntimeIntrinsic::MemorySessionGet),
-        "MemorySessionBorrowRead" => Some(RuntimeIntrinsic::MemorySessionBorrowRead),
-        "MemorySessionBorrowEdit" => Some(RuntimeIntrinsic::MemorySessionBorrowEdit),
-        "MemorySessionSet" => Some(RuntimeIntrinsic::MemorySessionSet),
-        "MemorySessionReset" => Some(RuntimeIntrinsic::MemorySessionReset),
-        "MemorySessionSeal" => Some(RuntimeIntrinsic::MemorySessionSeal),
-        "MemorySessionUnseal" => Some(RuntimeIntrinsic::MemorySessionUnseal),
-        "MemorySessionIsSealed" => Some(RuntimeIntrinsic::MemorySessionIsSealed),
-        "MemorySessionLiveIds" => Some(RuntimeIntrinsic::MemorySessionLiveIds),
-        "MemoryRingNew" => Some(RuntimeIntrinsic::MemoryRingNew),
-        "MemoryRingPush" => Some(RuntimeIntrinsic::MemoryRingPush),
-        "MemoryRingTryPop" => Some(RuntimeIntrinsic::MemoryRingTryPop),
-        "MemoryRingLen" => Some(RuntimeIntrinsic::MemoryRingLen),
-        "MemoryRingHas" => Some(RuntimeIntrinsic::MemoryRingHas),
-        "MemoryRingGet" => Some(RuntimeIntrinsic::MemoryRingGet),
-        "MemoryRingBorrowRead" => Some(RuntimeIntrinsic::MemoryRingBorrowRead),
-        "MemoryRingBorrowEdit" => Some(RuntimeIntrinsic::MemoryRingBorrowEdit),
-        "MemoryRingSet" => Some(RuntimeIntrinsic::MemoryRingSet),
-        "MemoryRingReset" => Some(RuntimeIntrinsic::MemoryRingReset),
-        "MemoryRingWindowRead" => Some(RuntimeIntrinsic::MemoryRingWindowRead),
-        "MemoryRingWindowEdit" => Some(RuntimeIntrinsic::MemoryRingWindowEdit),
-        "MemorySlabNew" => Some(RuntimeIntrinsic::MemorySlabNew),
-        "MemorySlabAlloc" => Some(RuntimeIntrinsic::MemorySlabAlloc),
-        "MemorySlabLen" => Some(RuntimeIntrinsic::MemorySlabLen),
-        "MemorySlabHas" => Some(RuntimeIntrinsic::MemorySlabHas),
-        "MemorySlabGet" => Some(RuntimeIntrinsic::MemorySlabGet),
-        "MemorySlabBorrowRead" => Some(RuntimeIntrinsic::MemorySlabBorrowRead),
-        "MemorySlabBorrowEdit" => Some(RuntimeIntrinsic::MemorySlabBorrowEdit),
-        "MemorySlabSet" => Some(RuntimeIntrinsic::MemorySlabSet),
-        "MemorySlabRemove" => Some(RuntimeIntrinsic::MemorySlabRemove),
-        "MemorySlabReset" => Some(RuntimeIntrinsic::MemorySlabReset),
-        "MemorySlabSeal" => Some(RuntimeIntrinsic::MemorySlabSeal),
-        "MemorySlabUnseal" => Some(RuntimeIntrinsic::MemorySlabUnseal),
-        "MemorySlabIsSealed" => Some(RuntimeIntrinsic::MemorySlabIsSealed),
-        "MemorySlabLiveIds" => Some(RuntimeIntrinsic::MemorySlabLiveIds),
-        "MemoryArrayViewRead" => Some(RuntimeIntrinsic::MemoryArrayViewRead),
-        "MemoryArrayViewEdit" => Some(RuntimeIntrinsic::MemoryArrayViewEdit),
-        "MemoryBytesView" => Some(RuntimeIntrinsic::MemoryBytesView),
-        "MemoryBytesViewEdit" => Some(RuntimeIntrinsic::MemoryBytesViewEdit),
-        "MemoryStrView" => Some(RuntimeIntrinsic::MemoryStrView),
-        "MemoryViewLen" => Some(RuntimeIntrinsic::MemoryViewLen),
-        "MemoryViewGet" => Some(RuntimeIntrinsic::MemoryViewGet),
-        "MemoryViewSubview" => Some(RuntimeIntrinsic::MemoryViewSubview),
-        "MemoryEditViewLen" => Some(RuntimeIntrinsic::MemoryEditViewLen),
-        "MemoryEditViewGet" => Some(RuntimeIntrinsic::MemoryEditViewGet),
-        "MemoryEditViewSet" => Some(RuntimeIntrinsic::MemoryEditViewSet),
-        "MemoryEditViewSubviewRead" => Some(RuntimeIntrinsic::MemoryEditViewSubviewRead),
-        "MemoryEditViewSubviewEdit" => Some(RuntimeIntrinsic::MemoryEditViewSubviewEdit),
-        "MemoryByteViewLen" => Some(RuntimeIntrinsic::MemoryByteViewLen),
-        "MemoryByteViewAt" => Some(RuntimeIntrinsic::MemoryByteViewAt),
-        "MemoryByteViewSubview" => Some(RuntimeIntrinsic::MemoryByteViewSubview),
-        "MemoryByteViewToArray" => Some(RuntimeIntrinsic::MemoryByteViewToArray),
-        "MemoryByteEditViewLen" => Some(RuntimeIntrinsic::MemoryByteEditViewLen),
-        "MemoryByteEditViewAt" => Some(RuntimeIntrinsic::MemoryByteEditViewAt),
-        "MemoryByteEditViewSet" => Some(RuntimeIntrinsic::MemoryByteEditViewSet),
-        "MemoryByteEditViewSubviewRead" => Some(RuntimeIntrinsic::MemoryByteEditViewSubviewRead),
-        "MemoryByteEditViewSubviewEdit" => Some(RuntimeIntrinsic::MemoryByteEditViewSubviewEdit),
-        "MemoryByteEditViewToArray" => Some(RuntimeIntrinsic::MemoryByteEditViewToArray),
-        "MemoryStrViewLenBytes" => Some(RuntimeIntrinsic::MemoryStrViewLenBytes),
-        "MemoryStrViewByteAt" => Some(RuntimeIntrinsic::MemoryStrViewByteAt),
-        "MemoryStrViewSubview" => Some(RuntimeIntrinsic::MemoryStrViewSubview),
-        "MemoryStrViewToStr" => Some(RuntimeIntrinsic::MemoryStrViewToStr),
-        "AudioDefaultOutputTry" => Some(RuntimeIntrinsic::AudioDefaultOutputTry),
-        "AudioOutputClose" => Some(RuntimeIntrinsic::AudioOutputClose),
-        "AudioOutputSampleRateHz" => Some(RuntimeIntrinsic::AudioOutputSampleRateHz),
-        "AudioOutputChannels" => Some(RuntimeIntrinsic::AudioOutputChannels),
-        "AudioBufferLoadWavTry" => Some(RuntimeIntrinsic::AudioBufferLoadWavTry),
-        "AudioBufferFrames" => Some(RuntimeIntrinsic::AudioBufferFrames),
-        "AudioBufferChannels" => Some(RuntimeIntrinsic::AudioBufferChannels),
-        "AudioBufferSampleRateHz" => Some(RuntimeIntrinsic::AudioBufferSampleRateHz),
-        "AudioPlayBufferTry" => Some(RuntimeIntrinsic::AudioPlayBufferTry),
-        "AudioOutputSetGainMilli" => Some(RuntimeIntrinsic::AudioOutputSetGainMilli),
-        "AudioPlaybackStop" => Some(RuntimeIntrinsic::AudioPlaybackStop),
-        "AudioPlaybackPause" => Some(RuntimeIntrinsic::AudioPlaybackPause),
-        "AudioPlaybackResume" => Some(RuntimeIntrinsic::AudioPlaybackResume),
-        "AudioPlaybackPlaying" => Some(RuntimeIntrinsic::AudioPlaybackPlaying),
-        "AudioPlaybackPaused" => Some(RuntimeIntrinsic::AudioPlaybackPaused),
-        "AudioPlaybackFinished" => Some(RuntimeIntrinsic::AudioPlaybackFinished),
-        "AudioPlaybackSetGainMilli" => Some(RuntimeIntrinsic::AudioPlaybackSetGainMilli),
-        "AudioPlaybackSetLooping" => Some(RuntimeIntrinsic::AudioPlaybackSetLooping),
-        "AudioPlaybackLooping" => Some(RuntimeIntrinsic::AudioPlaybackLooping),
-        "AudioPlaybackPositionFrames" => Some(RuntimeIntrinsic::AudioPlaybackPositionFrames),
-        "HostProcessExecStatusTry" => Some(RuntimeIntrinsic::ProcessExecStatusTry),
-        "HostProcessExecCaptureTry" => Some(RuntimeIntrinsic::ProcessExecCaptureTry),
-        "HostTextLenBytes" => Some(RuntimeIntrinsic::TextLenBytes),
-        "HostTextByteAt" => Some(RuntimeIntrinsic::TextByteAt),
-        "HostTextSliceBytes" => Some(RuntimeIntrinsic::TextSliceBytes),
-        "HostTextStartsWith" => Some(RuntimeIntrinsic::TextStartsWith),
-        "HostTextEndsWith" => Some(RuntimeIntrinsic::TextEndsWith),
-        "HostTextSplitLines" => Some(RuntimeIntrinsic::TextSplitLines),
-        "HostTextFromInt" => Some(RuntimeIntrinsic::TextFromInt),
-        "HostBytesFromStrUtf8" => Some(RuntimeIntrinsic::BytesFromStrUtf8),
-        "HostBytesToStrUtf8" => Some(RuntimeIntrinsic::BytesToStrUtf8),
-        "HostBytesLen" => Some(RuntimeIntrinsic::BytesLen),
-        "HostBytesAt" => Some(RuntimeIntrinsic::BytesAt),
-        "HostBytesSlice" => Some(RuntimeIntrinsic::BytesSlice),
-        "HostBytesSha256Hex" => Some(RuntimeIntrinsic::BytesSha256Hex),
-        "ListNew" => Some(RuntimeIntrinsic::ListNew),
-        "ListLen" => Some(RuntimeIntrinsic::ListLen),
-        "ListPush" => Some(RuntimeIntrinsic::ListPush),
-        "ListPop" => Some(RuntimeIntrinsic::ListPop),
-        "ListTryPopOr" => Some(RuntimeIntrinsic::ListTryPopOr),
-        "ArrayNew" => Some(RuntimeIntrinsic::ArrayNew),
-        "ArrayLen" => Some(RuntimeIntrinsic::ArrayLen),
-        "ArrayFromList" => Some(RuntimeIntrinsic::ArrayFromList),
-        "ArrayToList" => Some(RuntimeIntrinsic::ArrayToList),
-        "MapNew" => Some(RuntimeIntrinsic::MapNew),
-        "MapLen" => Some(RuntimeIntrinsic::MapLen),
-        "MapHas" => Some(RuntimeIntrinsic::MapHas),
-        "MapGet" => Some(RuntimeIntrinsic::MapGet),
-        "MapSet" => Some(RuntimeIntrinsic::MapSet),
-        "MapRemove" => Some(RuntimeIntrinsic::MapRemove),
-        "MapTryGetOr" => Some(RuntimeIntrinsic::MapTryGetOr),
-        "EcsSetSingleton" => Some(RuntimeIntrinsic::EcsSetSingleton),
-        "EcsHasSingleton" => Some(RuntimeIntrinsic::EcsHasSingleton),
-        "EcsGetSingleton" => Some(RuntimeIntrinsic::EcsGetSingleton),
-        "EcsSpawn" => Some(RuntimeIntrinsic::EcsSpawn),
-        "EcsDespawn" => Some(RuntimeIntrinsic::EcsDespawn),
-        "EcsSetComponentAt" => Some(RuntimeIntrinsic::EcsSetComponentAt),
-        "EcsHasComponentAt" => Some(RuntimeIntrinsic::EcsHasComponentAt),
-        "EcsGetComponentAt" => Some(RuntimeIntrinsic::EcsGetComponentAt),
-        "EcsRemoveComponentAt" => Some(RuntimeIntrinsic::EcsRemoveComponentAt),
-        _ => None,
-    }
-}
-
 fn runtime_value_to_string(value: &RuntimeValue) -> String {
     match value {
         RuntimeValue::Int(value) => value.to_string(),
         RuntimeValue::Float { text, .. } => text.clone(),
         RuntimeValue::Bool(value) => value.to_string(),
         RuntimeValue::Str(value) => value.clone(),
+        RuntimeValue::Bytes(bytes) => format!(
+            "Bytes[{}]",
+            bytes
+                .iter()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        RuntimeValue::ByteBuffer(bytes) => format!(
+            "ByteBuffer[{}]",
+            bytes
+                .iter()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        RuntimeValue::Utf16(units) => format!(
+            "Utf16[{}]",
+            units
+                .iter()
+                .map(|unit| unit.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        RuntimeValue::Utf16Buffer(units) => format!(
+            "Utf16Buffer[{}]",
+            units
+                .iter()
+                .map(|unit| unit.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         RuntimeValue::Pair(left, right) => format!(
             "({}, {})",
             runtime_value_to_string(left),
@@ -7319,33 +2462,6 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
                 }
             }
         },
-        RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(handle)) => {
-            format!("<FileStream:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Window(handle)) => {
-            format!("<Window:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Image(handle)) => {
-            format!("<Image:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(handle)) => {
-            format!("<AppFrame:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(handle)) => {
-            format!("<AppSession:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(handle)) => {
-            format!("<WakeHandle:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::AudioDevice(handle)) => {
-            format!("<AudioDevice:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::AudioBuffer(handle)) => {
-            format!("<AudioBuffer:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::AudioPlayback(handle)) => {
-            format!("<AudioPlayback:{}>", handle.0)
-        }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)) => {
             format!("<Channel:{}>", handle.0)
         }
@@ -8166,7 +3282,7 @@ fn execute_owner_object_lifecycle_hook(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     owner_key: &str,
     object_name: &str,
 ) -> Result<(), String> {
@@ -8362,7 +3478,7 @@ fn owner_object_root_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     owner_key: &str,
     object_name: &str,
 ) -> Result<RuntimeValue, String> {
@@ -8537,7 +3653,7 @@ fn evaluate_owner_exit_checkpoints(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     mut scopes: Option<&mut Vec<RuntimeScope>>,
 ) -> Result<(), String> {
     let mut unique_keys = BTreeSet::new();
@@ -8574,10 +3690,18 @@ fn evaluate_owner_exit_checkpoints(
                 host,
             )
             .map_err(runtime_eval_message)?;
-            if expect_bool(
-                force_runtime_value(condition, plan, state, host)?,
-                "owner exit condition",
-            )? {
+            let condition = read_runtime_value_if_ref(
+                condition,
+                &mut exit_scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?;
+            if expect_bool(condition, "owner exit condition")? {
                 selected_exit = Some(owner_exit.clone());
                 break;
             }
@@ -8975,10 +4099,12 @@ fn runtime_reference_array_len(
     let Some(value) = runtime_reference_value_ref(scopes, state, reference)? else {
         return Ok(None);
     };
-    let RuntimeValue::Array(values) = value else {
-        return Err(format!("{context} expected Array[Int]"));
-    };
-    Ok(Some(values.len()))
+    match value {
+        RuntimeValue::Array(values) => Ok(Some(values.len())),
+        RuntimeValue::Bytes(bytes) => Ok(Some(bytes.len())),
+        RuntimeValue::ByteBuffer(bytes) => Ok(Some(bytes.len())),
+        _ => Err(format!("{context} expected byte-compatible array or Bytes")),
+    }
 }
 
 fn runtime_reference_array_byte_at(
@@ -8991,20 +4117,32 @@ fn runtime_reference_array_byte_at(
     let Some(value) = runtime_reference_value_ref(scopes, state, reference)? else {
         return Ok(None);
     };
-    let RuntimeValue::Array(values) = value else {
-        return Err(format!("{context} expected Array[Int]"));
-    };
-    let value = values
-        .get(index)
-        .cloned()
-        .ok_or_else(|| format!("{context} index `{index}` is out of bounds"))?;
-    let value = expect_int(value, context)?;
-    if !(0..=255).contains(&value) {
-        return Err(format!(
-            "{context} byte `{value}` is out of range `0..=255`"
-        ));
+    match value {
+        RuntimeValue::Array(values) => {
+            let value = values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("{context} index `{index}` is out of bounds"))?;
+            let value = expect_int(value, context)?;
+            if !(0..=255).contains(&value) {
+                return Err(format!(
+                    "{context} byte `{value}` is out of range `0..=255`"
+                ));
+            }
+            Ok(Some(value as u8))
+        }
+        RuntimeValue::Bytes(bytes) => bytes
+            .get(index)
+            .copied()
+            .map(Some)
+            .ok_or_else(|| format!("{context} index `{index}` is out of bounds")),
+        RuntimeValue::ByteBuffer(bytes) => bytes
+            .get(index)
+            .copied()
+            .map(Some)
+            .ok_or_else(|| format!("{context} index `{index}` is out of bounds")),
+        _ => Err(format!("{context} expected byte-compatible array or Bytes")),
     }
-    Ok(Some(value as u8))
 }
 
 fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
@@ -9306,6 +4444,35 @@ fn runtime_opaque_matches_byte_buffer(
     }
 }
 
+fn runtime_opaque_matches_foreign_byte_handle(
+    opaque: &RuntimeOpaqueValue,
+    state: &RuntimeExecutionState,
+    package_id: &str,
+    handle: u64,
+) -> bool {
+    match opaque {
+        RuntimeOpaqueValue::ByteView(view_handle) => {
+            state.byte_views.get(view_handle).is_some_and(|view| {
+                matches!(
+                    &view.backing,
+                    RuntimeByteViewBacking::Foreign(backing)
+                        if backing.package_id == package_id && backing.handle == handle
+                )
+            })
+        }
+        RuntimeOpaqueValue::ByteEditView(view_handle) => {
+            state.byte_edit_views.get(view_handle).is_some_and(|view| {
+                matches!(
+                    &view.backing,
+                    RuntimeByteViewBacking::Foreign(backing)
+                        if backing.package_id == package_id && backing.handle == handle
+                )
+            })
+        }
+        _ => false,
+    }
+}
+
 fn runtime_value_contains_reference_or_opaque_conflict(
     value: &RuntimeValue,
     state: &RuntimeExecutionState,
@@ -9315,6 +4482,10 @@ fn runtime_value_contains_reference_or_opaque_conflict(
     ignored_opaque: Option<RuntimeOpaqueValue>,
 ) -> bool {
     match value {
+        RuntimeValue::Bytes(_)
+        | RuntimeValue::ByteBuffer(_)
+        | RuntimeValue::Utf16(_)
+        | RuntimeValue::Utf16Buffer(_) => false,
         RuntimeValue::Ref(reference) => {
             !ignored_reference.is_some_and(|ignored| ignored == reference)
                 && reference_predicate(reference)
@@ -9538,7 +4709,7 @@ fn runtime_reference_root_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     target: &RuntimeReferenceTarget,
     access_mode: RuntimeReferenceMode,
 ) -> Result<RuntimeValue, String> {
@@ -9753,7 +4924,7 @@ fn read_runtime_reference(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     if let Some(value) = runtime_reference_value_ref(scopes.as_slice(), state, reference)? {
         return Ok(value.clone());
@@ -9786,7 +4957,7 @@ fn write_runtime_reference(
     state: &mut RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
     value: RuntimeValue,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     if !reference.mode.allows_write() {
         return Err(format!(
@@ -10047,13 +5218,6 @@ fn expect_bool(value: RuntimeValue, context: &str) -> Result<bool, String> {
     }
 }
 
-fn expect_int_pair(value: RuntimeValue, context: &str) -> Result<(i64, i64), String> {
-    let RuntimeValue::Pair(left, right) = value else {
-        return Err(format!("{context} expected (Int, Int)"));
-    };
-    Ok((expect_int(*left, context)?, expect_int(*right, context)?))
-}
-
 fn expect_str(value: RuntimeValue, context: &str) -> Result<String, String> {
     match value {
         RuntimeValue::Str(value) => Ok(value),
@@ -10062,19 +5226,39 @@ fn expect_str(value: RuntimeValue, context: &str) -> Result<String, String> {
 }
 
 fn expect_byte_array(value: RuntimeValue, context: &str) -> Result<Vec<u8>, String> {
-    let RuntimeValue::Array(values) = value else {
-        return Err(format!("{context} expected Array[Int]"));
-    };
-    values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let byte = expect_int(value, context)?;
-            u8::try_from(byte).map_err(|_| {
-                format!("{context} byte index `{index}` is out of range 0..255: `{byte}`")
+    match value {
+        RuntimeValue::Bytes(bytes) => Ok(bytes),
+        RuntimeValue::ByteBuffer(bytes) => Ok(bytes),
+        RuntimeValue::Array(values) => values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let byte = expect_int(value, context)?;
+                u8::try_from(byte).map_err(|_| {
+                    format!("{context} byte index `{index}` is out of range 0..255: `{byte}`")
+                })
             })
-        })
-        .collect()
+            .collect(),
+        _other => Err(format!("{context} expected Bytes")),
+    }
+}
+
+fn expect_utf16_units(value: RuntimeValue, context: &str) -> Result<Vec<u16>, String> {
+    match value {
+        RuntimeValue::Utf16(units) => Ok(units),
+        RuntimeValue::Utf16Buffer(units) => Ok(units),
+        RuntimeValue::Array(values) => values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let unit = expect_int(value, context)?;
+                u16::try_from(unit).map_err(|_| {
+                    format!("{context} utf16 index `{index}` is out of range 0..65535: `{unit}`")
+                })
+            })
+            .collect(),
+        _other => Err(format!("{context} expected Utf16")),
+    }
 }
 
 fn expect_string_list(value: RuntimeValue, context: &str) -> Result<Vec<String>, String> {
@@ -10087,105 +5271,6 @@ fn expect_string_list(value: RuntimeValue, context: &str) -> Result<Vec<String>,
         .collect()
 }
 
-fn expect_file_stream(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeFileStreamHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(handle)) = value else {
-        return Err(format!("{context} expected FileStream"));
-    };
-    Ok(handle)
-}
-
-fn expect_window(value: RuntimeValue, context: &str) -> Result<RuntimeWindowHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::Window(handle)) = value else {
-        return Err(format!("{context} expected Window"));
-    };
-    Ok(handle)
-}
-
-fn expect_image(value: RuntimeValue, context: &str) -> Result<RuntimeImageHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::Image(handle)) = value else {
-        return Err(format!("{context} expected Image"));
-    };
-    Ok(handle)
-}
-
-fn expect_arcana_desktop_window(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeWindowHandle, String> {
-    expect_window(value, context)
-}
-
-fn expect_arcana_desktop_session(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeAppSessionHandle, String> {
-    expect_app_session(value, context)
-}
-
-fn expect_arcana_desktop_frame(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeAppFrameHandle, String> {
-    expect_app_frame(value, context)
-}
-
-fn expect_arcana_desktop_wake(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeWakeHandle, String> {
-    expect_wake(value, context)
-}
-
-fn expect_arcana_window_id_value(value: RuntimeValue, context: &str) -> Result<i64, String> {
-    match value {
-        RuntimeValue::Record { name, mut fields } if name == "arcana_desktop.types.WindowId" => {
-            expect_int(
-                fields
-                    .remove("value")
-                    .ok_or_else(|| format!("{context} missing WindowId.value field"))?,
-                context,
-            )
-        }
-        other => expect_int(other, context),
-    }
-}
-
-fn expect_named_record(
-    value: RuntimeValue,
-    record_name: &str,
-    context: &str,
-) -> Result<BTreeMap<String, RuntimeValue>, String> {
-    let RuntimeValue::Record { name, fields } = value else {
-        return Err(format!("{context} expected {record_name}, got `{value:?}`"));
-    };
-    if name != record_name {
-        return Err(format!("{context} expected {record_name}, got `{name}`"));
-    }
-    Ok(fields)
-}
-
-fn remove_record_field(
-    fields: &mut BTreeMap<String, RuntimeValue>,
-    field: &str,
-    context: &str,
-) -> Result<RuntimeValue, String> {
-    fields
-        .remove(field)
-        .ok_or_else(|| format!("{context} missing `{field}` field"))
-}
-
-fn arcana_window_id_record(id: i64) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("value".to_string(), RuntimeValue::Int(id));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowId".to_string(),
-        fields,
-    }
-}
-
 fn std_types_core_monotonic_time_ms_record(value: i64) -> RuntimeValue {
     let mut fields = BTreeMap::new();
     fields.insert("value".to_string(), RuntimeValue::Int(value));
@@ -10193,1086 +5278,6 @@ fn std_types_core_monotonic_time_ms_record(value: i64) -> RuntimeValue {
         name: "std.types.core.MonotonicTimeMs".to_string(),
         fields,
     }
-}
-
-fn arcana_desktop_window_value(window: RuntimeWindowHandle) -> RuntimeValue {
-    RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window))
-}
-
-fn arcana_desktop_frame_record(frame: RuntimeAppFrameHandle) -> RuntimeValue {
-    RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(frame))
-}
-
-fn arcana_desktop_session_record(session: RuntimeAppSessionHandle) -> RuntimeValue {
-    RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(session))
-}
-
-fn arcana_desktop_wake_record(wake: RuntimeWakeHandle) -> RuntimeValue {
-    RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(wake))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ArcanaDesktopRuntimeContextSpec {
-    session: RuntimeAppSessionHandle,
-    wake: RuntimeWakeHandle,
-    main_window_id: i64,
-    main_window: RuntimeWindowHandle,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ArcanaDesktopAppContextSpec {
-    runtime: ArcanaDesktopRuntimeContextSpec,
-    current_window_id: Option<i64>,
-    current_is_main_window: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ArcanaDesktopTargetEventSpec {
-    window_id: i64,
-    is_main_window: bool,
-}
-
-fn expect_arcana_window_id_option(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<Option<i64>, String> {
-    match value {
-        RuntimeValue::Variant { name, payload }
-            if name == "Option.Some" || name == "std.option.Option.Some" =>
-        {
-            if payload.len() != 1 {
-                return Err(format!(
-                    "{context} expected Option.Some with one payload item"
-                ));
-            }
-            Ok(Some(expect_arcana_window_id_value(
-                payload
-                    .into_iter()
-                    .next()
-                    .expect("validated payload length"),
-                context,
-            )?))
-        }
-        RuntimeValue::Variant { name, payload }
-            if name == "Option.None" || name == "std.option.Option.None" =>
-        {
-            if !payload.is_empty() {
-                return Err(format!("{context} expected Option.None without payload"));
-            }
-            Ok(None)
-        }
-        other => Err(format!(
-            "{context} expected Option[arcana_desktop.types.WindowId], got `{other:?}`"
-        )),
-    }
-}
-
-fn expect_arcana_desktop_runtime_context(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<ArcanaDesktopRuntimeContextSpec, String> {
-    let mut fields = expect_named_record(value, "arcana_desktop.types.RuntimeContext", context)?;
-    Ok(ArcanaDesktopRuntimeContextSpec {
-        session: expect_arcana_desktop_session(
-            remove_record_field(&mut fields, "session", context)?,
-            context,
-        )?,
-        wake: expect_arcana_desktop_wake(
-            remove_record_field(&mut fields, "wake", context)?,
-            context,
-        )?,
-        main_window_id: expect_arcana_window_id_value(
-            remove_record_field(&mut fields, "main_window_id", context)?,
-            context,
-        )?,
-        main_window: expect_arcana_desktop_window(
-            remove_record_field(&mut fields, "main_window", context)?,
-            context,
-        )?,
-    })
-}
-
-fn expect_arcana_desktop_app_context(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<ArcanaDesktopAppContextSpec, String> {
-    let mut fields = expect_named_record(value, "arcana_desktop.types.AppContext", context)?;
-    Ok(ArcanaDesktopAppContextSpec {
-        runtime: expect_arcana_desktop_runtime_context(
-            remove_record_field(&mut fields, "runtime", context)?,
-            context,
-        )?,
-        current_window_id: expect_arcana_window_id_option(
-            remove_record_field(&mut fields, "current_window_id", context)?,
-            context,
-        )?,
-        current_is_main_window: expect_bool(
-            remove_record_field(&mut fields, "current_is_main_window", context)?,
-            context,
-        )?,
-    })
-}
-
-fn expect_arcana_desktop_target_event(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<ArcanaDesktopTargetEventSpec, String> {
-    let mut fields = expect_named_record(value, "arcana_desktop.types.TargetedEvent", context)?;
-    Ok(ArcanaDesktopTargetEventSpec {
-        window_id: expect_arcana_window_id_value(
-            remove_record_field(&mut fields, "window_id", context)?,
-            context,
-        )?,
-        is_main_window: expect_bool(
-            remove_record_field(&mut fields, "is_main_window", context)?,
-            context,
-        )?,
-    })
-}
-
-fn arcana_desktop_lookup_window_for_id(
-    context: &ArcanaDesktopAppContextSpec,
-    window_id: i64,
-    host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeWindowHandle>, String> {
-    host.events_session_window_by_id(context.runtime.session, window_id)
-}
-
-fn arcana_desktop_cached_main_window_if_live(
-    context: &ArcanaDesktopAppContextSpec,
-    host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeWindowHandle>, String> {
-    arcana_desktop_lookup_window_for_id(context, context.runtime.main_window_id, host)
-}
-
-fn arcana_desktop_best_main_window(
-    context: &ArcanaDesktopAppContextSpec,
-    host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeWindowHandle>, String> {
-    arcana_desktop_cached_main_window_if_live(context, host)
-}
-
-fn arcana_desktop_target_window_value(
-    context: &ArcanaDesktopAppContextSpec,
-    target: &ArcanaDesktopTargetEventSpec,
-    host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeWindowHandle>, String> {
-    if target.window_id == context.runtime.main_window_id {
-        return arcana_desktop_cached_main_window_if_live(context, host);
-    }
-    arcana_desktop_lookup_window_for_id(context, target.window_id, host)
-}
-
-fn arcana_desktop_current_window_value(
-    context: &ArcanaDesktopAppContextSpec,
-    host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeWindowHandle>, String> {
-    let Some(window_id) = context.current_window_id else {
-        return Ok(None);
-    };
-    if window_id == context.runtime.main_window_id {
-        return arcana_desktop_cached_main_window_if_live(context, host);
-    }
-    arcana_desktop_lookup_window_for_id(context, window_id, host)
-}
-
-struct ArcanaWindowConfigSpec {
-    title: String,
-    size: (i64, i64),
-    position: (i64, i64),
-    visible: bool,
-    min_size: (i64, i64),
-    max_size: (i64, i64),
-    resizable: bool,
-    decorated: bool,
-    transparent: bool,
-    topmost: bool,
-    maximized: bool,
-    fullscreen: bool,
-    theme_override_code: i64,
-    cursor_visible: bool,
-    cursor_grab_mode: i64,
-    cursor_icon_code: i64,
-    cursor_position: (i64, i64),
-    text_input_enabled: bool,
-}
-
-fn expect_arcana_window_config(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<ArcanaWindowConfigSpec, String> {
-    let mut cfg = expect_named_record(value, "arcana_desktop.types.WindowConfig", context)?;
-    let title = expect_str(remove_record_field(&mut cfg, "title", context)?, context)?;
-    let mut bounds = expect_named_record(
-        remove_record_field(&mut cfg, "bounds", context)?,
-        "arcana_desktop.types.WindowBounds",
-        context,
-    )?;
-    let size = expect_int_pair(remove_record_field(&mut bounds, "size", context)?, context)?;
-    let position = expect_int_pair(
-        remove_record_field(&mut bounds, "position", context)?,
-        context,
-    )?;
-    let visible = expect_bool(
-        remove_record_field(&mut bounds, "visible", context)?,
-        context,
-    )?;
-    let min_size = expect_int_pair(
-        remove_record_field(&mut bounds, "min_size", context)?,
-        context,
-    )?;
-    let max_size = expect_int_pair(
-        remove_record_field(&mut bounds, "max_size", context)?,
-        context,
-    )?;
-    let mut options = expect_named_record(
-        remove_record_field(&mut cfg, "options", context)?,
-        "arcana_desktop.types.WindowOptions",
-        context,
-    )?;
-    let mut style = expect_named_record(
-        remove_record_field(&mut options, "style", context)?,
-        "arcana_desktop.types.WindowStyle",
-        context,
-    )?;
-    let mut state = expect_named_record(
-        remove_record_field(&mut options, "state", context)?,
-        "arcana_desktop.types.WindowState",
-        context,
-    )?;
-    let mut cursor = expect_named_record(
-        remove_record_field(&mut options, "cursor", context)?,
-        "arcana_desktop.types.CursorSettings",
-        context,
-    )?;
-    Ok(ArcanaWindowConfigSpec {
-        title,
-        size,
-        position,
-        visible,
-        min_size,
-        max_size,
-        resizable: expect_bool(
-            remove_record_field(&mut style, "resizable", context)?,
-            context,
-        )?,
-        decorated: expect_bool(
-            remove_record_field(&mut style, "decorated", context)?,
-            context,
-        )?,
-        transparent: expect_bool(
-            remove_record_field(&mut style, "transparent", context)?,
-            context,
-        )?,
-        topmost: expect_bool(
-            remove_record_field(&mut state, "topmost", context)?,
-            context,
-        )?,
-        maximized: expect_bool(
-            remove_record_field(&mut state, "maximized", context)?,
-            context,
-        )?,
-        fullscreen: expect_bool(
-            remove_record_field(&mut state, "fullscreen", context)?,
-            context,
-        )?,
-        theme_override_code: expect_arcana_window_theme_override_code(
-            remove_record_field(&mut state, "theme_override", context)?,
-            context,
-        )?,
-        cursor_visible: expect_bool(
-            remove_record_field(&mut cursor, "visible", context)?,
-            context,
-        )?,
-        cursor_grab_mode: expect_arcana_cursor_grab_mode_code(
-            remove_record_field(&mut cursor, "grab_mode", context)?,
-            context,
-        )?,
-        cursor_icon_code: expect_arcana_cursor_icon_code(
-            remove_record_field(&mut cursor, "icon", context)?,
-            context,
-        )?,
-        cursor_position: expect_int_pair(
-            remove_record_field(&mut cursor, "position", context)?,
-            context,
-        )?,
-        text_input_enabled: expect_bool(
-            remove_record_field(&mut options, "text_input_enabled", context)?,
-            context,
-        )?,
-    })
-}
-
-fn arcana_window_theme_override_variant(code: i64) -> RuntimeValue {
-    let suffix = match code {
-        1 => "Light",
-        2 => "Dark",
-        _ => "System",
-    };
-    RuntimeValue::Variant {
-        name: format!("arcana_desktop.types.WindowThemeOverride.{suffix}"),
-        payload: Vec::new(),
-    }
-}
-
-fn expect_arcana_window_theme_override_code(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<i64, String> {
-    let RuntimeValue::Variant { name, .. } = value else {
-        return Err(format!("{context} expected WindowThemeOverride"));
-    };
-    if variant_name_matches(&name, "arcana_desktop.types.WindowThemeOverride.Light")
-        || variant_name_matches(&name, "WindowThemeOverride.Light")
-    {
-        return Ok(1);
-    }
-    if variant_name_matches(&name, "arcana_desktop.types.WindowThemeOverride.Dark")
-        || variant_name_matches(&name, "WindowThemeOverride.Dark")
-    {
-        return Ok(2);
-    }
-    if variant_name_matches(&name, "arcana_desktop.types.WindowThemeOverride.System")
-        || variant_name_matches(&name, "WindowThemeOverride.System")
-    {
-        return Ok(0);
-    }
-    Err(format!(
-        "{context} expected WindowThemeOverride variant, got `{name}`"
-    ))
-}
-
-fn arcana_cursor_icon_variant(code: i64) -> RuntimeValue {
-    let suffix = match code {
-        1 => "Text",
-        2 => "Crosshair",
-        3 => "Hand",
-        4 => "Move",
-        5 => "Wait",
-        6 => "Help",
-        7 => "NotAllowed",
-        8 => "ResizeHorizontal",
-        9 => "ResizeVertical",
-        10 => "ResizeNwse",
-        11 => "ResizeNesw",
-        _ => "Default",
-    };
-    RuntimeValue::Variant {
-        name: format!("arcana_desktop.types.CursorIcon.{suffix}"),
-        payload: Vec::new(),
-    }
-}
-
-fn expect_arcana_cursor_icon_code(value: RuntimeValue, context: &str) -> Result<i64, String> {
-    let RuntimeValue::Variant { name, .. } = value else {
-        return Err(format!("{context} expected CursorIcon"));
-    };
-    let code = match name.rsplit('.').next().unwrap_or_default() {
-        "Text" => 1,
-        "Crosshair" => 2,
-        "Hand" => 3,
-        "Move" => 4,
-        "Wait" => 5,
-        "Help" => 6,
-        "NotAllowed" => 7,
-        "ResizeHorizontal" => 8,
-        "ResizeVertical" => 9,
-        "ResizeNwse" => 10,
-        "ResizeNesw" => 11,
-        "Default" => 0,
-        _ => {
-            return Err(format!(
-                "{context} expected CursorIcon variant, got `{name}`"
-            ));
-        }
-    };
-    Ok(code)
-}
-
-fn arcana_cursor_grab_mode_variant(code: i64) -> RuntimeValue {
-    let suffix = match code {
-        1 => "Confined",
-        2 => "Locked",
-        _ => "Free",
-    };
-    RuntimeValue::Variant {
-        name: format!("arcana_desktop.types.CursorGrabMode.{suffix}"),
-        payload: Vec::new(),
-    }
-}
-
-fn expect_arcana_cursor_grab_mode_code(value: RuntimeValue, context: &str) -> Result<i64, String> {
-    let RuntimeValue::Variant { name, .. } = value else {
-        return Err(format!("{context} expected CursorGrabMode"));
-    };
-    let code = match name.rsplit('.').next().unwrap_or_default() {
-        "Confined" => 1,
-        "Locked" => 2,
-        "Free" => 0,
-        _ => {
-            return Err(format!(
-                "{context} expected CursorGrabMode variant, got `{name}`"
-            ));
-        }
-    };
-    Ok(code)
-}
-
-fn arcana_window_theme_variant(code: i64) -> RuntimeValue {
-    let suffix = match code {
-        1 => "Light",
-        2 => "Dark",
-        _ => "Unknown",
-    };
-    RuntimeValue::Variant {
-        name: format!("arcana_desktop.types.WindowTheme.{suffix}"),
-        payload: Vec::new(),
-    }
-}
-
-fn arcana_monitor_info_record(
-    index: i64,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let mut fields = BTreeMap::new();
-    let position = host.window_monitor_position(index)?;
-    let size = host.window_monitor_size(index)?;
-    fields.insert("index".to_string(), RuntimeValue::Int(index));
-    fields.insert(
-        "name".to_string(),
-        RuntimeValue::Str(host.window_monitor_name(index)?),
-    );
-    fields.insert(
-        "position".to_string(),
-        RuntimeValue::Pair(
-            Box::new(RuntimeValue::Int(position.0)),
-            Box::new(RuntimeValue::Int(position.1)),
-        ),
-    );
-    fields.insert(
-        "size".to_string(),
-        RuntimeValue::Pair(
-            Box::new(RuntimeValue::Int(size.0)),
-            Box::new(RuntimeValue::Int(size.1)),
-        ),
-    );
-    fields.insert(
-        "scale_factor_milli".to_string(),
-        RuntimeValue::Int(host.window_monitor_scale_factor_milli(index)?),
-    );
-    fields.insert(
-        "primary".to_string(),
-        RuntimeValue::Bool(host.window_monitor_is_primary(index)?),
-    );
-    Ok(RuntimeValue::Record {
-        name: "arcana_desktop.types.MonitorInfo".to_string(),
-        fields,
-    })
-}
-
-fn arcana_composition_area_record(
-    active: bool,
-    position: (i64, i64),
-    size: (i64, i64),
-) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("active".to_string(), RuntimeValue::Bool(active));
-    fields.insert(
-        "position".to_string(),
-        RuntimeValue::Pair(
-            Box::new(RuntimeValue::Int(position.0)),
-            Box::new(RuntimeValue::Int(position.1)),
-        ),
-    );
-    fields.insert(
-        "size".to_string(),
-        RuntimeValue::Pair(
-            Box::new(RuntimeValue::Int(size.0)),
-            Box::new(RuntimeValue::Int(size.1)),
-        ),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.CompositionArea".to_string(),
-        fields,
-    }
-}
-
-fn arcana_window_bounds_record(
-    size: (i64, i64),
-    position: (i64, i64),
-    visible: bool,
-    min_size: (i64, i64),
-    max_size: (i64, i64),
-) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "size".to_string(),
-        make_pair(RuntimeValue::Int(size.0), RuntimeValue::Int(size.1)),
-    );
-    fields.insert(
-        "position".to_string(),
-        make_pair(RuntimeValue::Int(position.0), RuntimeValue::Int(position.1)),
-    );
-    fields.insert("visible".to_string(), RuntimeValue::Bool(visible));
-    fields.insert(
-        "min_size".to_string(),
-        make_pair(RuntimeValue::Int(min_size.0), RuntimeValue::Int(min_size.1)),
-    );
-    fields.insert(
-        "max_size".to_string(),
-        make_pair(RuntimeValue::Int(max_size.0), RuntimeValue::Int(max_size.1)),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowBounds".to_string(),
-        fields,
-    }
-}
-
-fn arcana_window_style_record(resizable: bool, decorated: bool, transparent: bool) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("resizable".to_string(), RuntimeValue::Bool(resizable));
-    fields.insert("decorated".to_string(), RuntimeValue::Bool(decorated));
-    fields.insert("transparent".to_string(), RuntimeValue::Bool(transparent));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowStyle".to_string(),
-        fields,
-    }
-}
-
-fn arcana_cursor_settings_record(
-    visible: bool,
-    grab_mode_code: i64,
-    icon_code: i64,
-    position: (i64, i64),
-) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("visible".to_string(), RuntimeValue::Bool(visible));
-    fields.insert(
-        "grab_mode".to_string(),
-        arcana_cursor_grab_mode_variant(grab_mode_code),
-    );
-    fields.insert("icon".to_string(), arcana_cursor_icon_variant(icon_code));
-    fields.insert(
-        "position".to_string(),
-        make_pair(RuntimeValue::Int(position.0), RuntimeValue::Int(position.1)),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.CursorSettings".to_string(),
-        fields,
-    }
-}
-
-fn arcana_window_state_record(
-    topmost: bool,
-    maximized: bool,
-    fullscreen: bool,
-    theme_override_code: i64,
-) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("topmost".to_string(), RuntimeValue::Bool(topmost));
-    fields.insert("maximized".to_string(), RuntimeValue::Bool(maximized));
-    fields.insert("fullscreen".to_string(), RuntimeValue::Bool(fullscreen));
-    fields.insert(
-        "theme_override".to_string(),
-        arcana_window_theme_override_variant(theme_override_code),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowState".to_string(),
-        fields,
-    }
-}
-
-fn arcana_window_options_record(
-    style: RuntimeValue,
-    state: RuntimeValue,
-    cursor: RuntimeValue,
-    text_input_enabled: bool,
-) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("style".to_string(), style);
-    fields.insert("state".to_string(), state);
-    fields.insert("cursor".to_string(), cursor);
-    fields.insert(
-        "text_input_enabled".to_string(),
-        RuntimeValue::Bool(text_input_enabled),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowOptions".to_string(),
-        fields,
-    }
-}
-
-fn arcana_window_settings_record(
-    window: RuntimeWindowHandle,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let bounds = arcana_window_bounds_record(
-        host.window_size(window)?,
-        host.window_position(window)?,
-        host.window_visible(window)?,
-        host.window_min_size(window)?,
-        host.window_max_size(window)?,
-    );
-    let style = arcana_window_style_record(
-        host.window_resizable(window)?,
-        host.window_decorated(window)?,
-        host.window_transparent(window)?,
-    );
-    let cursor = arcana_cursor_settings_record(
-        host.window_cursor_visible(window)?,
-        host.window_cursor_grab_mode(window)?,
-        host.window_cursor_icon_code(window)?,
-        host.window_cursor_position(window)?,
-    );
-    let state = arcana_window_state_record(
-        host.window_topmost(window)?,
-        host.window_maximized(window)?,
-        host.window_fullscreen(window)?,
-        host.window_theme_override_code(window)?,
-    );
-    let options = arcana_window_options_record(
-        style,
-        state,
-        cursor,
-        host.window_text_input_enabled(window)?,
-    );
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "title".to_string(),
-        RuntimeValue::Str(host.window_title(window)?),
-    );
-    fields.insert("bounds".to_string(), bounds);
-    fields.insert("options".to_string(), options);
-    Ok(RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowSettings".to_string(),
-        fields,
-    })
-}
-
-fn arcana_text_input_settings_record(
-    window: RuntimeWindowHandle,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "enabled".to_string(),
-        RuntimeValue::Bool(host.window_text_input_enabled(window)?),
-    );
-    fields.insert(
-        "composition_area".to_string(),
-        arcana_composition_area_record(
-            host.text_input_composition_area_active(window)?,
-            host.text_input_composition_area_position(window)?,
-            host.text_input_composition_area_size(window)?,
-        ),
-    );
-    Ok(RuntimeValue::Record {
-        name: "arcana_desktop.types.TextInputSettings".to_string(),
-        fields,
-    })
-}
-
-fn arcana_desktop_key_meta_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
-    fields.insert("repeated".to_string(), RuntimeValue::Bool(event.repeated));
-    fields.insert(
-        "physical_key".to_string(),
-        RuntimeValue::Int(event.physical_key),
-    );
-    fields.insert(
-        "logical_key".to_string(),
-        RuntimeValue::Int(event.logical_key),
-    );
-    fields.insert(
-        "location".to_string(),
-        RuntimeValue::Int(event.key_location),
-    );
-    fields.insert("text".to_string(), RuntimeValue::Str(event.text.clone()));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.KeyMeta".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_key_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert("key".to_string(), RuntimeValue::Int(event.key_code));
-    fields.insert("meta".to_string(), arcana_desktop_key_meta_record(event));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.KeyEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_mouse_button_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert("button".to_string(), RuntimeValue::Int(event.a));
-    fields.insert(
-        "position".to_string(),
-        make_pair(
-            RuntimeValue::Int(event.pointer_x),
-            RuntimeValue::Int(event.pointer_y),
-        ),
-    );
-    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.MouseButtonEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_mouse_move_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert(
-        "position".to_string(),
-        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
-    );
-    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.MouseMoveEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_mouse_wheel_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert(
-        "delta".to_string(),
-        make_pair(RuntimeValue::Int(0), RuntimeValue::Int(event.a)),
-    );
-    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.MouseWheelEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_text_input_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert("text".to_string(), RuntimeValue::Str(event.text.clone()));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.TextInputEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_text_composition_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert("text".to_string(), RuntimeValue::Str(event.text.clone()));
-    fields.insert("caret".to_string(), RuntimeValue::Int(event.a));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.TextCompositionEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_file_drop_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert("path".to_string(), RuntimeValue::Str(event.text.clone()));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.FileDropEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_device_id_value(device_id: i64) -> RuntimeValue {
-    if device_id == 0 {
-        return none_variant();
-    }
-    some_variant(RuntimeValue::Record {
-        name: "arcana_desktop.types.DeviceId".to_string(),
-        fields: BTreeMap::from([("value".to_string(), RuntimeValue::Int(device_id))]),
-    })
-}
-
-fn arcana_desktop_raw_mouse_motion_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "device_id".to_string(),
-        arcana_desktop_device_id_value(event.window_id),
-    );
-    fields.insert(
-        "delta".to_string(),
-        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.RawMouseMotionEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_raw_mouse_button_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "device_id".to_string(),
-        arcana_desktop_device_id_value(event.window_id),
-    );
-    fields.insert("button".to_string(), RuntimeValue::Int(event.a));
-    fields.insert("pressed".to_string(), RuntimeValue::Bool(event.b != 0));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.RawMouseButtonEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_raw_mouse_wheel_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "device_id".to_string(),
-        arcana_desktop_device_id_value(event.window_id),
-    );
-    fields.insert(
-        "delta".to_string(),
-        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.RawMouseWheelEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_raw_key_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "device_id".to_string(),
-        arcana_desktop_device_id_value(event.window_id),
-    );
-    fields.insert("key".to_string(), RuntimeValue::Int(event.key_code));
-    fields.insert("meta".to_string(), arcana_desktop_key_meta_record(event));
-    fields.insert("pressed".to_string(), RuntimeValue::Bool(event.b != 0));
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.RawKeyEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_window_event_variant(event: &RuntimeEventRecord) -> RuntimeValue {
-    match event.kind {
-        1 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowResized".to_string(),
-            payload: vec![RuntimeValue::Record {
-                name: "arcana_desktop.types.WindowResizeEvent".to_string(),
-                fields: BTreeMap::from([
-                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
-                    (
-                        "size".to_string(),
-                        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
-                    ),
-                ]),
-            }],
-        },
-        10 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowMoved".to_string(),
-            payload: vec![RuntimeValue::Record {
-                name: "arcana_desktop.types.WindowMoveEvent".to_string(),
-                fields: BTreeMap::from([
-                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
-                    (
-                        "position".to_string(),
-                        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
-                    ),
-                ]),
-            }],
-        },
-        2 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowCloseRequested".to_string(),
-            payload: vec![RuntimeValue::Int(event.window_id)],
-        },
-        3 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowFocused".to_string(),
-            payload: vec![RuntimeValue::Record {
-                name: "arcana_desktop.types.WindowFocusEvent".to_string(),
-                fields: BTreeMap::from([
-                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
-                    ("focused".to_string(), RuntimeValue::Bool(event.a != 0)),
-                ]),
-            }],
-        },
-        13 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowRedrawRequested".to_string(),
-            payload: vec![RuntimeValue::Int(event.window_id)],
-        },
-        16 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowScaleFactorChanged".to_string(),
-            payload: vec![RuntimeValue::Record {
-                name: "arcana_desktop.types.WindowScaleFactorEvent".to_string(),
-                fields: BTreeMap::from([
-                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
-                    ("scale_factor_milli".to_string(), RuntimeValue::Int(event.a)),
-                ]),
-            }],
-        },
-        17 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.WindowThemeChanged".to_string(),
-            payload: vec![RuntimeValue::Record {
-                name: "arcana_desktop.types.WindowThemeEvent".to_string(),
-                fields: BTreeMap::from([
-                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
-                    ("theme_code".to_string(), RuntimeValue::Int(event.a)),
-                ]),
-            }],
-        },
-        4 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.KeyDown".to_string(),
-            payload: vec![arcana_desktop_key_event_record(event)],
-        },
-        5 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.KeyUp".to_string(),
-            payload: vec![arcana_desktop_key_event_record(event)],
-        },
-        6 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.MouseDown".to_string(),
-            payload: vec![arcana_desktop_mouse_button_event_record(event)],
-        },
-        7 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.MouseUp".to_string(),
-            payload: vec![arcana_desktop_mouse_button_event_record(event)],
-        },
-        8 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.MouseMove".to_string(),
-            payload: vec![arcana_desktop_mouse_move_event_record(event)],
-        },
-        9 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.MouseWheel".to_string(),
-            payload: vec![arcana_desktop_mouse_wheel_event_record(event)],
-        },
-        11 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.MouseEntered".to_string(),
-            payload: vec![RuntimeValue::Int(event.window_id)],
-        },
-        12 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.MouseLeft".to_string(),
-            payload: vec![RuntimeValue::Int(event.window_id)],
-        },
-        14 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.TextInput".to_string(),
-            payload: vec![arcana_desktop_text_input_event_record(event)],
-        },
-        24 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.TextCompositionStarted".to_string(),
-            payload: vec![RuntimeValue::Int(event.window_id)],
-        },
-        25 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.TextCompositionUpdated".to_string(),
-            payload: vec![arcana_desktop_text_composition_event_record(event)],
-        },
-        26 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.TextCompositionCommitted".to_string(),
-            payload: vec![arcana_desktop_text_composition_event_record(event)],
-        },
-        27 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.TextCompositionCancelled".to_string(),
-            payload: vec![RuntimeValue::Int(event.window_id)],
-        },
-        15 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.WindowEvent.FileDropped".to_string(),
-            payload: vec![arcana_desktop_file_drop_event_record(event)],
-        },
-        _ => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.Unknown".to_string(),
-            payload: vec![RuntimeValue::Int(event.kind)],
-        },
-    }
-}
-
-fn arcana_desktop_device_event_variant(event: &RuntimeEventRecord) -> RuntimeValue {
-    match event.kind {
-        18 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.DeviceEvent.RawMouseMotion".to_string(),
-            payload: vec![arcana_desktop_raw_mouse_motion_event_record(event)],
-        },
-        19 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.DeviceEvent.RawMouseButton".to_string(),
-            payload: vec![arcana_desktop_raw_mouse_button_event_record(event)],
-        },
-        28 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.DeviceEvent.RawMouseWheel".to_string(),
-            payload: vec![arcana_desktop_raw_mouse_wheel_event_record(event)],
-        },
-        29 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.DeviceEvent.RawKey".to_string(),
-            payload: vec![arcana_desktop_raw_key_event_record(event)],
-        },
-        _ => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.Unknown".to_string(),
-            payload: vec![RuntimeValue::Int(event.kind)],
-        },
-    }
-}
-
-fn arcana_desktop_window_dispatch_record(event: &RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert(
-        "window_id".to_string(),
-        arcana_window_id_record(event.window_id),
-    );
-    fields.insert(
-        "event".to_string(),
-        arcana_desktop_window_event_variant(event),
-    );
-    RuntimeValue::Record {
-        name: "arcana_desktop.types.WindowDispatchEvent".to_string(),
-        fields,
-    }
-}
-
-fn arcana_desktop_app_event_value(event: RuntimeEventRecord) -> RuntimeValue {
-    match event.kind {
-        20 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.AppResumed".to_string(),
-            payload: Vec::new(),
-        },
-        21 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.Wake".to_string(),
-            payload: Vec::new(),
-        },
-        22 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.AppSuspended".to_string(),
-            payload: Vec::new(),
-        },
-        23 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.AboutToWait".to_string(),
-            payload: Vec::new(),
-        },
-        18 | 19 | 28 | 29 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.Device".to_string(),
-            payload: vec![arcana_desktop_device_event_variant(&event)],
-        },
-        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 24 | 25
-        | 26 | 27 => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.Window".to_string(),
-            payload: vec![arcana_desktop_window_dispatch_record(&event)],
-        },
-        _ => RuntimeValue::Variant {
-            name: "arcana_desktop.types.AppEvent.Unknown".to_string(),
-            payload: vec![RuntimeValue::Int(event.kind)],
-        },
-    }
-}
-
-fn expect_arcana_composition_area(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<(bool, (i64, i64), (i64, i64)), String> {
-    let mut fields = expect_named_record(value, "arcana_desktop.types.CompositionArea", context)?;
-    let active = expect_bool(
-        remove_record_field(&mut fields, "active", context)?,
-        context,
-    )?;
-    let position = expect_int_pair(
-        remove_record_field(&mut fields, "position", context)?,
-        context,
-    )?;
-    let size = expect_int_pair(remove_record_field(&mut fields, "size", context)?, context)?;
-    Ok((active, position, size))
 }
 
 fn runtime_bundle_manifest_candidates(bundle_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -11299,25 +5304,22 @@ fn runtime_bundle_manifest_candidates(bundle_dir: &Path) -> Result<Vec<PathBuf>,
     Ok(manifests)
 }
 
-fn runtime_resolve_manifest_override_path(
-    host: &mut dyn RuntimeHost,
-    value: &str,
-) -> Result<PathBuf, String> {
+fn runtime_resolve_manifest_override_path(value: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(value);
     if path.is_absolute() {
         return Ok(normalize_lexical_path(&path));
     }
+    let cwd = std::env::current_dir()
+        .map_err(|err| format!("failed to resolve current directory: {err}"))?;
     Ok(normalize_lexical_path(
-        &PathBuf::from(host.cwd()?).join(path),
+        &normalize_lexical_path(&cwd).join(path),
     ))
 }
 
-fn load_runtime_native_products_for_host(
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeNativeProductCatalog, String> {
-    let manifest_override = host.env_get(ARCANA_NATIVE_BUNDLE_MANIFEST_ENV)?;
+fn load_runtime_native_products() -> Result<RuntimeNativeProductCatalog, String> {
+    let manifest_override = std::env::var(ARCANA_NATIVE_BUNDLE_MANIFEST_ENV).unwrap_or_default();
     if !manifest_override.is_empty() {
-        let manifest_path = runtime_resolve_manifest_override_path(host, &manifest_override)?;
+        let manifest_path = runtime_resolve_manifest_override_path(&manifest_override)?;
         if !manifest_path.is_file() {
             return Err(format!(
                 "native bundle manifest override `{}` does not exist",
@@ -11326,9 +5328,9 @@ fn load_runtime_native_products_for_host(
         }
         return load_bundle_native_products_from_manifest_path(&manifest_path);
     }
-    let bundle_override = host.env_get(ARCANA_NATIVE_BUNDLE_DIR_ENV)?;
+    let bundle_override = std::env::var(ARCANA_NATIVE_BUNDLE_DIR_ENV).unwrap_or_default();
     if !bundle_override.is_empty() {
-        let bundle_dir = runtime_resolve_manifest_override_path(host, &bundle_override)?;
+        let bundle_dir = runtime_resolve_manifest_override_path(&bundle_override)?;
         let manifests = runtime_bundle_manifest_candidates(&bundle_dir)?;
         return match manifests.as_slice() {
             [manifest] => load_bundle_native_products_from_manifest_path(manifest),
@@ -11339,7 +5341,9 @@ fn load_runtime_native_products_for_host(
             )),
         };
     }
-    let cwd = PathBuf::from(host.cwd()?);
+    let cwd = std::env::current_dir()
+        .map(|path| normalize_lexical_path(&path))
+        .map_err(|err| format!("failed to resolve current directory: {err}"))?;
     let cwd_manifests = runtime_bundle_manifest_candidates(&cwd)?;
     match cwd_manifests.as_slice() {
         [manifest] => load_bundle_native_products_from_manifest_path(manifest),
@@ -11358,12 +5362,11 @@ fn reset_runtime_native_products_cache() {
 }
 
 fn with_runtime_native_products<R>(
-    host: &mut dyn RuntimeHost,
     action: impl FnOnce(&mut RuntimeNativeProductCatalog) -> Result<R, String>,
 ) -> Result<R, String> {
     ACTIVE_RUNTIME_NATIVE_PRODUCTS.with(|slot| {
         if slot.borrow().is_none() {
-            let catalog = load_runtime_native_products_for_host(host)?;
+            let catalog = load_runtime_native_products()?;
             *slot.borrow_mut() = Some(catalog);
         }
         let mut borrow = slot.borrow_mut();
@@ -11391,11 +5394,8 @@ fn runtime_default_package_asset_root(package_id: &str) -> String {
     )
 }
 
-fn runtime_current_package_asset_root(
-    current_package_id: &str,
-    host: &mut dyn RuntimeHost,
-) -> Result<PathBuf, String> {
-    match with_runtime_native_products(host, |catalog| {
+fn runtime_current_package_asset_root(current_package_id: &str) -> Result<PathBuf, String> {
+    match with_runtime_native_products(|catalog| {
         if let Some(root) = catalog.package_asset_root(current_package_id) {
             let path = catalog.bundle_dir().join(root);
             if path.exists() {
@@ -11416,7 +5416,9 @@ fn runtime_current_package_asset_root(
         Err(err) if !err.is_empty() => return Err(err),
         Err(_) => {}
     }
-    let cwd = PathBuf::from(host.cwd()?);
+    let cwd = std::env::current_dir()
+        .map(|path| normalize_lexical_path(&path))
+        .map_err(|err| format!("failed to resolve current directory: {err}"))?;
     let fallback =
         normalize_lexical_path(&cwd.join(runtime_default_package_asset_root(current_package_id)));
     if fallback.exists() {
@@ -11428,2726 +5430,19 @@ fn runtime_current_package_asset_root(
     ))
 }
 
-fn with_runtime_binding_callback_context<R>(
-    plan: &RuntimePackagePlan,
-    host_data: *mut (),
-    host_vtable: *mut (),
-    action: impl FnOnce() -> Result<R, String>,
-) -> Result<R, String> {
-    ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT.with(|slot| {
-        let previous = slot.replace(Some(RuntimeBindingCallbackContext {
-            plan: plan as *const RuntimePackagePlan,
-            host_data,
-            host_vtable,
-        }));
-        let result = action();
-        let _ = slot.replace(previous);
-        result
-    })
-}
-
-fn leak_runtime_binding_text(text: &str) -> &'static str {
-    Box::leak(text.to_string().into_boxed_str())
-}
-
-unsafe extern "system" fn runtime_binding_owned_bytes_free(ptr: *mut u8, len: usize) {
-    unsafe {
-        arcana_cabi::free_owned_bytes(ptr, len);
-    }
-}
-
-unsafe extern "system" fn runtime_binding_owned_str_free(ptr: *mut u8, len: usize) {
-    unsafe {
-        arcana_cabi::free_owned_str(ptr, len);
-    }
-}
-
-unsafe fn free_runtime_binding_callback_user_data(user_data: *mut c_void) {
-    if !user_data.is_null() {
-        unsafe {
-            drop(Box::from_raw(
-                user_data as *mut RuntimeBindingCallbackThunkData,
-            ));
-        }
-    }
-}
-
-fn runtime_binding_callback_specs_for_package(
-    plan: &RuntimePackagePlan,
-    package_id: &str,
-) -> Vec<RuntimeBindingCallbackRegistrationSpec> {
-    plan.native_callbacks
-        .iter()
-        .filter(|callback| callback.package_id == package_id)
-        .map(|callback| RuntimeBindingCallbackRegistrationSpec {
-            name: leak_runtime_binding_text(&callback.name),
-            callback: runtime_binding_callback_trampoline,
-            owned_bytes_free: runtime_binding_owned_bytes_free,
-            owned_str_free: runtime_binding_owned_str_free,
-            user_data: Box::into_raw(Box::new(RuntimeBindingCallbackThunkData {
-                callback: callback.clone(),
-            })) as *mut c_void,
-            cleanup_user_data: free_runtime_binding_callback_user_data,
-        })
-        .collect()
-}
-
-fn runtime_binding_param_metadata(
-    param: &RuntimeParamPlan,
-) -> Result<ArcanaCabiBindingParam, String> {
-    let source_mode = ArcanaCabiParamSourceMode::from_param_mode_text(param.mode.as_deref())?;
-    let input_type = ArcanaCabiBindingType::parse(&param.ty.render())?;
-    validate_binding_transport_type(&input_type)?;
-    Ok(ArcanaCabiBindingParam::binding(
-        param.name.clone(),
-        source_mode,
-        input_type,
-    ))
-}
-
-fn runtime_binding_params_metadata(
-    params: &[RuntimeParamPlan],
-) -> Result<Vec<ArcanaCabiBindingParam>, String> {
-    params
-        .iter()
-        .map(runtime_binding_param_metadata)
-        .collect::<Result<Vec<_>, _>>()
-}
-
-fn runtime_binding_return_type(
-    return_type: Option<&IrRoutineType>,
-) -> Result<ArcanaCabiBindingType, String> {
-    let ty = ArcanaCabiBindingType::parse(
-        &return_type
-            .map(IrRoutineType::render)
-            .unwrap_or_else(|| "Unit".to_string()),
-    )?;
-    validate_binding_transport_type(&ty)?;
-    Ok(ty)
-}
-
-fn runtime_binding_import_signatures_for_package(
-    plan: &RuntimePackagePlan,
-    package_id: &str,
-) -> Result<Vec<ArcanaCabiBindingSignature>, String> {
-    plan.routines
-        .iter()
-        .filter(|routine| routine.package_id == package_id)
-        .filter_map(|routine| routine.native_impl.as_ref().map(|name| (routine, name)))
-        .map(|(routine, name)| {
-            Ok(ArcanaCabiBindingSignature {
-                name: name.clone(),
-                return_type: runtime_binding_return_type(routine.return_type.as_ref())?,
-                params: runtime_binding_params_metadata(&routine.params)?,
-            })
-        })
-        .collect()
-}
-
-fn runtime_binding_callback_signatures_for_package(
-    plan: &RuntimePackagePlan,
-    package_id: &str,
-) -> Result<Vec<ArcanaCabiBindingSignature>, String> {
-    plan.native_callbacks
-        .iter()
-        .filter(|callback| callback.package_id == package_id)
-        .map(|callback| {
-            Ok(ArcanaCabiBindingSignature {
-                name: callback.name.clone(),
-                return_type: runtime_binding_return_type(callback.return_type.as_ref())?,
-                params: runtime_binding_params_metadata(&callback.params)?,
-            })
-        })
-        .collect()
-}
-
-unsafe extern "system" fn runtime_binding_callback_trampoline(
-    user_data: *mut c_void,
-    args: *const ArcanaCabiBindingValueV1,
-    arg_count: usize,
-    out_write_backs: *mut ArcanaCabiBindingValueV1,
-    out_result: *mut ArcanaCabiBindingValueV1,
-) -> i32 {
-    let Some(thunk_data) =
-        (unsafe { (user_data as *mut RuntimeBindingCallbackThunkData).as_ref() })
-    else {
-        return 0;
-    };
-    let callback_args = if arg_count == 0 {
-        &[]
-    } else if args.is_null() {
-        return 0;
-    } else {
-        unsafe { std::slice::from_raw_parts(args, arg_count) }
-    };
-    if arg_count != 0 && out_write_backs.is_null() {
-        return 0;
-    }
-    let result = ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT.with(|slot| {
-        let borrow = slot.borrow();
-        let Some(context) = *borrow else {
-            return Err(
-                "native binding callback invoked without an active runtime context".to_string(),
-            );
-        };
-        let plan = unsafe { context.plan.as_ref() }
-            .ok_or_else(|| "native binding callback lost runtime package plan".to_string())?;
-        let host_ptr: *mut dyn RuntimeHost =
-            unsafe { std::mem::transmute((context.host_data, context.host_vtable)) };
-        let host = unsafe { host_ptr.as_mut() }
-            .ok_or_else(|| "native binding callback lost runtime host".to_string())?;
-        execute_runtime_binding_callback(plan, host, &thunk_data.callback, callback_args)
-    });
-    match result {
-        Ok(outcome) => {
-            if !out_write_backs.is_null() {
-                let slots = unsafe { std::slice::from_raw_parts_mut(out_write_backs, arg_count) };
-                slots.copy_from_slice(&outcome.write_backs);
-            }
-            if !out_result.is_null() {
-                unsafe {
-                    *out_result = outcome.result;
-                }
-            }
-            1
-        }
-        Err(_) => {
-            if !out_write_backs.is_null() {
-                let slots = unsafe { std::slice::from_raw_parts_mut(out_write_backs, arg_count) };
-                for slot in slots {
-                    *slot = ArcanaCabiBindingValueV1::default();
-                }
-            }
-            if !out_result.is_null() {
-                unsafe {
-                    *out_result = ArcanaCabiBindingValueV1::default();
-                }
-            }
-            0
-        }
-    }
-}
-
-fn execute_runtime_binding_callback(
-    plan: &RuntimePackagePlan,
-    host: &mut dyn RuntimeHost,
-    callback: &RuntimeNativeCallbackPlan,
-    args: &[ArcanaCabiBindingValueV1],
-) -> Result<RuntimeBindingCallbackOutcome, String> {
-    if callback.params.len() != args.len() {
-        return Err(format!(
-            "native callback `{}` expected {} arguments, got {}",
-            callback.name,
-            callback.params.len(),
-            args.len()
-        ));
-    }
-    let routine_key = callback.target_routine_key.as_deref().ok_or_else(|| {
-        format!(
-            "native callback `{}` does not resolve to a runtime routine",
-            callback.name
-        )
-    })?;
-    let routine_index = plan
-        .routines
-        .iter()
-        .enumerate()
-        .find(|(_, routine)| routine.routine_key == routine_key)
-        .map(|(index, _)| index)
-        .ok_or_else(|| {
-            format!(
-                "native callback `{}` targets missing routine `{}`",
-                callback.name, routine_key
-            )
-        })?;
-    let runtime_args = callback
-        .params
-        .iter()
-        .zip(args.iter())
-        .map(|(param, value)| {
-            runtime_value_from_binding_input(
-                &plan.binding_layouts,
-                &callback.package_id,
-                &param.ty.render(),
-                value,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut state = RuntimeExecutionState::default();
-    let outcome = execute_routine_call_with_state(
-        plan,
-        routine_index,
-        Vec::new(),
-        runtime_args,
-        &[],
-        None,
-        None,
-        None,
-        None,
-        None,
-        &mut state,
-        host,
-        false,
-    )
-    .map_err(runtime_eval_message)?;
-    if let Some(control) = outcome.control {
-        return Err(runtime_eval_message(match control {
-            FlowSignal::OwnerExit {
-                owner_key,
-                exit_name,
-            } => RuntimeEvalSignal::OwnerExit {
-                owner_key,
-                exit_name,
-            },
-            other => RuntimeEvalSignal::Message(format!(
-                "unsupported native binding callback control flow `{other:?}`"
-            )),
-        }));
-    }
-    let write_backs =
-        runtime_binding_callback_write_backs(&plan.binding_layouts, callback, &outcome.final_args)?;
-    let result = runtime_binding_output_from_runtime_value(
-        &plan.binding_layouts,
-        &callback.package_id,
-        callback
-            .return_type
-            .as_ref()
-            .map(IrRoutineType::render)
-            .unwrap_or_else(|| "Unit".to_string())
-            .as_str(),
-        outcome.value,
-    )
-    .inspect_err(|_err| {
-        runtime_release_binding_values(write_backs.iter().copied());
-    })?;
-    Ok(RuntimeBindingCallbackOutcome {
-        result,
-        write_backs,
-    })
-}
-
-fn execute_runtime_native_binding_import(
-    plan: &RuntimePackagePlan,
-    routine: &RuntimeRoutinePlan,
-    binding_name: &str,
-    args: &[RuntimeValue],
-    host: &mut dyn RuntimeHost,
-) -> Result<RoutineExecutionOutcome, String> {
-    let (host_data, host_vtable): (*mut (), *mut ()) =
-        unsafe { std::mem::transmute::<&mut dyn RuntimeHost, (*mut (), *mut ())>(host) };
-    let mut storage = RuntimeBindingArgStorage::default();
-    let cabi_args = routine
-        .params
-        .iter()
-        .zip(args.iter())
-        .map(|(param, value)| {
-            runtime_binding_input_from_runtime_value(
-                &plan.binding_layouts,
-                &routine.package_id,
-                &param.ty.render(),
-                value,
-                &mut storage,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let callback_specs = runtime_binding_callback_specs_for_package(plan, &routine.package_id);
-    let expected_imports =
-        runtime_binding_import_signatures_for_package(plan, &routine.package_id)?;
-    let expected_callbacks =
-        runtime_binding_callback_signatures_for_package(plan, &routine.package_id)?;
-    let outcome = with_runtime_binding_callback_context(plan, host_data, host_vtable, || {
-        let host_ptr: *mut dyn RuntimeHost =
-            unsafe { std::mem::transmute((host_data, host_vtable)) };
-        let host = unsafe { host_ptr.as_mut() }
-            .ok_or_else(|| "native binding import lost runtime host".to_string())?;
-        with_runtime_native_products(host, |catalog| {
-            catalog.invoke_binding_import(
-                &routine.package_id,
-                binding_name,
-                &callback_specs,
-                &expected_imports,
-                &expected_callbacks,
-                &plan.binding_layouts,
-                &cabi_args,
-            )
-        })
-    })?;
-    let final_args = runtime_final_args_from_binding_import(
-        &plan.binding_layouts,
-        &routine.package_id,
-        &routine.params,
-        args,
-        &outcome,
-    )
-    .inspect_err(|_err| {
-        let _ = release_binding_output_value(
-            outcome.result,
-            outcome.owned_bytes_free,
-            outcome.owned_str_free,
-        );
-    })?;
-    let value = runtime_value_from_binding_cabi_output(
-        &plan.binding_layouts,
-        &routine.package_id,
-        routine
-            .return_type
-            .as_ref()
-            .map(IrRoutineType::render)
-            .unwrap_or_else(|| "Unit".to_string())
-            .as_str(),
-        &outcome.result,
-        outcome.owned_bytes_free,
-        outcome.owned_str_free,
-        "native binding import result",
-    )?;
-    Ok(RoutineExecutionOutcome {
-        value,
-        final_args,
-        control: None,
-    })
-}
-
-fn runtime_binding_input_from_runtime_value(
-    layouts: &[ArcanaCabiBindingLayout],
-    package_id: &str,
-    expected_type: &str,
-    value: &RuntimeValue,
-    storage: &mut RuntimeBindingArgStorage,
-) -> Result<ArcanaCabiBindingValueV1, String> {
-    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
-    match (&binding_type, value) {
-        (ArcanaCabiBindingType::Int, RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::Int as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 { int_value: *value },
-        }),
-        (ArcanaCabiBindingType::Bool, RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::Bool as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                bool_value: if *value { 1 } else { 0 },
-            },
-        }),
-        (ArcanaCabiBindingType::Str, RuntimeValue::Str(value)) => {
-            storage.strings.push(value.clone());
-            let stored = storage
-                .strings
-                .last()
-                .ok_or_else(|| "binding arg storage lost string value".to_string())?;
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Str as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    str_value: ArcanaStrView {
-                        ptr: stored.as_bytes().as_ptr(),
-                        len: stored.len(),
-                    },
-                },
-            })
-        }
-        (ArcanaCabiBindingType::Bytes, RuntimeValue::Array(values)) => {
-            let bytes = runtime_binding_bytes_from_runtime_array(values, "binding byte argument")?;
-            storage.bytes.push(bytes);
-            let stored = storage
-                .bytes
-                .last()
-                .ok_or_else(|| "binding arg storage lost bytes value".to_string())?;
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Bytes as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    bytes_value: ArcanaBytesView {
-                        ptr: stored.as_ptr(),
-                        len: stored.len(),
-                    },
-                },
-            })
-        }
-        (ArcanaCabiBindingType::Unit, RuntimeValue::Unit) => {
-            Ok(ArcanaCabiBindingValueV1::default())
-        }
-        (ArcanaCabiBindingType::Named(layout_id), value) => {
-            let bytes = runtime_binding_encode_layout_value(layouts, layout_id, value)?;
-            storage.bytes.push(bytes);
-            let stored = storage
-                .bytes
-                .last()
-                .ok_or_else(|| "binding arg storage lost layout bytes".to_string())?;
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Layout as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    bytes_value: ArcanaBytesView {
-                        ptr: stored.as_ptr(),
-                        len: stored.len(),
-                    },
-                },
-            })
-        }
-        (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
-            if binding.package_id == package_id && binding.type_name == expected_type =>
-        {
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Opaque as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    opaque_value: binding.handle,
-                },
-            })
-        }
-        (ty, value) if ty.clone().scalar().is_some() => {
-            runtime_binding_scalar_input_value(ty, value, expected_type)
-        }
-        _ => Err(format!(
-            "native binding argument expected `{expected_type}`, got `{}`",
-            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-        )),
-    }
-}
-
-fn runtime_value_from_binding_input(
-    layouts: &[ArcanaCabiBindingLayout],
-    package_id: &str,
-    expected_type: &str,
-    value: &ArcanaCabiBindingValueV1,
-) -> Result<RuntimeValue, String> {
-    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
-    match (&binding_type, value.tag()?) {
-        (ArcanaCabiBindingType::Int, ArcanaCabiBindingValueTag::Int) => {
-            Ok(RuntimeValue::Int(unsafe { value.payload.int_value }))
-        }
-        (ArcanaCabiBindingType::Bool, ArcanaCabiBindingValueTag::Bool) => {
-            Ok(RuntimeValue::Bool(unsafe { value.payload.bool_value != 0 }))
-        }
-        (ArcanaCabiBindingType::Str, ArcanaCabiBindingValueTag::Str) => {
-            let view = unsafe { value.payload.str_value };
-            let bytes = runtime_binding_input_bytes_view(
-                view.ptr.cast(),
-                view.len,
-                "native binding string arg",
-            )?;
-            Ok(RuntimeValue::Str(
-                std::str::from_utf8(bytes)
-                    .map_err(|err| format!("native binding string arg is not utf-8: {err}"))?
-                    .to_string(),
-            ))
-        }
-        (ArcanaCabiBindingType::Bytes, ArcanaCabiBindingValueTag::Bytes) => {
-            let view = unsafe { value.payload.bytes_value };
-            let bytes =
-                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding bytes arg")?;
-            Ok(RuntimeValue::Array(
-                bytes
-                    .iter()
-                    .map(|byte| RuntimeValue::Int(i64::from(*byte)))
-                    .collect(),
-            ))
-        }
-        (ArcanaCabiBindingType::Unit, ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
-        (ArcanaCabiBindingType::Named(layout_id), ArcanaCabiBindingValueTag::Layout) => {
-            let view = unsafe { value.payload.bytes_value };
-            let bytes =
-                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding layout arg")?;
-            runtime_binding_decode_layout_value(layouts, layout_id, bytes)
-        }
-        (ArcanaCabiBindingType::Named(_), ArcanaCabiBindingValueTag::Opaque) => Ok(
-            RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
-                package_id: leak_runtime_binding_text(package_id),
-                type_name: leak_runtime_binding_text(expected_type),
-                handle: unsafe { value.payload.opaque_value },
-            })),
-        ),
-        (ty, actual) if ty.clone().scalar().is_some() => {
-            runtime_binding_runtime_value_from_scalar_tag(ty, actual, value)
-        }
-        (_, actual) => Err(format!(
-            "native binding callback expected `{expected_type}`, got tag `{actual:?}`"
-        )),
-    }
-}
-
-fn runtime_value_from_binding_cabi_output(
-    layouts: &[ArcanaCabiBindingLayout],
-    package_id: &str,
-    expected_type: &str,
-    value: &ArcanaCabiBindingValueV1,
-    owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
-    owned_str_free: ArcanaCabiOwnedStrFreeFn,
-    label: &str,
-) -> Result<RuntimeValue, String> {
-    let actual = value.tag()?;
-    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
-    match (&binding_type, actual) {
-        (ArcanaCabiBindingType::Int, ArcanaCabiBindingValueTag::Int) => {
-            Ok(RuntimeValue::Int(unsafe { value.payload.int_value }))
-        }
-        (ArcanaCabiBindingType::Bool, ArcanaCabiBindingValueTag::Bool) => {
-            Ok(RuntimeValue::Bool(unsafe { value.payload.bool_value != 0 }))
-        }
-        (ArcanaCabiBindingType::Str, ArcanaCabiBindingValueTag::Str) => {
-            let owned = unsafe { value.payload.owned_str_value };
-            let text = clone_owned_binding_str(owned, owned_str_free)?;
-            Ok(RuntimeValue::Str(text))
-        }
-        (ArcanaCabiBindingType::Bytes, ArcanaCabiBindingValueTag::Bytes) => {
-            let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
-            Ok(RuntimeValue::Array(
-                bytes
-                    .into_iter()
-                    .map(|byte| RuntimeValue::Int(i64::from(byte)))
-                    .collect(),
-            ))
-        }
-        (ArcanaCabiBindingType::Unit, ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
-        (ArcanaCabiBindingType::Named(layout_id), ArcanaCabiBindingValueTag::Layout) => {
-            let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
-            runtime_binding_decode_layout_value(layouts, layout_id, &bytes)
-        }
-        (ArcanaCabiBindingType::Named(_), ArcanaCabiBindingValueTag::Opaque) => Ok(
-            RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
-                package_id: leak_runtime_binding_text(package_id),
-                type_name: leak_runtime_binding_text(expected_type),
-                handle: unsafe { value.payload.opaque_value },
-            })),
-        ),
-        (ty, actual) if ty.clone().scalar().is_some() => {
-            runtime_binding_runtime_value_from_scalar_tag(ty, actual, value)
-        }
-        (_, ArcanaCabiBindingValueTag::Str) => {
-            let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
-            Err(format!("{label} expected `{expected_type}`, got tag `Str`"))
-        }
-        (_, ArcanaCabiBindingValueTag::Bytes | ArcanaCabiBindingValueTag::Layout) => {
-            let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
-            Err(format!(
-                "{label} expected `{expected_type}`, got tag `{actual:?}`"
-            ))
-        }
-        (_, actual) => Err(format!(
-            "{label} expected `{expected_type}`, got tag `{actual:?}`"
-        )),
-    }
-}
-
-fn runtime_binding_callback_write_backs(
-    layouts: &[ArcanaCabiBindingLayout],
-    callback: &RuntimeNativeCallbackPlan,
-    final_args: &[RuntimeValue],
-) -> Result<Vec<ArcanaCabiBindingValueV1>, String> {
-    if callback.params.len() != final_args.len() {
-        return Err(format!(
-            "native callback `{}` final arg count mismatch: expected {}, got {}",
-            callback.name,
-            callback.params.len(),
-            final_args.len()
-        ));
-    }
-    let metadata = runtime_binding_params_metadata(&callback.params)?;
-    let mut write_backs = binding_write_back_slots(&metadata);
-    for (index, (param, value)) in callback.params.iter().zip(final_args.iter()).enumerate() {
-        if param.mode.as_deref() != Some("edit") {
-            continue;
-        }
-        match runtime_binding_output_from_runtime_value(
-            layouts,
-            &callback.package_id,
-            &param.ty.render(),
-            value.clone(),
-        ) {
-            Ok(write_back) => write_backs[index] = write_back,
-            Err(err) => {
-                runtime_release_binding_values(write_backs.iter().copied());
-                return Err(err);
-            }
-        }
-    }
-    Ok(write_backs)
-}
-
-fn runtime_final_args_from_binding_import(
-    layouts: &[ArcanaCabiBindingLayout],
-    package_id: &str,
-    params: &[RuntimeParamPlan],
-    args: &[RuntimeValue],
-    outcome: &RuntimeBindingImportOutcome,
-) -> Result<Vec<RuntimeValue>, String> {
-    if params.len() != args.len() {
-        return Err(format!(
-            "native binding import arg count mismatch: expected {}, got {}",
-            params.len(),
-            args.len()
-        ));
-    }
-    let mut final_args = args.to_vec();
-    for (index, param) in params.iter().enumerate() {
-        if param.mode.as_deref() != Some("edit") {
-            continue;
-        }
-        match runtime_value_from_binding_cabi_output(
-            layouts,
-            package_id,
-            &param.ty.render(),
-            &outcome.write_backs[index],
-            outcome.owned_bytes_free,
-            outcome.owned_str_free,
-            "native binding import write-back",
-        ) {
-            Ok(value) => final_args[index] = value,
-            Err(err) => {
-                runtime_release_binding_values(outcome.write_backs[index..].iter().copied());
-                return Err(err);
-            }
-        }
-    }
-    Ok(final_args)
-}
-
-fn runtime_binding_output_from_runtime_value(
-    layouts: &[ArcanaCabiBindingLayout],
-    package_id: &str,
-    expected_type: &str,
-    value: RuntimeValue,
-) -> Result<ArcanaCabiBindingValueV1, String> {
-    let actual_type = runtime_value_type_root(&value).unwrap_or_else(|| format!("{value:?}"));
-    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
-    match (&binding_type, value) {
-        (ArcanaCabiBindingType::Int, RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::Int as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 { int_value: value },
-        }),
-        (ArcanaCabiBindingType::Bool, RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::Bool as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                bool_value: if value { 1 } else { 0 },
-            },
-        }),
-        (ArcanaCabiBindingType::Str, RuntimeValue::Str(value)) => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::Str as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                owned_str_value: into_owned_str(value),
-            },
-        }),
-        (ArcanaCabiBindingType::Bytes, RuntimeValue::Array(values)) => {
-            let bytes =
-                runtime_binding_bytes_from_owned_runtime_array(values, "binding bytes output")?;
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Bytes as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    owned_bytes_value: into_owned_bytes(bytes),
-                },
-            })
-        }
-        (ArcanaCabiBindingType::Unit, RuntimeValue::Unit) => {
-            Ok(ArcanaCabiBindingValueV1::default())
-        }
-        (ArcanaCabiBindingType::Named(layout_id), value) => {
-            let bytes = runtime_binding_encode_layout_value(layouts, layout_id, &value)?;
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Layout as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    owned_bytes_value: into_owned_bytes(bytes),
-                },
-            })
-        }
-        (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
-            if binding.package_id == package_id && binding.type_name == expected_type =>
-        {
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Opaque as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    opaque_value: binding.handle,
-                },
-            })
-        }
-        (ty, value) if ty.clone().scalar().is_some() => {
-            runtime_binding_scalar_output_value(ty, value, expected_type)
-        }
-        _ => Err(format!(
-            "native binding output expected `{expected_type}`, got `{}`",
-            actual_type
-        )),
-    }
-}
-
-fn runtime_binding_bytes_from_runtime_array(
-    values: &[RuntimeValue],
-    label: &str,
-) -> Result<Vec<u8>, String> {
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| match value {
-            RuntimeValue::Int(value) => u8::try_from(*value)
-                .map_err(|_| format!("{label} index `{index}` is out of range 0..255: `{value}`")),
-            other => Err(format!(
-                "{label} expected Array[Int], found `{other:?}` at index `{index}`"
-            )),
-        })
-        .collect()
-}
-
-fn runtime_binding_bytes_from_owned_runtime_array(
-    values: Vec<RuntimeValue>,
-    label: &str,
-) -> Result<Vec<u8>, String> {
-    values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| match value {
-            RuntimeValue::Int(value) => u8::try_from(value)
-                .map_err(|_| format!("{label} index `{index}` is out of range 0..255: `{value}`")),
-            other => Err(format!(
-                "{label} expected Array[Int], found `{other:?}` at index `{index}`"
-            )),
-        })
-        .collect()
-}
-
-fn runtime_binding_scalar_input_value(
-    expected_type: &ArcanaCabiBindingType,
-    value: &RuntimeValue,
-    expected_text: &str,
-) -> Result<ArcanaCabiBindingValueV1, String> {
-    match expected_type {
-        ArcanaCabiBindingType::I8 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::I8 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                i8_value: runtime_binding_expect_int_range(
-                    value,
-                    i8::MIN as i64,
-                    i8::MAX as i64,
-                    expected_text,
-                )? as i8,
-            },
-        }),
-        ArcanaCabiBindingType::U8 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::U8 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                u8_value: u8::try_from(runtime_binding_expect_int_range(
-                    value,
-                    0,
-                    u8::MAX as i64,
-                    expected_text,
-                )?)
-                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
-            },
-        }),
-        ArcanaCabiBindingType::I16 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::I16 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                i16_value: runtime_binding_expect_int_range(
-                    value,
-                    i16::MIN as i64,
-                    i16::MAX as i64,
-                    expected_text,
-                )? as i16,
-            },
-        }),
-        ArcanaCabiBindingType::U16 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::U16 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                u16_value: u16::try_from(runtime_binding_expect_int_range(
-                    value,
-                    0,
-                    u16::MAX as i64,
-                    expected_text,
-                )?)
-                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
-            },
-        }),
-        ArcanaCabiBindingType::I32 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::I32 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                i32_value: runtime_binding_expect_int_range(
-                    value,
-                    i32::MIN as i64,
-                    i32::MAX as i64,
-                    expected_text,
-                )? as i32,
-            },
-        }),
-        ArcanaCabiBindingType::U32 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::U32 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                u32_value: u32::try_from(runtime_binding_expect_int_range(
-                    value,
-                    0,
-                    u32::MAX as i64,
-                    expected_text,
-                )?)
-                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
-            },
-        }),
-        ArcanaCabiBindingType::I64 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::I64 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                i64_value: runtime_binding_expect_int_range(
-                    value,
-                    i64::MIN,
-                    i64::MAX,
-                    expected_text,
-                )?,
-            },
-        }),
-        ArcanaCabiBindingType::U64 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::U64 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                u64_value: u64::try_from(runtime_binding_expect_int_range(
-                    value,
-                    0,
-                    i64::MAX,
-                    expected_text,
-                )?)
-                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
-            },
-        }),
-        ArcanaCabiBindingType::ISize => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::ISize as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                isize_value: runtime_binding_expect_int_range(
-                    value,
-                    isize::MIN as i64,
-                    isize::MAX as i64,
-                    expected_text,
-                )? as isize,
-            },
-        }),
-        ArcanaCabiBindingType::USize => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::USize as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                usize_value: usize::try_from(runtime_binding_expect_int_range(
-                    value,
-                    0,
-                    i64::MAX,
-                    expected_text,
-                )?)
-                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
-            },
-        }),
-        ArcanaCabiBindingType::F32 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::F32 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                f32_value: runtime_binding_expect_float(value, ParsedFloatKind::F32, expected_text)?
-                    as f32,
-            },
-        }),
-        ArcanaCabiBindingType::F64 => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::F64 as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                f64_value: runtime_binding_expect_float(
-                    value,
-                    ParsedFloatKind::F64,
-                    expected_text,
-                )?,
-            },
-        }),
-        _ => Err(format!(
-            "native binding argument expected `{expected_text}`"
-        )),
-    }
-}
-
-fn runtime_binding_scalar_output_value(
-    expected_type: &ArcanaCabiBindingType,
-    value: RuntimeValue,
-    expected_text: &str,
-) -> Result<ArcanaCabiBindingValueV1, String> {
-    runtime_binding_scalar_input_value(expected_type, &value, expected_text)
-}
-
-fn runtime_binding_runtime_value_from_scalar_tag(
-    expected_type: &ArcanaCabiBindingType,
-    actual_tag: ArcanaCabiBindingValueTag,
-    value: &ArcanaCabiBindingValueV1,
-) -> Result<RuntimeValue, String> {
-    match (expected_type, actual_tag) {
-        (ArcanaCabiBindingType::I8, ArcanaCabiBindingValueTag::I8) => {
-            Ok(RuntimeValue::Int(i64::from(unsafe {
-                value.payload.i8_value
-            })))
-        }
-        (ArcanaCabiBindingType::U8, ArcanaCabiBindingValueTag::U8) => {
-            Ok(RuntimeValue::Int(i64::from(unsafe {
-                value.payload.u8_value
-            })))
-        }
-        (ArcanaCabiBindingType::I16, ArcanaCabiBindingValueTag::I16) => {
-            Ok(RuntimeValue::Int(i64::from(unsafe {
-                value.payload.i16_value
-            })))
-        }
-        (ArcanaCabiBindingType::U16, ArcanaCabiBindingValueTag::U16) => {
-            Ok(RuntimeValue::Int(i64::from(unsafe {
-                value.payload.u16_value
-            })))
-        }
-        (ArcanaCabiBindingType::I32, ArcanaCabiBindingValueTag::I32) => {
-            Ok(RuntimeValue::Int(i64::from(unsafe {
-                value.payload.i32_value
-            })))
-        }
-        (ArcanaCabiBindingType::U32, ArcanaCabiBindingValueTag::U32) => {
-            Ok(RuntimeValue::Int(i64::from(unsafe {
-                value.payload.u32_value
-            })))
-        }
-        (ArcanaCabiBindingType::I64, ArcanaCabiBindingValueTag::I64) => {
-            Ok(RuntimeValue::Int(unsafe { value.payload.i64_value }))
-        }
-        (ArcanaCabiBindingType::U64, ArcanaCabiBindingValueTag::U64) => {
-            let raw = unsafe { value.payload.u64_value };
-            let int = i64::try_from(raw).map_err(|_| {
-                format!("native binding scalar `U64` value `{raw}` does not fit Arcana Int carrier")
-            })?;
-            Ok(RuntimeValue::Int(int))
-        }
-        (ArcanaCabiBindingType::ISize, ArcanaCabiBindingValueTag::ISize) => Ok(RuntimeValue::Int(
-            unsafe { value.payload.isize_value } as i64,
-        )),
-        (ArcanaCabiBindingType::USize, ArcanaCabiBindingValueTag::USize) => {
-            let raw = unsafe { value.payload.usize_value };
-            let int = i64::try_from(raw).map_err(|_| {
-                format!(
-                    "native binding scalar `USize` value `{raw}` does not fit Arcana Int carrier"
-                )
-            })?;
-            Ok(RuntimeValue::Int(int))
-        }
-        (ArcanaCabiBindingType::F32, ArcanaCabiBindingValueTag::F32) => Ok(make_runtime_float(
-            ParsedFloatKind::F32,
-            f64::from(unsafe { value.payload.f32_value }),
-        )),
-        (ArcanaCabiBindingType::F64, ArcanaCabiBindingValueTag::F64) => {
-            Ok(make_runtime_float(ParsedFloatKind::F64, unsafe {
-                value.payload.f64_value
-            }))
-        }
-        _ => Err(format!(
-            "native binding value expected `{}`, got tag `{actual_tag:?}`",
-            expected_type.render()
-        )),
-    }
-}
-
-fn runtime_binding_expect_int_range(
-    value: &RuntimeValue,
-    min: i64,
-    max: i64,
-    expected_text: &str,
-) -> Result<i64, String> {
-    let RuntimeValue::Int(value) = value else {
-        return Err(format!(
-            "native binding argument expected `{expected_text}`, got `{}`",
-            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-        ));
-    };
-    if *value < min || *value > max {
-        return Err(format!(
-            "native binding argument `{expected_text}` value `{value}` is out of range {min}..{max}"
-        ));
-    }
-    Ok(*value)
-}
-
-fn runtime_binding_expect_float(
-    value: &RuntimeValue,
-    kind: ParsedFloatKind,
-    expected_text: &str,
-) -> Result<f64, String> {
-    let RuntimeValue::Float {
-        text,
-        kind: actual_kind,
-    } = value
-    else {
-        return Err(format!(
-            "native binding argument expected `{expected_text}`, got `{}`",
-            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-        ));
-    };
-    parse_runtime_float_text(text, *actual_kind).map(|value| match kind {
-        ParsedFloatKind::F32 => f64::from(value as f32),
-        ParsedFloatKind::F64 => value,
-    })
-}
-
-fn runtime_binding_input_bytes_view<'a>(
-    ptr: *const u8,
-    len: usize,
-    label: &str,
-) -> Result<&'a [u8], String> {
-    if ptr.is_null() {
-        if len == 0 {
-            return Ok(&[]);
-        }
-        return Err(format!("{label} returned null data with len {len}"));
-    }
-    Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
-}
-
-fn runtime_binding_layout_by_id<'a>(
-    layouts: &'a [ArcanaCabiBindingLayout],
-    layout_id: &str,
-) -> Result<&'a ArcanaCabiBindingLayout, String> {
-    layouts
-        .iter()
-        .find(|layout| layout.layout_id == layout_id)
-        .ok_or_else(|| format!("binding layout `{layout_id}` is not present in runtime plan"))
-}
-
-fn runtime_binding_encode_layout_value(
-    layouts: &[ArcanaCabiBindingLayout],
-    layout_id: &str,
-    value: &RuntimeValue,
-) -> Result<Vec<u8>, String> {
-    let layout = runtime_binding_layout_by_id(layouts, layout_id)?;
-    let mut buffer = vec![0u8; layout.size];
-    runtime_binding_encode_layout_into(layouts, layout, value, &mut buffer)?;
-    Ok(buffer)
-}
-
-fn runtime_binding_decode_layout_value(
-    layouts: &[ArcanaCabiBindingLayout],
-    layout_id: &str,
-    bytes: &[u8],
-) -> Result<RuntimeValue, String> {
-    let layout = runtime_binding_layout_by_id(layouts, layout_id)?;
-    if bytes.len() != layout.size {
-        return Err(format!(
-            "binding layout `{layout_id}` size mismatch: expected {}, got {}",
-            layout.size,
-            bytes.len()
-        ));
-    }
-    runtime_binding_decode_layout_from(layouts, layout, bytes)
-}
-
-fn runtime_binding_encode_layout_into(
-    layouts: &[ArcanaCabiBindingLayout],
-    layout: &ArcanaCabiBindingLayout,
-    value: &RuntimeValue,
-    buffer: &mut [u8],
-) -> Result<(), String> {
-    if buffer.len() != layout.size {
-        return Err(format!(
-            "binding layout `{}` output buffer size mismatch: expected {}, got {}",
-            layout.layout_id,
-            layout.size,
-            buffer.len()
-        ));
-    }
-    match &layout.kind {
-        ArcanaCabiBindingLayoutKind::Alias { target } => {
-            let bytes = runtime_binding_encode_raw_type(layouts, target, value, &layout.layout_id)?;
-            if bytes.len() != layout.size {
-                return Err(format!(
-                    "binding layout `{}` alias size mismatch: expected {}, got {}",
-                    layout.layout_id,
-                    layout.size,
-                    bytes.len()
-                ));
-            }
-            buffer.copy_from_slice(&bytes);
-            Ok(())
-        }
-        ArcanaCabiBindingLayoutKind::Struct { fields } => {
-            let RuntimeValue::Record {
-                name,
-                fields: record_fields,
-            } = value
-            else {
-                return Err(format!(
-                    "binding layout `{}` expected struct record value, got `{}`",
-                    layout.layout_id,
-                    runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-                ));
-            };
-            if name != &layout.layout_id {
-                return Err(format!(
-                    "binding layout `{}` expected record `{}`, got `{name}`",
-                    layout.layout_id, layout.layout_id
-                ));
-            }
-            for field in fields {
-                let field_value = record_fields.get(&field.name).ok_or_else(|| {
-                    format!(
-                        "binding layout `{}` is missing field `{}`",
-                        layout.layout_id, field.name
-                    )
-                })?;
-                if let Some(bit_width) = field.bit_width {
-                    runtime_binding_encode_bitfield(layout, field, bit_width, field_value, buffer)?;
-                } else {
-                    let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
-                    let end = field.offset + field_size;
-                    let bytes = runtime_binding_encode_raw_type(
-                        layouts,
-                        &field.ty,
-                        field_value,
-                        &format!("{}::{}", layout.layout_id, field.name),
-                    )?;
-                    buffer[field.offset..end].copy_from_slice(&bytes);
-                }
-            }
-            Ok(())
-        }
-        ArcanaCabiBindingLayoutKind::Union { fields } => {
-            let RuntimeValue::Record {
-                name,
-                fields: record_fields,
-            } = value
-            else {
-                return Err(format!(
-                    "binding layout `{}` expected union record value, got `{}`",
-                    layout.layout_id,
-                    runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-                ));
-            };
-            if name != &layout.layout_id {
-                return Err(format!(
-                    "binding layout `{}` expected record `{}`, got `{name}`",
-                    layout.layout_id, layout.layout_id
-                ));
-            }
-            if record_fields.len() != 1 {
-                return Err(format!(
-                    "binding union `{}` must initialize exactly one field, got {}",
-                    layout.layout_id,
-                    record_fields.len()
-                ));
-            }
-            let (field_name, field_value) = record_fields.iter().next().ok_or_else(|| {
-                format!(
-                    "binding union `{}` must initialize at least one field",
-                    layout.layout_id
-                )
-            })?;
-            let field = fields
-                .iter()
-                .find(|field| field.name == *field_name)
-                .ok_or_else(|| {
-                    format!(
-                        "binding union `{}` has no field `{field_name}`",
-                        layout.layout_id
-                    )
-                })?;
-            let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
-            let bytes = runtime_binding_encode_raw_type(
-                layouts,
-                &field.ty,
-                field_value,
-                &format!("{}::{}", layout.layout_id, field.name),
-            )?;
-            buffer[field.offset..field.offset + field_size].copy_from_slice(&bytes);
-            Ok(())
-        }
-        ArcanaCabiBindingLayoutKind::Array { element_type, len } => {
-            let RuntimeValue::Array(values) = value else {
-                return Err(format!(
-                    "binding layout `{}` expected array value, got `{}`",
-                    layout.layout_id,
-                    runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-                ));
-            };
-            if values.len() != *len {
-                return Err(format!(
-                    "binding array `{}` expected {len} elements, got {}",
-                    layout.layout_id,
-                    values.len()
-                ));
-            }
-            let element_size = runtime_binding_raw_type_size(layouts, element_type)?;
-            for (index, item) in values.iter().enumerate() {
-                let bytes = runtime_binding_encode_raw_type(
-                    layouts,
-                    element_type,
-                    item,
-                    &format!("{}[{index}]", layout.layout_id),
-                )?;
-                let start = index * element_size;
-                buffer[start..start + element_size].copy_from_slice(&bytes);
-            }
-            Ok(())
-        }
-        ArcanaCabiBindingLayoutKind::Enum { repr, .. }
-        | ArcanaCabiBindingLayoutKind::Flags { repr } => {
-            let bytes = runtime_binding_encode_scalar_bytes(*repr, value, &layout.layout_id)?;
-            buffer.copy_from_slice(&bytes);
-            Ok(())
-        }
-        ArcanaCabiBindingLayoutKind::Callback { .. }
-        | ArcanaCabiBindingLayoutKind::Interface { .. } => {
-            let raw = runtime_binding_pointer_value(value, &layout.layout_id)?;
-            let bytes = runtime_binding_encode_pointer_bytes(layout.size, raw, &layout.layout_id)?;
-            buffer.copy_from_slice(&bytes);
-            Ok(())
-        }
-    }
-}
-
-fn runtime_binding_decode_layout_from(
-    layouts: &[ArcanaCabiBindingLayout],
-    layout: &ArcanaCabiBindingLayout,
-    bytes: &[u8],
-) -> Result<RuntimeValue, String> {
-    match &layout.kind {
-        ArcanaCabiBindingLayoutKind::Alias { target } => {
-            runtime_binding_decode_raw_type(layouts, target, bytes, &layout.layout_id)
-        }
-        ArcanaCabiBindingLayoutKind::Struct { fields } => {
-            let mut values = BTreeMap::new();
-            for field in fields {
-                let value = if let Some(bit_width) = field.bit_width {
-                    runtime_binding_decode_bitfield(layout, field, bit_width, bytes)?
-                } else {
-                    let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
-                    runtime_binding_decode_raw_type(
-                        layouts,
-                        &field.ty,
-                        &bytes[field.offset..field.offset + field_size],
-                        &format!("{}::{}", layout.layout_id, field.name),
-                    )?
-                };
-                values.insert(field.name.clone(), value);
-            }
-            Ok(RuntimeValue::Record {
-                name: layout.layout_id.clone(),
-                fields: values,
-            })
-        }
-        ArcanaCabiBindingLayoutKind::Union { fields } => {
-            let mut values = BTreeMap::new();
-            for field in fields {
-                let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
-                let value = runtime_binding_decode_raw_type(
-                    layouts,
-                    &field.ty,
-                    &bytes[field.offset..field.offset + field_size],
-                    &format!("{}::{}", layout.layout_id, field.name),
-                )?;
-                values.insert(field.name.clone(), value);
-            }
-            Ok(RuntimeValue::Record {
-                name: layout.layout_id.clone(),
-                fields: values,
-            })
-        }
-        ArcanaCabiBindingLayoutKind::Array { element_type, len } => {
-            let element_size = runtime_binding_raw_type_size(layouts, element_type)?;
-            let mut values = Vec::with_capacity(*len);
-            for index in 0..*len {
-                let start = index * element_size;
-                values.push(runtime_binding_decode_raw_type(
-                    layouts,
-                    element_type,
-                    &bytes[start..start + element_size],
-                    &format!("{}[{index}]", layout.layout_id),
-                )?);
-            }
-            Ok(RuntimeValue::Array(values))
-        }
-        ArcanaCabiBindingLayoutKind::Enum { repr, .. }
-        | ArcanaCabiBindingLayoutKind::Flags { repr } => {
-            runtime_binding_decode_scalar_bytes(*repr, bytes, &layout.layout_id)
-        }
-        ArcanaCabiBindingLayoutKind::Callback { .. }
-        | ArcanaCabiBindingLayoutKind::Interface { .. } => Ok(RuntimeValue::Int(
-            runtime_binding_decode_pointer_bytes(bytes, &layout.layout_id)?,
-        )),
-    }
-}
-
-fn runtime_binding_encode_raw_type(
-    layouts: &[ArcanaCabiBindingLayout],
-    ty: &ArcanaCabiBindingRawType,
-    value: &RuntimeValue,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    match ty {
-        ArcanaCabiBindingRawType::Void => Ok(Vec::new()),
-        ArcanaCabiBindingRawType::Scalar(scalar) => {
-            runtime_binding_encode_scalar_bytes(*scalar, value, context)
-        }
-        ArcanaCabiBindingRawType::Named(layout_id) => {
-            runtime_binding_encode_layout_value(layouts, layout_id, value)
-        }
-        ArcanaCabiBindingRawType::Pointer { .. }
-        | ArcanaCabiBindingRawType::FunctionPointer { .. } => {
-            let raw = runtime_binding_pointer_value(value, context)?;
-            runtime_binding_encode_pointer_bytes(
-                runtime_binding_raw_type_size(layouts, ty)?,
-                raw,
-                context,
-            )
-        }
-    }
-}
-
-fn runtime_binding_decode_raw_type(
-    layouts: &[ArcanaCabiBindingLayout],
-    ty: &ArcanaCabiBindingRawType,
-    bytes: &[u8],
-    context: &str,
-) -> Result<RuntimeValue, String> {
-    match ty {
-        ArcanaCabiBindingRawType::Void => Ok(RuntimeValue::Unit),
-        ArcanaCabiBindingRawType::Scalar(scalar) => {
-            runtime_binding_decode_scalar_bytes(*scalar, bytes, context)
-        }
-        ArcanaCabiBindingRawType::Named(layout_id) => {
-            runtime_binding_decode_layout_value(layouts, layout_id, bytes)
-        }
-        ArcanaCabiBindingRawType::Pointer { .. }
-        | ArcanaCabiBindingRawType::FunctionPointer { .. } => Ok(RuntimeValue::Int(
-            runtime_binding_decode_pointer_bytes(bytes, context)?,
-        )),
-    }
-}
-
-fn runtime_binding_raw_type_size(
-    layouts: &[ArcanaCabiBindingLayout],
-    ty: &ArcanaCabiBindingRawType,
-) -> Result<usize, String> {
-    Ok(match ty {
-        ArcanaCabiBindingRawType::Void => 0,
-        ArcanaCabiBindingRawType::Scalar(scalar) => scalar.size_bytes(),
-        ArcanaCabiBindingRawType::Named(layout_id) => {
-            runtime_binding_layout_by_id(layouts, layout_id)?.size
-        }
-        ArcanaCabiBindingRawType::Pointer { .. }
-        | ArcanaCabiBindingRawType::FunctionPointer { .. } => std::mem::size_of::<usize>(),
-    })
-}
-
-fn runtime_binding_encode_scalar_bytes(
-    scalar: ArcanaCabiBindingScalarType,
-    value: &RuntimeValue,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    match scalar {
-        ArcanaCabiBindingScalarType::Bool => match value {
-            RuntimeValue::Bool(value) => Ok(vec![u8::from(*value)]),
-            _ => Err(format!(
-                "{context} expected Bool, got `{}`",
-                runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-            )),
-        },
-        ArcanaCabiBindingScalarType::Int | ArcanaCabiBindingScalarType::I64 => Ok(
-            runtime_binding_expect_int_range(value, i64::MIN, i64::MAX, context)?
-                .to_ne_bytes()
-                .to_vec(),
-        ),
-        ArcanaCabiBindingScalarType::I8 => {
-            Ok(
-                (runtime_binding_expect_int_range(value, i8::MIN as i64, i8::MAX as i64, context)?
-                    as i8)
-                    .to_ne_bytes()
-                    .to_vec(),
-            )
-        }
-        ArcanaCabiBindingScalarType::U8 => Ok([u8::try_from(runtime_binding_expect_int_range(
-            value,
-            0,
-            u8::MAX as i64,
-            context,
-        )?)
-        .map_err(|_| format!("{context} expected U8"))?]
-        .to_vec()),
-        ArcanaCabiBindingScalarType::I16 => Ok((runtime_binding_expect_int_range(
-            value,
-            i16::MIN as i64,
-            i16::MAX as i64,
-            context,
-        )? as i16)
-            .to_ne_bytes()
-            .to_vec()),
-        ArcanaCabiBindingScalarType::U16 => Ok((u16::try_from(runtime_binding_expect_int_range(
-            value,
-            0,
-            u16::MAX as i64,
-            context,
-        )?)
-        .map_err(|_| format!("{context} expected U16"))?)
-        .to_ne_bytes()
-        .to_vec()),
-        ArcanaCabiBindingScalarType::I32 => Ok((runtime_binding_expect_int_range(
-            value,
-            i32::MIN as i64,
-            i32::MAX as i64,
-            context,
-        )? as i32)
-            .to_ne_bytes()
-            .to_vec()),
-        ArcanaCabiBindingScalarType::U32 => Ok((u32::try_from(runtime_binding_expect_int_range(
-            value,
-            0,
-            u32::MAX as i64,
-            context,
-        )?)
-        .map_err(|_| format!("{context} expected U32"))?)
-        .to_ne_bytes()
-        .to_vec()),
-        ArcanaCabiBindingScalarType::U64 => Ok((u64::try_from(runtime_binding_expect_int_range(
-            value,
-            0,
-            i64::MAX,
-            context,
-        )?)
-        .map_err(|_| format!("{context} expected U64"))?)
-        .to_ne_bytes()
-        .to_vec()),
-        ArcanaCabiBindingScalarType::ISize => Ok((runtime_binding_expect_int_range(
-            value,
-            isize::MIN as i64,
-            isize::MAX as i64,
-            context,
-        )? as isize)
-            .to_ne_bytes()
-            .to_vec()),
-        ArcanaCabiBindingScalarType::USize => Ok((usize::try_from(
-            runtime_binding_expect_int_range(value, 0, i64::MAX, context)?,
-        )
-        .map_err(|_| format!("{context} expected USize"))?)
-        .to_ne_bytes()
-        .to_vec()),
-        ArcanaCabiBindingScalarType::F32 => {
-            Ok(
-                (runtime_binding_expect_float(value, ParsedFloatKind::F32, context)? as f32)
-                    .to_ne_bytes()
-                    .to_vec(),
-            )
-        }
-        ArcanaCabiBindingScalarType::F64 => {
-            Ok(
-                runtime_binding_expect_float(value, ParsedFloatKind::F64, context)?
-                    .to_ne_bytes()
-                    .to_vec(),
-            )
-        }
-    }
-}
-
-fn runtime_binding_decode_scalar_bytes(
-    scalar: ArcanaCabiBindingScalarType,
-    bytes: &[u8],
-    context: &str,
-) -> Result<RuntimeValue, String> {
-    if bytes.len() != scalar.size_bytes() {
-        return Err(format!(
-            "{context} expected {} bytes for {}, got {}",
-            scalar.size_bytes(),
-            scalar.render(),
-            bytes.len()
-        ));
-    }
-    Ok(match scalar {
-        ArcanaCabiBindingScalarType::Bool => RuntimeValue::Bool(bytes[0] != 0),
-        ArcanaCabiBindingScalarType::Int | ArcanaCabiBindingScalarType::I64 => {
-            RuntimeValue::Int(i64::from_ne_bytes(bytes.try_into().expect("checked len")))
-        }
-        ArcanaCabiBindingScalarType::I8 => RuntimeValue::Int(i64::from(i8::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        ArcanaCabiBindingScalarType::U8 => RuntimeValue::Int(i64::from(u8::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        ArcanaCabiBindingScalarType::I16 => RuntimeValue::Int(i64::from(i16::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        ArcanaCabiBindingScalarType::U16 => RuntimeValue::Int(i64::from(u16::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        ArcanaCabiBindingScalarType::I32 => RuntimeValue::Int(i64::from(i32::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        ArcanaCabiBindingScalarType::U32 => RuntimeValue::Int(i64::from(u32::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        ArcanaCabiBindingScalarType::U64 => {
-            let raw = u64::from_ne_bytes(bytes.try_into().expect("checked len"));
-            RuntimeValue::Int(i64::try_from(raw).map_err(|_| {
-                format!("{context} U64 value `{raw}` does not fit Arcana Int carrier")
-            })?)
-        }
-        ArcanaCabiBindingScalarType::ISize => {
-            RuntimeValue::Int(isize::from_ne_bytes(bytes.try_into().expect("checked len")) as i64)
-        }
-        ArcanaCabiBindingScalarType::USize => {
-            let raw = usize::from_ne_bytes(bytes.try_into().expect("checked len"));
-            RuntimeValue::Int(i64::try_from(raw).map_err(|_| {
-                format!("{context} USize value `{raw}` does not fit Arcana Int carrier")
-            })?)
-        }
-        ArcanaCabiBindingScalarType::F32 => make_runtime_float(
-            ParsedFloatKind::F32,
-            f64::from(f32::from_ne_bytes(bytes.try_into().expect("checked len"))),
-        ),
-        ArcanaCabiBindingScalarType::F64 => make_runtime_float(
-            ParsedFloatKind::F64,
-            f64::from_ne_bytes(bytes.try_into().expect("checked len")),
-        ),
-    })
-}
-
-fn runtime_binding_encode_bitfield(
-    layout: &ArcanaCabiBindingLayout,
-    field: &arcana_cabi::ArcanaCabiBindingLayoutField,
-    bit_width: u16,
-    value: &RuntimeValue,
-    buffer: &mut [u8],
-) -> Result<(), String> {
-    let ArcanaCabiBindingRawType::Scalar(scalar) = &field.ty else {
-        return Err(format!(
-            "binding layout `{}` bitfield `{}` must use a scalar base type",
-            layout.layout_id, field.name
-        ));
-    };
-    let storage_size = scalar.size_bytes();
-    let storage = &buffer[field.offset..field.offset + storage_size];
-    let mut current = runtime_binding_decode_integer_storage(*scalar, storage)?;
-    let raw_value = runtime_binding_integer_from_value(value, &field.name)?;
-    let bit_offset = usize::from(field.bit_offset.unwrap_or(0));
-    let mask = if bit_width == 64 {
-        u64::MAX
-    } else {
-        ((1u128 << bit_width) - 1) as u64
-    };
-    current &= !(mask << bit_offset);
-    current |= (raw_value & mask) << bit_offset;
-    let encoded = runtime_binding_encode_integer_storage(*scalar, current)?;
-    buffer[field.offset..field.offset + storage_size].copy_from_slice(&encoded);
-    Ok(())
-}
-
-fn runtime_binding_decode_bitfield(
-    layout: &ArcanaCabiBindingLayout,
-    field: &arcana_cabi::ArcanaCabiBindingLayoutField,
-    bit_width: u16,
-    bytes: &[u8],
-) -> Result<RuntimeValue, String> {
-    let ArcanaCabiBindingRawType::Scalar(scalar) = &field.ty else {
-        return Err(format!(
-            "binding layout `{}` bitfield `{}` must use a scalar base type",
-            layout.layout_id, field.name
-        ));
-    };
-    let storage = &bytes[field.offset..field.offset + scalar.size_bytes()];
-    let raw = runtime_binding_decode_integer_storage(*scalar, storage)?;
-    let bit_offset = usize::from(field.bit_offset.unwrap_or(0));
-    let mask = if bit_width == 64 {
-        u64::MAX
-    } else {
-        ((1u128 << bit_width) - 1) as u64
-    };
-    let value = (raw >> bit_offset) & mask;
-    if runtime_binding_scalar_is_signed(*scalar) {
-        let shift = 64usize.saturating_sub(bit_width as usize);
-        Ok(RuntimeValue::Int(((value << shift) as i64) >> shift))
-    } else {
-        Ok(RuntimeValue::Int(i64::try_from(value).map_err(|_| {
-            format!(
-                "binding layout `{}` bitfield `{}` value `{value}` does not fit Arcana Int carrier",
-                layout.layout_id, field.name
-            )
-        })?))
-    }
-}
-
-fn runtime_binding_integer_from_value(value: &RuntimeValue, context: &str) -> Result<u64, String> {
-    let RuntimeValue::Int(value) = value else {
-        return Err(format!(
-            "{context} expected Int-compatible bitfield value, got `{}`",
-            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-        ));
-    };
-    Ok(*value as u64)
-}
-
-fn runtime_binding_encode_integer_storage(
-    scalar: ArcanaCabiBindingScalarType,
-    value: u64,
-) -> Result<Vec<u8>, String> {
-    Ok(match scalar {
-        ArcanaCabiBindingScalarType::I8
-        | ArcanaCabiBindingScalarType::U8
-        | ArcanaCabiBindingScalarType::Bool => vec![value as u8],
-        ArcanaCabiBindingScalarType::I16 | ArcanaCabiBindingScalarType::U16 => {
-            (value as u16).to_ne_bytes().to_vec()
-        }
-        ArcanaCabiBindingScalarType::I32 | ArcanaCabiBindingScalarType::U32 => {
-            (value as u32).to_ne_bytes().to_vec()
-        }
-        ArcanaCabiBindingScalarType::Int
-        | ArcanaCabiBindingScalarType::I64
-        | ArcanaCabiBindingScalarType::U64 => value.to_ne_bytes().to_vec(),
-        ArcanaCabiBindingScalarType::ISize | ArcanaCabiBindingScalarType::USize => {
-            (value as usize).to_ne_bytes().to_vec()
-        }
-        ArcanaCabiBindingScalarType::F32 | ArcanaCabiBindingScalarType::F64 => {
-            return Err("floating-point scalars cannot back bitfield storage".to_string());
-        }
-    })
-}
-
-fn runtime_binding_decode_integer_storage(
-    scalar: ArcanaCabiBindingScalarType,
-    bytes: &[u8],
-) -> Result<u64, String> {
-    Ok(match scalar {
-        ArcanaCabiBindingScalarType::I8
-        | ArcanaCabiBindingScalarType::U8
-        | ArcanaCabiBindingScalarType::Bool => u64::from(bytes[0]),
-        ArcanaCabiBindingScalarType::I16 | ArcanaCabiBindingScalarType::U16 => {
-            u64::from(u16::from_ne_bytes(bytes.try_into().expect("checked len")))
-        }
-        ArcanaCabiBindingScalarType::I32 | ArcanaCabiBindingScalarType::U32 => {
-            u64::from(u32::from_ne_bytes(bytes.try_into().expect("checked len")))
-        }
-        ArcanaCabiBindingScalarType::Int
-        | ArcanaCabiBindingScalarType::I64
-        | ArcanaCabiBindingScalarType::U64 => {
-            u64::from_ne_bytes(bytes.try_into().expect("checked len"))
-        }
-        ArcanaCabiBindingScalarType::ISize | ArcanaCabiBindingScalarType::USize => {
-            usize::from_ne_bytes(bytes.try_into().expect("checked len")) as u64
-        }
-        ArcanaCabiBindingScalarType::F32 | ArcanaCabiBindingScalarType::F64 => {
-            return Err("floating-point scalars cannot back bitfield storage".to_string());
-        }
-    })
-}
-
-fn runtime_binding_scalar_is_signed(scalar: ArcanaCabiBindingScalarType) -> bool {
-    matches!(
-        scalar,
-        ArcanaCabiBindingScalarType::Int
-            | ArcanaCabiBindingScalarType::I8
-            | ArcanaCabiBindingScalarType::I16
-            | ArcanaCabiBindingScalarType::I32
-            | ArcanaCabiBindingScalarType::I64
-            | ArcanaCabiBindingScalarType::ISize
-    )
-}
-
-fn runtime_binding_pointer_value(value: &RuntimeValue, context: &str) -> Result<u64, String> {
-    match value {
-        RuntimeValue::Int(value) if *value >= 0 => Ok(*value as u64),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => Ok(binding.handle),
-        _ => Err(format!(
-            "{context} expected pointer-compatible Int or binding opaque, got `{}`",
-            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
-        )),
-    }
-}
-
-fn runtime_binding_encode_pointer_bytes(
-    size: usize,
-    value: u64,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    match size {
-        4 => Ok((u32::try_from(value).map_err(|_| {
-            format!("{context} pointer value `{value}` does not fit 32-bit pointer")
-        })?)
-        .to_ne_bytes()
-        .to_vec()),
-        8 => Ok(value.to_ne_bytes().to_vec()),
-        other => Err(format!("{context} uses unsupported pointer size `{other}`")),
-    }
-}
-
-fn runtime_binding_decode_pointer_bytes(bytes: &[u8], context: &str) -> Result<i64, String> {
-    match bytes.len() {
-        4 => Ok(i64::from(u32::from_ne_bytes(
-            bytes.try_into().expect("checked len"),
-        ))),
-        8 => {
-            let raw = u64::from_ne_bytes(bytes.try_into().expect("checked len"));
-            i64::try_from(raw).map_err(|_| {
-                format!("{context} pointer value `{raw}` does not fit Arcana Int carrier")
-            })
-        }
-        other => Err(format!("{context} uses unsupported pointer size `{other}`")),
-    }
-}
-
-fn runtime_release_binding_values(values: impl IntoIterator<Item = ArcanaCabiBindingValueV1>) {
-    for value in values {
-        let _ = release_binding_output_value(
-            value,
-            runtime_binding_owned_bytes_free,
-            runtime_binding_owned_str_free,
-        );
-    }
-}
-
 fn try_execute_arcana_owned_api_call(
-    callable: &[String],
-    call_args: &[RuntimeCallArg],
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    _callable: &[String],
+    _call_args: &[RuntimeCallArg],
+    _scopes: &mut Vec<RuntimeScope>,
+    _plan: &RuntimePackagePlan,
+    _current_package_id: &str,
+    _current_module_id: &str,
+    _aliases: &BTreeMap<String, Vec<String>>,
+    _type_bindings: &RuntimeTypeBindings,
+    _state: &mut RuntimeExecutionState,
+    _host: &mut dyn RuntimeCoreHost,
 ) -> Result<Option<RuntimeValue>, String> {
-    let values = call_args
-        .iter()
-        .map(|arg| {
-            read_runtime_value_if_ref(
-                arg.value.clone(),
-                scopes,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    match callable {
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "poll" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.events.poll expects one argument".to_string());
-            }
-            let frame =
-                expect_arcana_desktop_frame(values[0].clone(), "arcana_desktop.events.poll")?;
-            Ok(Some(match host.events_poll(frame)? {
-                Some(event) => some_variant(arcana_desktop_app_event_value(event)),
-                None => none_variant(),
-            }))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "pump" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.events.pump expects one argument".to_string());
-            }
-            Ok(Some(arcana_desktop_frame_record(host.events_pump(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.events.pump")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "open_session" => {
-            if !values.is_empty() {
-                return Err("arcana_desktop.events.open_session expects zero arguments".to_string());
-            }
-            Ok(Some(arcana_desktop_session_record(
-                host.events_session_open()?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "close_session" => {
-            let session = expect_arcana_desktop_session(
-                expect_single_arg(values, "arcana_desktop.events.close_session")?,
-                "arcana_desktop.events.close_session",
-            )?;
-            host.events_session_close(session)?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "attach_window" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.events.attach_window expects two arguments".to_string());
-            }
-            host.events_session_attach_window(
-                expect_arcana_desktop_session(
-                    values[0].clone(),
-                    "arcana_desktop.events.attach_window",
-                )?,
-                expect_arcana_desktop_window(
-                    values[1].clone(),
-                    "arcana_desktop.events.attach_window",
-                )?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "detach_window" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.events.detach_window expects two arguments".to_string());
-            }
-            host.events_session_detach_window(
-                expect_arcana_desktop_session(
-                    values[0].clone(),
-                    "arcana_desktop.events.detach_window",
-                )?,
-                expect_arcana_desktop_window(
-                    values[1].clone(),
-                    "arcana_desktop.events.detach_window",
-                )?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "window_ids" => {
-            let session = expect_arcana_desktop_session(
-                expect_single_arg(values, "arcana_desktop.events.window_ids")?,
-                "arcana_desktop.events.window_ids",
-            )?;
-            let ids = host.events_session_window_ids(session)?;
-            Ok(Some(RuntimeValue::List(
-                ids.into_iter().map(arcana_window_id_record).collect(),
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "pump_session" => {
-            let session = expect_arcana_desktop_session(
-                expect_single_arg(values, "arcana_desktop.events.pump_session")?,
-                "arcana_desktop.events.pump_session",
-            )?;
-            Ok(Some(arcana_desktop_frame_record(
-                host.events_session_pump(session)?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "wait_session" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.events.wait_session expects two arguments".to_string());
-            }
-            let session = expect_arcana_desktop_session(
-                values[0].clone(),
-                "arcana_desktop.events.wait_session",
-            )?;
-            let timeout = expect_int(values[1].clone(), "arcana_desktop.events.wait_session")?;
-            Ok(Some(arcana_desktop_frame_record(
-                host.events_session_wait(session, timeout)?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "create_wake" => {
-            let session = expect_arcana_desktop_session(
-                expect_single_arg(values, "arcana_desktop.events.create_wake")?,
-                "arcana_desktop.events.create_wake",
-            )?;
-            Ok(Some(arcana_desktop_wake_record(
-                host.events_session_create_wake(session)?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "wake" => {
-            let wake = expect_arcana_desktop_wake(
-                expect_single_arg(values, "arcana_desktop.events.wake")?,
-                "arcana_desktop.events.wake",
-            )?;
-            host.events_wake_signal(wake)?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "wake_handle" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.wake_handle")?,
-                "arcana_desktop.app.wake_handle",
-            )?;
-            Ok(Some(arcana_desktop_wake_record(context.runtime.wake)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "window_for_id" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.app.window_for_id expects two arguments".to_string());
-            }
-            let context = expect_arcana_desktop_app_context(
-                values[0].clone(),
-                "arcana_desktop.app.window_for_id",
-            )?;
-            let window_id = expect_arcana_window_id_value(
-                values[1].clone(),
-                "arcana_desktop.app.window_for_id",
-            )?;
-            Ok(Some(
-                match arcana_desktop_lookup_window_for_id(&context, window_id, host)? {
-                    Some(window) => some_variant(arcana_desktop_window_value(window)),
-                    None => none_variant(),
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window_id" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.main_window_id")?,
-                "arcana_desktop.app.main_window_id",
-            )?;
-            Ok(Some(arcana_window_id_record(
-                context.runtime.main_window_id,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.main_window")?,
-                "arcana_desktop.app.main_window",
-            )?;
-            Ok(Some(
-                match arcana_desktop_best_main_window(&context, host)? {
-                    Some(window) => ok_variant(arcana_desktop_window_value(window)),
-                    None => err_variant("missing main window".to_string()),
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "cached_main_window" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.cached_main_window")?,
-                "arcana_desktop.app.cached_main_window",
-            )?;
-            Ok(Some(arcana_desktop_window_value(
-                context.runtime.main_window,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window_or_cached" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.main_window_or_cached")?,
-                "arcana_desktop.app.main_window_or_cached",
-            )?;
-            let window = arcana_desktop_best_main_window(&context, host)?
-                .unwrap_or(context.runtime.main_window);
-            Ok(Some(arcana_desktop_window_value(window)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "require_main_window" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.require_main_window")?,
-                "arcana_desktop.app.require_main_window",
-            )?;
-            Ok(Some(
-                match arcana_desktop_best_main_window(&context, host)? {
-                    Some(window) => ok_variant(arcana_desktop_window_value(window)),
-                    None => err_variant("missing main window".to_string()),
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_window" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.app.target_window expects two arguments".to_string());
-            }
-            let context = expect_arcana_desktop_app_context(
-                values[0].clone(),
-                "arcana_desktop.app.target_window",
-            )?;
-            let target = expect_arcana_desktop_target_event(
-                values[1].clone(),
-                "arcana_desktop.app.target_window",
-            )?;
-            Ok(Some(
-                match arcana_desktop_target_window_value(&context, &target, host)? {
-                    Some(window) => some_variant(arcana_desktop_window_value(window)),
-                    None => none_variant(),
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "require_target_window" => {
-            if values.len() != 2 {
-                return Err(
-                    "arcana_desktop.app.require_target_window expects two arguments".to_string(),
-                );
-            }
-            let context = expect_arcana_desktop_app_context(
-                values[0].clone(),
-                "arcana_desktop.app.require_target_window",
-            )?;
-            let target = expect_arcana_desktop_target_event(
-                values[1].clone(),
-                "arcana_desktop.app.require_target_window",
-            )?;
-            Ok(Some(
-                match arcana_desktop_target_window_value(&context, &target, host)? {
-                    Some(window) => ok_variant(arcana_desktop_window_value(window)),
-                    None => err_variant("missing target event window".to_string()),
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_is_main_window" => {
-            let target = expect_arcana_desktop_target_event(
-                expect_single_arg(values, "arcana_desktop.app.target_is_main_window")?,
-                "arcana_desktop.app.target_is_main_window",
-            )?;
-            Ok(Some(RuntimeValue::Bool(target.is_main_window)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "current_window_id" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.current_window_id")?,
-                "arcana_desktop.app.current_window_id",
-            )?;
-            Ok(Some(match context.current_window_id {
-                Some(window_id) => some_variant(arcana_window_id_record(window_id)),
-                None => none_variant(),
-            }))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "current_window" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.current_window")?,
-                "arcana_desktop.app.current_window",
-            )?;
-            let window = arcana_desktop_current_window_value(&context, host)?;
-            Ok(Some(match window {
-                Some(window) => some_variant(arcana_desktop_window_value(window)),
-                None => none_variant(),
-            }))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "require_current_window" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.require_current_window")?,
-                "arcana_desktop.app.require_current_window",
-            )?;
-            let window = arcana_desktop_current_window_value(&context, host)?;
-            Ok(Some(match window {
-                Some(window) => ok_variant(arcana_desktop_window_value(window)),
-                None => err_variant("missing current event window".to_string()),
-            }))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "current_is_main_window" => {
-            let context = expect_arcana_desktop_app_context(
-                expect_single_arg(values, "arcana_desktop.app.current_is_main_window")?,
-                "arcana_desktop.app.current_is_main_window",
-            )?;
-            Ok(Some(RuntimeValue::Bool(context.current_is_main_window)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_window_id" => {
-            let target = expect_arcana_desktop_target_event(
-                expect_single_arg(values, "arcana_desktop.app.target_window_id")?,
-                "arcana_desktop.app.target_window_id",
-            )?;
-            Ok(Some(arcana_window_id_record(target.window_id)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "open_in" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.window.open_in expects two arguments".to_string());
-            }
-            let session =
-                expect_arcana_desktop_session(values[0].clone(), "arcana_desktop.window.open_in")?;
-            let cfg =
-                expect_arcana_window_config(values[1].clone(), "arcana_desktop.window.open_in")?;
-            Ok(Some(
-                match host.window_open(&cfg.title, cfg.size.0, cfg.size.1) {
-                    Ok(window) => {
-                        let applied = (|| -> Result<(), String> {
-                            host.window_set_position(window, cfg.position.0, cfg.position.1)?;
-                            host.window_set_min_size(window, cfg.min_size.0, cfg.min_size.1)?;
-                            host.window_set_max_size(window, cfg.max_size.0, cfg.max_size.1)?;
-                            host.window_set_resizable(window, cfg.resizable)?;
-                            host.window_set_decorated(window, cfg.decorated)?;
-                            host.window_set_transparent(window, cfg.transparent)?;
-                            host.window_set_topmost(window, cfg.topmost)?;
-                            host.window_set_maximized(window, cfg.maximized)?;
-                            host.window_set_fullscreen(window, cfg.fullscreen)?;
-                            host.window_set_theme_override_code(window, cfg.theme_override_code)?;
-                            host.window_set_cursor_visible(window, cfg.cursor_visible)?;
-                            host.window_set_cursor_icon_code(window, cfg.cursor_icon_code)?;
-                            host.window_set_cursor_grab_mode(window, cfg.cursor_grab_mode)?;
-                            if cfg.cursor_position.0 >= 0 && cfg.cursor_position.1 >= 0 {
-                                host.window_set_cursor_position(
-                                    window,
-                                    cfg.cursor_position.0,
-                                    cfg.cursor_position.1,
-                                )?;
-                            }
-                            host.window_set_text_input_enabled(window, cfg.text_input_enabled)?;
-                            host.window_set_visible(window, cfg.visible)?;
-                            host.events_session_attach_window(session, window)?;
-                            Ok(())
-                        })();
-                        match applied {
-                            Ok(()) => ok_variant(arcana_desktop_window_value(window)),
-                            Err(err) => {
-                                let _ = host.window_close(window);
-                                err_variant(err)
-                            }
-                        }
-                    }
-                    Err(err) => err_variant(err),
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "id" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.id expects one argument".to_string());
-            }
-            let window =
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.id")?;
-            let id = host.window_id(window)?;
-            Ok(Some(arcana_window_id_record(id)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "alive" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.alive expects one argument".to_string());
-            }
-            let window =
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.alive")?;
-            let alive = host.window_alive(window)?;
-            Ok(Some(RuntimeValue::Bool(alive)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "size" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.size expects one argument".to_string());
-            }
-            let (w, h) = host.window_size(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.size",
-            )?)?;
-            Ok(Some(RuntimeValue::Pair(
-                Box::new(RuntimeValue::Int(w)),
-                Box::new(RuntimeValue::Int(h)),
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "title" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.title expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Str(host.window_title(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.title")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "scale_factor_milli" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.window.scale_factor_milli expects one argument".to_string(),
-                );
-            }
-            Ok(Some(RuntimeValue::Int(host.window_scale_factor_milli(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.scale_factor_milli",
-                )?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "primary_monitor" => {
-            if !values.is_empty() {
-                return Err(
-                    "arcana_desktop.window.primary_monitor expects zero arguments".to_string(),
-                );
-            }
-            Ok(Some(arcana_monitor_info_record(
-                host.window_primary_monitor_index()?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "current_monitor" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.window.current_monitor expects one argument".to_string()
-                );
-            }
-            Ok(Some(arcana_monitor_info_record(
-                host.window_current_monitor_index(expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.current_monitor",
-                )?)?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "monitor_count" => {
-            if !values.is_empty() {
-                return Err(
-                    "arcana_desktop.window.monitor_count expects zero arguments".to_string()
-                );
-            }
-            Ok(Some(RuntimeValue::Int(host.window_monitor_count()?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "window_for_id" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.events.window_for_id expects two arguments".to_string());
-            }
-            let session = expect_arcana_desktop_session(
-                values[0].clone(),
-                "arcana_desktop.events.window_for_id",
-            )?;
-            let window_id = expect_arcana_window_id_value(
-                values[1].clone(),
-                "arcana_desktop.events.window_for_id",
-            )?;
-            Ok(Some(
-                match host.events_session_window_by_id(session, window_id)? {
-                    Some(window) => RuntimeValue::Variant {
-                        name: "Option.Some".to_string(),
-                        payload: vec![arcana_desktop_window_value(window)],
-                    },
-                    None => RuntimeValue::Variant {
-                        name: "Option.None".to_string(),
-                        payload: Vec::new(),
-                    },
-                },
-            ))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "monitor" && c == "primary" => {
-            if !values.is_empty() {
-                return Err("arcana_desktop.monitor.primary expects zero arguments".to_string());
-            }
-            Ok(Some(arcana_monitor_info_record(
-                host.window_primary_monitor_index()?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "monitor" && c == "current" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.monitor.current expects one argument".to_string());
-            }
-            Ok(Some(arcana_monitor_info_record(
-                host.window_current_monitor_index(expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.monitor.current",
-                )?)?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "monitor" && c == "count" => {
-            if !values.is_empty() {
-                return Err("arcana_desktop.monitor.count expects zero arguments".to_string());
-            }
-            Ok(Some(RuntimeValue::Int(host.window_monitor_count()?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "min_size" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.min_size expects one argument".to_string());
-            }
-            let (w, h) = host.window_min_size(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.min_size",
-            )?)?;
-            Ok(Some(RuntimeValue::Pair(
-                Box::new(RuntimeValue::Int(w)),
-                Box::new(RuntimeValue::Int(h)),
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "max_size" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.max_size expects one argument".to_string());
-            }
-            let (w, h) = host.window_max_size(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.max_size",
-            )?)?;
-            Ok(Some(RuntimeValue::Pair(
-                Box::new(RuntimeValue::Int(w)),
-                Box::new(RuntimeValue::Int(h)),
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "theme_override" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.theme_override expects one argument".to_string());
-            }
-            let code = host.window_theme_override_code(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.theme_override",
-            )?)?;
-            Ok(Some(arcana_window_theme_override_variant(code)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "theme" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.theme expects one argument".to_string());
-            }
-            Ok(Some(arcana_window_theme_variant(host.window_theme_code(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.theme")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_icon" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.cursor_icon expects one argument".to_string());
-            }
-            let code = host.window_cursor_icon_code(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.cursor_icon",
-            )?)?;
-            Ok(Some(arcana_cursor_icon_variant(code)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_grab_mode" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.window.cursor_grab_mode expects one argument".to_string(),
-                );
-            }
-            Ok(Some(arcana_cursor_grab_mode_variant(
-                host.window_cursor_grab_mode(expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.cursor_grab_mode",
-                )?)?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_position" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.window.cursor_position expects one argument".to_string()
-                );
-            }
-            let (x, y) = host.window_cursor_position(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.cursor_position",
-            )?)?;
-            Ok(Some(RuntimeValue::Pair(
-                Box::new(RuntimeValue::Int(x)),
-                Box::new(RuntimeValue::Int(y)),
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "focused" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.focused expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Bool(host.window_focused(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.focused")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "resized" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.resized expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Bool(host.window_resized(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.resized")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "fullscreen" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.fullscreen expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Bool(host.window_fullscreen(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.fullscreen",
-                )?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "minimized" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.minimized expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Bool(host.window_minimized(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.minimized")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "maximized" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.maximized expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Bool(host.window_maximized(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.maximized")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_settings" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.window.cursor_settings expects one argument".to_string()
-                );
-            }
-            let window = expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.cursor_settings",
-            )?;
-            Ok(Some(arcana_cursor_settings_record(
-                host.window_cursor_visible(window)?,
-                host.window_cursor_grab_mode(window)?,
-                host.window_cursor_icon_code(window)?,
-                host.window_cursor_position(window)?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "settings" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.settings expects one argument".to_string());
-            }
-            Ok(Some(arcana_window_settings_record(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.settings")?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "text_input_settings" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.window.text_input_settings expects one argument".to_string(),
-                );
-            }
-            Ok(Some(arcana_text_input_settings_record(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.text_input_settings",
-                )?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_title" => {
-            if values.len() != 2 {
-                return Err("arcana_desktop.window.set_title expects two arguments".to_string());
-            }
-            host.window_set_title(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.set_title")?,
-                &expect_str(values[1].clone(), "arcana_desktop.window.set_title")?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_min_size" => {
-            if values.len() != 3 {
-                return Err(
-                    "arcana_desktop.window.set_min_size expects three arguments".to_string()
-                );
-            }
-            host.window_set_min_size(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.set_min_size",
-                )?,
-                expect_int(values[1].clone(), "arcana_desktop.window.set_min_size")?,
-                expect_int(values[2].clone(), "arcana_desktop.window.set_min_size")?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_max_size" => {
-            if values.len() != 3 {
-                return Err(
-                    "arcana_desktop.window.set_max_size expects three arguments".to_string()
-                );
-            }
-            host.window_set_max_size(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.set_max_size",
-                )?,
-                expect_int(values[1].clone(), "arcana_desktop.window.set_max_size")?,
-                expect_int(values[2].clone(), "arcana_desktop.window.set_max_size")?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_theme_override" => {
-            if values.len() != 2 {
-                return Err(
-                    "arcana_desktop.window.set_theme_override expects two arguments".to_string(),
-                );
-            }
-            host.window_set_theme_override_code(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.set_theme_override",
-                )?,
-                expect_arcana_window_theme_override_code(
-                    values[1].clone(),
-                    "arcana_desktop.window.set_theme_override",
-                )?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_cursor_icon" => {
-            if values.len() != 2 {
-                return Err(
-                    "arcana_desktop.window.set_cursor_icon expects two arguments".to_string(),
-                );
-            }
-            host.window_set_cursor_icon_code(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.set_cursor_icon",
-                )?,
-                expect_arcana_cursor_icon_code(
-                    values[1].clone(),
-                    "arcana_desktop.window.set_cursor_icon",
-                )?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_cursor_position" => {
-            if values.len() != 3 {
-                return Err(
-                    "arcana_desktop.window.set_cursor_position expects three arguments".to_string(),
-                );
-            }
-            host.window_set_cursor_position(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.window.set_cursor_position",
-                )?,
-                expect_int(
-                    values[1].clone(),
-                    "arcana_desktop.window.set_cursor_position",
-                )?,
-                expect_int(
-                    values[2].clone(),
-                    "arcana_desktop.window.set_cursor_position",
-                )?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "request_redraw" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.window.request_redraw expects one argument".to_string());
-            }
-            host.window_request_redraw(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.window.request_redraw",
-            )?)?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "enabled" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.text_input.enabled expects one argument".to_string());
-            }
-            Ok(Some(RuntimeValue::Bool(host.window_text_input_enabled(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.text_input.enabled",
-                )?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "settings" => {
-            if values.len() != 1 {
-                return Err("arcana_desktop.text_input.settings expects one argument".to_string());
-            }
-            Ok(Some(arcana_text_input_settings_record(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.text_input.settings",
-                )?,
-                host,
-            )?))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "set_enabled" => {
-            if values.len() != 2 {
-                return Err(
-                    "arcana_desktop.text_input.set_enabled expects two arguments".to_string(),
-                );
-            }
-            host.window_set_text_input_enabled(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.text_input.set_enabled",
-                )?,
-                expect_bool(values[1].clone(), "arcana_desktop.text_input.set_enabled")?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "composition_area" => {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.text_input.composition_area expects one argument".to_string(),
-                );
-            }
-            let window = expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.text_input.composition_area",
-            )?;
-            Ok(Some(arcana_composition_area_record(
-                host.text_input_composition_area_active(window)?,
-                host.text_input_composition_area_position(window)?,
-                host.text_input_composition_area_size(window)?,
-            )))
-        }
-        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "set_composition_area" => {
-            if values.len() != 2 {
-                return Err(
-                    "arcana_desktop.text_input.set_composition_area expects two arguments"
-                        .to_string(),
-                );
-            }
-            let (_, position, size) = expect_arcana_composition_area(
-                values[1].clone(),
-                "arcana_desktop.text_input.set_composition_area",
-            )?;
-            host.text_input_set_composition_area(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_desktop.text_input.set_composition_area",
-                )?,
-                position.0,
-                position.1,
-                size.0,
-                size.1,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c]
-            if a == "arcana_desktop" && b == "text_input" && c == "clear_composition_area" =>
-        {
-            if values.len() != 1 {
-                return Err(
-                    "arcana_desktop.text_input.clear_composition_area expects one argument"
-                        .to_string(),
-                );
-            }
-            host.text_input_clear_composition_area(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_desktop.text_input.clear_composition_area",
-            )?)?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn expect_app_frame(value: RuntimeValue, context: &str) -> Result<RuntimeAppFrameHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(handle)) = value else {
-        return Err(format!("{context} expected AppFrame"));
-    };
-    Ok(handle)
-}
-
-fn expect_app_session(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeAppSessionHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(handle)) = value else {
-        return Err(format!("{context} expected AppSession"));
-    };
-    Ok(handle)
-}
-
-fn expect_wake(value: RuntimeValue, context: &str) -> Result<RuntimeWakeHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(handle)) = value else {
-        return Err(format!("{context} expected WakeHandle"));
-    };
-    Ok(handle)
-}
-
-fn expect_audio_device(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeAudioDeviceHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::AudioDevice(handle)) = value else {
-        return Err(format!("{context} expected AudioDevice"));
-    };
-    Ok(handle)
-}
-
-fn expect_audio_buffer(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeAudioBufferHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::AudioBuffer(handle)) = value else {
-        return Err(format!("{context} expected AudioBuffer"));
-    };
-    Ok(handle)
-}
-
-fn expect_audio_playback(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<RuntimeAudioPlaybackHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::AudioPlayback(handle)) = value else {
-        return Err(format!("{context} expected AudioPlayback"));
-    };
-    Ok(handle)
+    Ok(None)
 }
 
 fn expect_channel(value: RuntimeValue, context: &str) -> Result<RuntimeChannelHandle, String> {
@@ -14288,13 +5583,6 @@ fn expect_slab_id(value: RuntimeValue, context: &str) -> Result<RuntimeSlabIdVal
     Ok(id)
 }
 
-fn expect_read_view(value: RuntimeValue, context: &str) -> Result<RuntimeReadViewHandle, String> {
-    let RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) = value else {
-        return Err(format!("{context} expected ReadView"));
-    };
-    Ok(handle)
-}
-
 fn expect_edit_view(value: RuntimeValue, context: &str) -> Result<RuntimeEditViewHandle, String> {
     let RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) = value else {
         return Err(format!("{context} expected EditView"));
@@ -14345,6 +5633,10 @@ fn expect_reference(value: RuntimeValue, context: &str) -> Result<RuntimeReferen
         return Err(format!("{context} expected reference"));
     };
     Ok(reference)
+}
+
+fn bytes_to_runtime_value(bytes: impl IntoIterator<Item = u8>) -> RuntimeValue {
+    RuntimeValue::Bytes(bytes.into_iter().collect())
 }
 
 fn bytes_to_runtime_array(bytes: impl IntoIterator<Item = u8>) -> RuntimeValue {
@@ -14629,8 +5921,8 @@ fn insert_runtime_read_view_from_buffer(
     start: usize,
     len: usize,
 ) -> RuntimeReadViewHandle {
-    let handle = RuntimeReadViewHandle(state.next_read_view_handle);
-    state.next_read_view_handle += 1;
+    let handle = RuntimeReadViewHandle(state.next_contiguous_view_id);
+    state.next_contiguous_view_id += 1;
     state.read_views.insert(
         handle,
         RuntimeReadViewState {
@@ -14650,8 +5942,8 @@ fn insert_runtime_edit_view_from_buffer(
     start: usize,
     len: usize,
 ) -> RuntimeEditViewHandle {
-    let handle = RuntimeEditViewHandle(state.next_edit_view_handle);
-    state.next_edit_view_handle += 1;
+    let handle = RuntimeEditViewHandle(state.next_contiguous_edit_view_id);
+    state.next_contiguous_edit_view_id += 1;
     state.edit_views.insert(
         handle,
         RuntimeEditViewState {
@@ -14671,8 +5963,8 @@ fn insert_runtime_read_view_from_reference(
     start: usize,
     len: usize,
 ) -> RuntimeReadViewHandle {
-    let handle = RuntimeReadViewHandle(state.next_read_view_handle);
-    state.next_read_view_handle += 1;
+    let handle = RuntimeReadViewHandle(state.next_contiguous_view_id);
+    state.next_contiguous_view_id += 1;
     state.read_views.insert(
         handle,
         RuntimeReadViewState {
@@ -14693,8 +5985,8 @@ fn insert_runtime_read_view_from_ring_window(
     start: usize,
     len: usize,
 ) -> RuntimeReadViewHandle {
-    let handle = RuntimeReadViewHandle(state.next_read_view_handle);
-    state.next_read_view_handle += 1;
+    let handle = RuntimeReadViewHandle(state.next_contiguous_view_id);
+    state.next_contiguous_view_id += 1;
     state.read_views.insert(
         handle,
         RuntimeReadViewState {
@@ -14714,8 +6006,8 @@ fn insert_runtime_edit_view_from_reference(
     start: usize,
     len: usize,
 ) -> RuntimeEditViewHandle {
-    let handle = RuntimeEditViewHandle(state.next_edit_view_handle);
-    state.next_edit_view_handle += 1;
+    let handle = RuntimeEditViewHandle(state.next_contiguous_edit_view_id);
+    state.next_contiguous_edit_view_id += 1;
     state.edit_views.insert(
         handle,
         RuntimeEditViewState {
@@ -14736,8 +6028,8 @@ fn insert_runtime_edit_view_from_ring_window(
     start: usize,
     len: usize,
 ) -> RuntimeEditViewHandle {
-    let handle = RuntimeEditViewHandle(state.next_edit_view_handle);
-    state.next_edit_view_handle += 1;
+    let handle = RuntimeEditViewHandle(state.next_contiguous_edit_view_id);
+    state.next_contiguous_edit_view_id += 1;
     state.edit_views.insert(
         handle,
         RuntimeEditViewState {
@@ -14808,8 +6100,8 @@ fn insert_runtime_byte_view_from_buffer(
     start: usize,
     len: usize,
 ) -> RuntimeByteViewHandle {
-    let handle = RuntimeByteViewHandle(state.next_byte_view_handle);
-    state.next_byte_view_handle += 1;
+    let handle = RuntimeByteViewHandle(state.next_u8_view_id);
+    state.next_u8_view_id += 1;
     state.byte_views.insert(
         handle,
         RuntimeByteViewState {
@@ -14827,8 +6119,8 @@ fn insert_runtime_byte_edit_view_from_buffer(
     start: usize,
     len: usize,
 ) -> RuntimeByteEditViewHandle {
-    let handle = RuntimeByteEditViewHandle(state.next_byte_edit_view_handle);
-    state.next_byte_edit_view_handle += 1;
+    let handle = RuntimeByteEditViewHandle(state.next_u8_edit_view_id);
+    state.next_u8_edit_view_id += 1;
     state.byte_edit_views.insert(
         handle,
         RuntimeByteEditViewState {
@@ -14846,8 +6138,8 @@ fn insert_runtime_byte_view_from_reference(
     start: usize,
     len: usize,
 ) -> RuntimeByteViewHandle {
-    let handle = RuntimeByteViewHandle(state.next_byte_view_handle);
-    state.next_byte_view_handle += 1;
+    let handle = RuntimeByteViewHandle(state.next_u8_view_id);
+    state.next_u8_view_id += 1;
     state.byte_views.insert(
         handle,
         RuntimeByteViewState {
@@ -14865,12 +6157,58 @@ fn insert_runtime_byte_edit_view_from_reference(
     start: usize,
     len: usize,
 ) -> RuntimeByteEditViewHandle {
-    let handle = RuntimeByteEditViewHandle(state.next_byte_edit_view_handle);
-    state.next_byte_edit_view_handle += 1;
+    let handle = RuntimeByteEditViewHandle(state.next_u8_edit_view_id);
+    state.next_u8_edit_view_id += 1;
     state.byte_edit_views.insert(
         handle,
         RuntimeByteEditViewState {
             backing: RuntimeByteViewBacking::Reference(reference),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_byte_view_from_foreign(
+    state: &mut RuntimeExecutionState,
+    package_id: &'static str,
+    handle_value: u64,
+    start: usize,
+    len: usize,
+) -> RuntimeByteViewHandle {
+    let handle = RuntimeByteViewHandle(state.next_u8_view_id);
+    state.next_u8_view_id += 1;
+    state.byte_views.insert(
+        handle,
+        RuntimeByteViewState {
+            backing: RuntimeByteViewBacking::Foreign(RuntimeForeignByteViewBacking {
+                package_id,
+                handle: handle_value,
+            }),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_byte_edit_view_from_foreign(
+    state: &mut RuntimeExecutionState,
+    package_id: &'static str,
+    handle_value: u64,
+    start: usize,
+    len: usize,
+) -> RuntimeByteEditViewHandle {
+    let handle = RuntimeByteEditViewHandle(state.next_u8_edit_view_id);
+    state.next_u8_edit_view_id += 1;
+    state.byte_edit_views.insert(
+        handle,
+        RuntimeByteEditViewState {
+            backing: RuntimeByteViewBacking::Foreign(RuntimeForeignByteViewBacking {
+                package_id,
+                handle: handle_value,
+            }),
             start,
             len,
         },
@@ -14906,8 +6244,8 @@ fn insert_runtime_str_view_from_buffer(
     start: usize,
     len: usize,
 ) -> RuntimeStrViewHandle {
-    let handle = RuntimeStrViewHandle(state.next_str_view_handle);
-    state.next_str_view_handle += 1;
+    let handle = RuntimeStrViewHandle(state.next_text_view_id);
+    state.next_text_view_id += 1;
     state.str_views.insert(
         handle,
         RuntimeStrViewState {
@@ -14925,8 +6263,8 @@ fn insert_runtime_str_view_from_reference(
     start: usize,
     len: usize,
 ) -> RuntimeStrViewHandle {
-    let handle = RuntimeStrViewHandle(state.next_str_view_handle);
-    state.next_str_view_handle += 1;
+    let handle = RuntimeStrViewHandle(state.next_text_view_id);
+    state.next_text_view_id += 1;
     state.str_views.insert(
         handle,
         RuntimeStrViewState {
@@ -15458,7 +6796,7 @@ fn runtime_behavior_step(
     plan: &RuntimePackagePlan,
     phase: &str,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<i64, String> {
     for (routine_index, routine) in plan.routines.iter().enumerate() {
         if routine.symbol_kind != "behavior" && routine.symbol_kind != "system" {
@@ -15490,20 +6828,76 @@ fn runtime_text_is_space_byte(byte: i64) -> bool {
     matches!(byte, 32 | 9 | 10 | 13)
 }
 
-fn runtime_text_find(
-    host: &mut dyn RuntimeHost,
-    text: &str,
-    start: i64,
-    needle: &str,
-) -> Result<i64, String> {
-    let total = host.text_len_bytes(text)?;
-    let needle_len = host.text_len_bytes(needle)?;
+fn runtime_text_len_bytes(text: &str) -> Result<i64, String> {
+    i64::try_from(text.len()).map_err(|_| "text length does not fit in i64".to_string())
+}
+
+fn runtime_text_byte_at(text: &str, index: usize) -> Result<i64, String> {
+    let byte = text
+        .as_bytes()
+        .get(index)
+        .copied()
+        .ok_or_else(|| format!("text byte index `{index}` is out of bounds"))?;
+    Ok(i64::from(byte))
+}
+
+fn runtime_text_slice_bytes(text: &str, start: usize, end: usize) -> Result<String, String> {
+    let slice = text
+        .as_bytes()
+        .get(start..end)
+        .ok_or_else(|| format!("text byte slice `{start}..{end}` is out of bounds"))?;
+    std::str::from_utf8(slice)
+        .map(|slice| slice.to_string())
+        .map_err(|_| format!("text byte slice `{start}..{end}` is not valid UTF-8"))
+}
+
+fn runtime_text_starts_with(text: &str, prefix: &str) -> bool {
+    text.starts_with(prefix)
+}
+
+fn runtime_text_ends_with(text: &str, suffix: &str) -> bool {
+    text.ends_with(suffix)
+}
+
+fn runtime_text_split_lines(text: &str) -> Vec<String> {
+    text.lines().map(ToString::to_string).collect()
+}
+
+fn runtime_text_from_int(value: i64) -> String {
+    value.to_string()
+}
+
+fn runtime_bytes_from_str_utf8(text: &str) -> Vec<u8> {
+    text.as_bytes().to_vec()
+}
+
+fn runtime_bytes_to_str_utf8(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn runtime_bytes_sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn runtime_utf16_from_str(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
+fn runtime_utf16_to_str(units: &[u16]) -> Result<String, String> {
+    String::from_utf16(units).map_err(|err| err.to_string())
+}
+
+fn runtime_text_find(text: &str, start: i64, needle: &str) -> Result<i64, String> {
+    let total = runtime_text_len_bytes(text)?;
+    let needle_len = runtime_text_len_bytes(needle)?;
     let mut index = start.max(0);
     if needle_len == 0 {
         return Ok(index.min(total));
     }
     while index + needle_len <= total {
-        if host.text_slice_bytes(text, index as usize, (index + needle_len) as usize)? == needle {
+        if runtime_text_slice_bytes(text, index as usize, (index + needle_len) as usize)? == needle
+        {
             return Ok(index);
         }
         index += 1;
@@ -15511,48 +6905,52 @@ fn runtime_text_find(
     Ok(-1)
 }
 
-fn runtime_text_trim_start(host: &mut dyn RuntimeHost, text: &str) -> Result<String, String> {
-    let total = host.text_len_bytes(text)?;
+fn runtime_text_trim_start(text: &str) -> Result<String, String> {
+    let total = runtime_text_len_bytes(text)?;
     let mut index = 0;
-    while index < total && runtime_text_is_space_byte(host.text_byte_at(text, index as usize)?) {
+    while index < total && runtime_text_is_space_byte(runtime_text_byte_at(text, index as usize)?) {
         index += 1;
     }
-    host.text_slice_bytes(text, index as usize, total as usize)
+    runtime_text_slice_bytes(text, index as usize, total as usize)
 }
 
-fn runtime_text_trim_end(host: &mut dyn RuntimeHost, text: &str) -> Result<String, String> {
-    let mut end = host.text_len_bytes(text)?;
-    while end > 0 && runtime_text_is_space_byte(host.text_byte_at(text, (end - 1) as usize)?) {
+fn runtime_text_trim_end(text: &str) -> Result<String, String> {
+    let mut end = runtime_text_len_bytes(text)?;
+    while end > 0 && runtime_text_is_space_byte(runtime_text_byte_at(text, (end - 1) as usize)?) {
         end -= 1;
     }
-    host.text_slice_bytes(text, 0, end as usize)
+    runtime_text_slice_bytes(text, 0, end as usize)
 }
 
-fn runtime_text_trim(host: &mut dyn RuntimeHost, text: &str) -> Result<String, String> {
-    let trimmed_start = runtime_text_trim_start(host, text)?;
-    runtime_text_trim_end(host, &trimmed_start)
+fn runtime_text_trim(text: &str) -> Result<String, String> {
+    let trimmed_start = runtime_text_trim_start(text)?;
+    runtime_text_trim_end(&trimmed_start)
 }
 
-fn runtime_text_split(
-    host: &mut dyn RuntimeHost,
-    text: &str,
-    delim: &str,
-) -> Result<Vec<String>, String> {
+fn runtime_text_split(text: &str, delim: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    let total = host.text_len_bytes(text)?;
-    let delim_len = host.text_len_bytes(delim)?;
+    let total = runtime_text_len_bytes(text)?;
+    let delim_len = runtime_text_len_bytes(delim)?;
     if delim_len == 0 {
-        out.push(host.text_slice_bytes(text, 0, total as usize)?);
+        out.push(runtime_text_slice_bytes(text, 0, total as usize)?);
         return Ok(out);
     }
     let mut start = 0;
     while start <= total {
-        let next = runtime_text_find(host, text, start, delim)?;
+        let next = runtime_text_find(text, start, delim)?;
         if next < 0 {
-            out.push(host.text_slice_bytes(text, start as usize, total as usize)?);
+            out.push(runtime_text_slice_bytes(
+                text,
+                start as usize,
+                total as usize,
+            )?);
             return Ok(out);
         }
-        out.push(host.text_slice_bytes(text, start as usize, next as usize)?);
+        out.push(runtime_text_slice_bytes(
+            text,
+            start as usize,
+            next as usize,
+        )?);
         start = next + delim_len;
     }
     Ok(out)
@@ -15584,18 +6982,15 @@ fn runtime_text_repeat(text: &str, count: i64) -> String {
     out
 }
 
-fn runtime_text_to_int(
-    host: &mut dyn RuntimeHost,
-    text: &str,
-) -> Result<Result<i64, String>, String> {
-    let value = runtime_text_trim(host, text)?;
-    let total = host.text_len_bytes(&value)?;
+fn runtime_text_to_int(text: &str) -> Result<Result<i64, String>, String> {
+    let value = runtime_text_trim(text)?;
+    let total = runtime_text_len_bytes(&value)?;
     if total == 0 {
         return Ok(Err("expected integer text".to_string()));
     }
     let mut sign = 1;
     let mut index = 0;
-    let first = host.text_byte_at(&value, 0)?;
+    let first = runtime_text_byte_at(&value, 0)?;
     if first == 45 {
         sign = -1;
         index = 1;
@@ -15607,7 +7002,7 @@ fn runtime_text_to_int(
     }
     let mut out = 0i64;
     while index < total {
-        let byte = host.text_byte_at(&value, index as usize)?;
+        let byte = runtime_text_byte_at(&value, index as usize)?;
         if !(48..=57).contains(&byte) {
             return Ok(Err("invalid digit in integer text".to_string()));
         }
@@ -15625,39 +7020,79 @@ fn expect_single_arg(mut args: Vec<RuntimeValue>, name: &str) -> Result<RuntimeV
 }
 
 const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
-    ("std.args", include_str!("../../../std/src/args.arc")),
-    ("std.audio", include_str!("../../../std/src/audio.arc")),
     (
         "std.behaviors",
         include_str!("../../../std/src/behaviors.arc"),
-    ),
-    ("std.bytes", include_str!("../../../std/src/bytes.arc")),
-    ("std.canvas", include_str!("../../../std/src/canvas.arc")),
-    (
-        "std.clipboard",
-        include_str!("../../../std/src/clipboard.arc"),
     ),
     (
         "std.concurrent",
         include_str!("../../../std/src/concurrent.arc"),
     ),
     ("std.ecs", include_str!("../../../std/src/ecs.arc")),
-    ("std.env", include_str!("../../../std/src/env.arc")),
-    ("std.events", include_str!("../../../std/src/events.arc")),
-    ("std.fs", include_str!("../../../std/src/fs.arc")),
-    ("std.input", include_str!("../../../std/src/input.arc")),
-    ("std.io", include_str!("../../../std/src/io.arc")),
     ("std.memory", include_str!("../../../std/src/memory.arc")),
     ("std.package", include_str!("../../../std/src/package.arc")),
-    ("std.path", include_str!("../../../std/src/path.arc")),
-    ("std.process", include_str!("../../../std/src/process.arc")),
     ("std.text", include_str!("../../../std/src/text.arc")),
-    (
-        "std.text_input",
-        include_str!("../../../std/src/text_input.arc"),
-    ),
     ("std.time", include_str!("../../../std/src/time.arc")),
-    ("std.window", include_str!("../../../std/src/window.arc")),
+    (
+        "arcana_process.args",
+        include_str!("../../../grimoires/arcana/process/src/args.arc"),
+    ),
+    (
+        "arcana_process.env",
+        include_str!("../../../grimoires/arcana/process/src/env.arc"),
+    ),
+    (
+        "arcana_process.fs",
+        include_str!("../../../grimoires/arcana/process/src/fs.arc"),
+    ),
+    (
+        "arcana_process.io",
+        include_str!("../../../grimoires/arcana/process/src/io.arc"),
+    ),
+    (
+        "arcana_process.path",
+        include_str!("../../../grimoires/arcana/process/src/path.arc"),
+    ),
+    (
+        "arcana_process.process",
+        include_str!("../../../grimoires/arcana/process/src/process.arc"),
+    ),
+    (
+        "arcana_winapi.helpers.window",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/window.arc"),
+    ),
+    (
+        "arcana_winapi.helpers.input",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/input.arc"),
+    ),
+    (
+        "arcana_winapi.helpers.events",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/events.arc"),
+    ),
+    (
+        "arcana_winapi.helpers.clipboard",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/clipboard.arc"),
+    ),
+    (
+        "arcana_winapi.helpers.text_input",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/text_input.arc"),
+    ),
+    (
+        "arcana_winapi.helpers.audio",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/audio.arc"),
+    ),
+    (
+        "arcana_audio.output",
+        include_str!("../../../grimoires/libs/arcana-audio/src/output.arc"),
+    ),
+    (
+        "arcana_audio.clip",
+        include_str!("../../../grimoires/libs/arcana-audio/src/clip.arc"),
+    ),
+    (
+        "arcana_audio.playback",
+        include_str!("../../../grimoires/libs/arcana-audio/src/playback.arc"),
+    ),
     (
         "std.collections.array",
         include_str!("../../../std/src/collections/array.arc"),
@@ -15675,18 +7110,6 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../std/src/collections/set.arc"),
     ),
     (
-        "std.kernel.args",
-        include_str!("../../../std/src/kernel/args.arc"),
-    ),
-    (
-        "std.kernel.audio",
-        include_str!("../../../std/src/kernel/audio.arc"),
-    ),
-    (
-        "std.kernel.clipboard",
-        include_str!("../../../std/src/kernel/clipboard.arc"),
-    ),
-    (
         "std.kernel.collections",
         include_str!("../../../std/src/kernel/collections.arc"),
     ),
@@ -15697,22 +7120,6 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
     (
         "std.kernel.ecs",
         include_str!("../../../std/src/kernel/ecs.arc"),
-    ),
-    (
-        "std.kernel.env",
-        include_str!("../../../std/src/kernel/env.arc"),
-    ),
-    (
-        "std.kernel.events",
-        include_str!("../../../std/src/kernel/events.arc"),
-    ),
-    (
-        "std.kernel.fs",
-        include_str!("../../../std/src/kernel/fs.arc"),
-    ),
-    (
-        "std.kernel.gfx",
-        include_str!("../../../std/src/kernel/gfx.arc"),
     ),
     (
         "std.kernel.io",
@@ -15727,20 +7134,8 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../std/src/kernel/package.arc"),
     ),
     (
-        "std.kernel.path",
-        include_str!("../../../std/src/kernel/path.arc"),
-    ),
-    (
-        "std.kernel.process",
-        include_str!("../../../std/src/kernel/process.arc"),
-    ),
-    (
         "std.kernel.text",
         include_str!("../../../std/src/kernel/text.arc"),
-    ),
-    (
-        "std.kernel.text_input",
-        include_str!("../../../std/src/kernel/text_input.arc"),
     ),
     (
         "std.kernel.time",
@@ -15906,7 +7301,7 @@ fn collect_call_args(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Vec<RuntimeCallArg>> {
     let mut values = args
         .iter()
@@ -16186,36 +7581,6 @@ fn make_pair(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
     RuntimeValue::Pair(Box::new(left), Box::new(right))
 }
 
-fn runtime_event_record_value(event: RuntimeEventRecord) -> RuntimeValue {
-    let mut fields = BTreeMap::new();
-    fields.insert("kind".to_string(), RuntimeValue::Int(event.kind));
-    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
-    fields.insert("a".to_string(), RuntimeValue::Int(event.a));
-    fields.insert("b".to_string(), RuntimeValue::Int(event.b));
-    fields.insert("flags".to_string(), RuntimeValue::Int(event.flags));
-    fields.insert("text".to_string(), RuntimeValue::Str(event.text));
-    fields.insert("key_code".to_string(), RuntimeValue::Int(event.key_code));
-    fields.insert(
-        "physical_key".to_string(),
-        RuntimeValue::Int(event.physical_key),
-    );
-    fields.insert(
-        "logical_key".to_string(),
-        RuntimeValue::Int(event.logical_key),
-    );
-    fields.insert(
-        "key_location".to_string(),
-        RuntimeValue::Int(event.key_location),
-    );
-    fields.insert("pointer_x".to_string(), RuntimeValue::Int(event.pointer_x));
-    fields.insert("pointer_y".to_string(), RuntimeValue::Int(event.pointer_y));
-    fields.insert("repeated".to_string(), RuntimeValue::Bool(event.repeated));
-    RuntimeValue::Record {
-        name: "std.kernel.events.EventRaw".to_string(),
-        fields,
-    }
-}
-
 fn variant_name_matches(name: &str, expected: &str) -> bool {
     name == expected
         || name.ends_with(&format!(".{expected}"))
@@ -16227,6 +7592,83 @@ fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
         RuntimeOpaqueValue::Binding(value) => value.type_name,
         _ => RuntimeOpaqueFamily::from_opaque_value(value).canonical_type_name(),
     }
+}
+
+fn runtime_array_projection_type_args(
+    values: &[RuntimeValue],
+    state: &RuntimeExecutionState,
+) -> Vec<String> {
+    runtime_uniform_value_type(values, Some(state))
+        .map(|ty| vec![ty.render()])
+        .unwrap_or_default()
+}
+
+fn runtime_element_view_family_name(backing: &RuntimeElementViewBacking) -> &'static str {
+    match backing {
+        RuntimeElementViewBacking::RingWindow { .. } => "Strided",
+        RuntimeElementViewBacking::Buffer(_) | RuntimeElementViewBacking::Reference(_) => {
+            "Contiguous"
+        }
+    }
+}
+
+fn runtime_byte_view_family_name(backing: &RuntimeByteViewBacking) -> &'static str {
+    match backing {
+        RuntimeByteViewBacking::Foreign(_) => "Mapped",
+        RuntimeByteViewBacking::Buffer(_) | RuntimeByteViewBacking::Reference(_) => "Contiguous",
+    }
+}
+
+fn runtime_opaque_view_type_name(
+    value: &RuntimeOpaqueValue,
+    state: &RuntimeExecutionState,
+) -> Option<String> {
+    match value {
+        RuntimeOpaqueValue::ReadView(handle) => state.read_views.get(handle).map(|view| {
+            let item = view
+                .type_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Int".to_string());
+            format!(
+                "View[{item}, {}]",
+                runtime_element_view_family_name(&view.backing)
+            )
+        }),
+        RuntimeOpaqueValue::EditView(handle) => state.edit_views.get(handle).map(|view| {
+            let item = view
+                .type_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Int".to_string());
+            format!(
+                "View[{item}, {}]",
+                runtime_element_view_family_name(&view.backing)
+            )
+        }),
+        RuntimeOpaqueValue::ByteView(handle) => state
+            .byte_views
+            .get(handle)
+            .map(|view| format!("View[U8, {}]", runtime_byte_view_family_name(&view.backing))),
+        RuntimeOpaqueValue::ByteEditView(handle) => state
+            .byte_edit_views
+            .get(handle)
+            .map(|view| format!("View[U8, {}]", runtime_byte_view_family_name(&view.backing))),
+        RuntimeOpaqueValue::StrView(_) => Some("View[U8, Contiguous]".to_string()),
+        _ => None,
+    }
+}
+
+fn runtime_opaque_type_name_with_state(
+    value: &RuntimeOpaqueValue,
+    state: Option<&RuntimeExecutionState>,
+) -> String {
+    if let Some(state) = state
+        && let Some(view_type) = runtime_opaque_view_type_name(value, state)
+    {
+        return view_type;
+    }
+    opaque_type_name(value).to_string()
 }
 
 fn runtime_receiver_type_args(
@@ -16430,16 +7872,25 @@ fn runtime_value_type_from_state(
             | RuntimeOpaqueValue::Slab(_)
             | RuntimeOpaqueValue::ReadView(_)
             | RuntimeOpaqueValue::EditView(_)
+            | RuntimeOpaqueValue::ByteView(_)
+            | RuntimeOpaqueValue::ByteEditView(_)
+            | RuntimeOpaqueValue::StrView(_)
             | RuntimeOpaqueValue::Task(_)
             | RuntimeOpaqueValue::Thread(_),
-        ) => state.and_then(|state| {
-            runtime_type_with_args(
-                match receiver {
-                    RuntimeValue::Opaque(value) => opaque_type_name(value),
-                    _ => unreachable!(),
-                },
+        ) => state.and_then(|state| match receiver {
+            RuntimeValue::Opaque(
+                value @ (RuntimeOpaqueValue::ReadView(_)
+                | RuntimeOpaqueValue::EditView(_)
+                | RuntimeOpaqueValue::ByteView(_)
+                | RuntimeOpaqueValue::ByteEditView(_)
+                | RuntimeOpaqueValue::StrView(_)),
+            ) => parse_routine_type_text(&runtime_opaque_type_name_with_state(value, Some(state)))
+                .ok(),
+            RuntimeValue::Opaque(value) => runtime_type_with_args(
+                opaque_type_name(value),
                 &runtime_receiver_type_args(receiver, state),
-            )
+            ),
+            _ => unreachable!(),
         }),
         RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
             .ok()
@@ -16457,6 +7908,11 @@ fn runtime_value_type_from_state(
 fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutineType> {
     match receiver {
         RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(_)) => runtime_simple_type("View"),
         RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
         _ => runtime_value_type_from_state(receiver, None),
     }
@@ -16567,6 +8023,10 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         ),
         RuntimeValue::Bool(_) => Some("Bool".to_string()),
         RuntimeValue::Str(_) => Some("Str".to_string()),
+        RuntimeValue::Bytes(_) => Some("Bytes".to_string()),
+        RuntimeValue::ByteBuffer(_) => Some("ByteBuffer".to_string()),
+        RuntimeValue::Utf16(_) => Some("Utf16".to_string()),
+        RuntimeValue::Utf16Buffer(_) => Some("Utf16Buffer".to_string()),
         RuntimeValue::Pair(_, _) => Some("Pair".to_string()),
         RuntimeValue::Array(_) => Some("Array".to_string()),
         RuntimeValue::List(_) => Some("List".to_string()),
@@ -16574,6 +8034,13 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
         RuntimeValue::OwnerHandle(_) => Some("Owner".to_string()),
         RuntimeValue::Ref(_) => Some("Ref".to_string()),
+        RuntimeValue::Opaque(
+            RuntimeOpaqueValue::ReadView(_)
+            | RuntimeOpaqueValue::EditView(_)
+            | RuntimeOpaqueValue::ByteView(_)
+            | RuntimeOpaqueValue::ByteEditView(_)
+            | RuntimeOpaqueValue::StrView(_),
+        ) => Some("View".to_string()),
         RuntimeValue::Opaque(value) => Some(runtime_type_root_name(opaque_type_name(value))),
         RuntimeValue::Record { name, .. } => Some(runtime_type_root_name(name)),
         RuntimeValue::Variant { name, .. } => {
@@ -16595,23 +8062,34 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         RuntimeValue::Pair(left, right) => {
             runtime_value_is_copy(left) && runtime_value_is_copy(right)
         }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => {
+            matches!(
+                binding.type_name,
+                "arcana_desktop.types.WakeHandle"
+                    | "arcana_winapi.types.WakeHandle"
+                    | "arcana_winapi.desktop_handles.WakeHandle"
+            )
+        }
         RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(_)) => true,
         RuntimeValue::Str(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::ByteBuffer(_)
+        | RuntimeValue::Utf16(_)
+        | RuntimeValue::Utf16Buffer(_)
         | RuntimeValue::Array(_)
         | RuntimeValue::List(_)
         | RuntimeValue::Map(_)
-        | RuntimeValue::Opaque(_)
         | RuntimeValue::Record { .. }
         | RuntimeValue::Variant { .. } => false,
+        RuntimeValue::Opaque(_) => false,
     }
 }
 
@@ -16634,6 +8112,10 @@ fn runtime_validate_split_value_with_ring_move(
         | RuntimeValue::Float { .. }
         | RuntimeValue::Bool(_)
         | RuntimeValue::Str(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::ByteBuffer(_)
+        | RuntimeValue::Utf16(_)
+        | RuntimeValue::Utf16Buffer(_)
         | RuntimeValue::Unit
         | RuntimeValue::OwnerHandle(_)
         | RuntimeValue::Range { .. } => Ok(()),
@@ -16779,6 +8261,9 @@ fn runtime_validate_split_value_with_ring_move(
                         ))
                     }
                 }
+                RuntimeByteViewBacking::Foreign(_) => Err(format!(
+                    "{context} cannot capture foreign-backed ByteView values across split workers"
+                )),
             }
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) => {
@@ -16802,15 +8287,6 @@ fn runtime_validate_split_value_with_ring_move(
         RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Window(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Image(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::AudioDevice(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::AudioBuffer(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::AudioPlayback(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(_))
@@ -17226,7 +8702,7 @@ fn read_assign_target_value(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     target: &ParsedAssignTarget,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     let place = resolve_assign_target_place(scopes, target)?;
     read_runtime_reference(
@@ -17255,7 +8731,7 @@ fn write_assign_target_value(
     state: &mut RuntimeExecutionState,
     target: &ParsedAssignTarget,
     value: RuntimeValue,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     let place = resolve_assign_target_place(scopes, target)?;
     if !place.mode.allows_write() {
@@ -17320,7 +8796,7 @@ fn assign_runtime_index_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     let base = read_runtime_value_if_ref(
         base,
@@ -17360,7 +8836,7 @@ fn read_assign_target_value_runtime(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     match target {
         ParsedAssignTarget::Index { target, index } => eval_runtime_index_value(
@@ -17420,7 +8896,7 @@ fn write_assign_target_value_runtime(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     match target {
         ParsedAssignTarget::Index {
@@ -17570,43 +9046,6 @@ fn apply_runtime_add(
     }
 }
 
-fn intrinsic_edit_arg_indices(intrinsic: RuntimeIntrinsic) -> &'static [usize] {
-    match intrinsic {
-        RuntimeIntrinsic::ListPush
-        | RuntimeIntrinsic::ListPop
-        | RuntimeIntrinsic::ListTryPopOr
-        | RuntimeIntrinsic::MapSet
-        | RuntimeIntrinsic::MapRemove => &[0],
-        _ => &[],
-    }
-}
-
-fn intrinsic_take_arg_indices(intrinsic: RuntimeIntrinsic) -> &'static [usize] {
-    match intrinsic {
-        RuntimeIntrinsic::FsStreamCloseTry
-        | RuntimeIntrinsic::WindowClose
-        | RuntimeIntrinsic::AudioOutputClose
-        | RuntimeIntrinsic::AudioPlaybackStop
-        | RuntimeIntrinsic::ArrayFromList
-        | RuntimeIntrinsic::ConcurrentMutexNew
-        | RuntimeIntrinsic::EcsSetSingleton => &[0],
-        RuntimeIntrinsic::ListPush
-        | RuntimeIntrinsic::ListTryPopOr
-        | RuntimeIntrinsic::ConcurrentChannelSend
-        | RuntimeIntrinsic::ConcurrentMutexPut
-        | RuntimeIntrinsic::MemoryArenaAlloc
-        | RuntimeIntrinsic::MemoryFrameAlloc
-        | RuntimeIntrinsic::MemoryPoolAlloc
-        | RuntimeIntrinsic::EcsSetComponentAt => &[1],
-        RuntimeIntrinsic::MapSet
-        | RuntimeIntrinsic::MapTryGetOr
-        | RuntimeIntrinsic::MemoryArenaSet
-        | RuntimeIntrinsic::MemoryFrameSet
-        | RuntimeIntrinsic::MemoryPoolSet => &[2],
-        _ => &[],
-    }
-}
-
 fn write_back_call_args(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
@@ -17615,12 +9054,16 @@ fn write_back_call_args(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
+    skip_edit_arg_indices: &BTreeSet<usize>,
     edit_arg_indices: &[usize],
     call_args: &[RuntimeCallArg],
     final_args: &[RuntimeValue],
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     for &index in edit_arg_indices {
+        if skip_edit_arg_indices.contains(&index) {
+            continue;
+        }
         let Some(call_arg) = call_args.get(index) else {
             continue;
         };
@@ -17674,13 +9117,17 @@ fn write_back_bound_args(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
+    skip_edit_arg_indices: &BTreeSet<usize>,
     routine: &RuntimeRoutinePlan,
     args: &[BoundRuntimeArg],
     final_args: &[RuntimeValue],
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     for (index, param) in routine.params.iter().enumerate() {
         if param.mode.as_deref() != Some("edit") {
+            continue;
+        }
+        if skip_edit_arg_indices.contains(&index) {
             continue;
         }
         let Some(bound_arg) = args.get(index) else {
@@ -17770,21 +9217,135 @@ fn read_runtime_value_if_ref(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     match value {
-        RuntimeValue::Ref(reference) => read_runtime_reference(
-            scopes,
-            plan,
-            current_package_id,
-            current_module_id,
-            aliases,
-            type_bindings,
-            state,
-            &reference,
-            host,
-        )
-        .and_then(|value| force_runtime_value(value, plan, state, host)),
+        RuntimeValue::Ref(reference) => {
+            let value = read_runtime_reference(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &reference,
+                host,
+            )?;
+            read_runtime_value_if_ref(
+                force_runtime_value(value, plan, state, host)?,
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+        }
+        RuntimeValue::Record { name, fields } => {
+            let mut materialized = BTreeMap::new();
+            for (key, value) in fields {
+                materialized.insert(
+                    key,
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
+                );
+            }
+            Ok(RuntimeValue::Record {
+                name,
+                fields: materialized,
+            })
+        }
+        RuntimeValue::Pair(left, right) => Ok(RuntimeValue::Pair(
+            Box::new(read_runtime_value_if_ref(
+                *left,
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?),
+            Box::new(read_runtime_value_if_ref(
+                *right,
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?),
+        )),
+        RuntimeValue::List(values) => Ok(RuntimeValue::List(
+            values
+                .into_iter()
+                .map(|value| {
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RuntimeValue::Array(values) => Ok(RuntimeValue::Array(
+            values
+                .into_iter()
+                .map(|value| {
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RuntimeValue::Variant { name, payload } => Ok(RuntimeValue::Variant {
+            name,
+            payload: payload
+                .into_iter()
+                .map(|value| {
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
         other => force_runtime_value(other, plan, state, host),
     }
 }
@@ -17881,7 +9442,7 @@ fn runtime_reference_array_values(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     context: &str,
 ) -> Result<Vec<RuntimeValue>, String> {
     expect_runtime_array(
@@ -17900,6 +9461,112 @@ fn runtime_reference_array_values(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeByteReferenceCarrierKind {
+    Array,
+    ByteBuffer,
+    Bytes,
+}
+
+fn runtime_reference_byte_values(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    host: &mut dyn RuntimeCoreHost,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    expect_byte_array(
+        read_runtime_reference(
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            reference,
+            host,
+        )?,
+        context,
+    )
+}
+
+fn runtime_reference_byte_carrier(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    host: &mut dyn RuntimeCoreHost,
+    context: &str,
+) -> Result<(RuntimeByteReferenceCarrierKind, Vec<u8>), String> {
+    match read_runtime_reference(
+        scopes,
+        plan,
+        current_package_id,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        reference,
+        host,
+    )? {
+        RuntimeValue::Array(values) => Ok((
+            RuntimeByteReferenceCarrierKind::Array,
+            expect_byte_array(RuntimeValue::Array(values), context)?,
+        )),
+        RuntimeValue::ByteBuffer(values) => {
+            Ok((RuntimeByteReferenceCarrierKind::ByteBuffer, values))
+        }
+        RuntimeValue::Bytes(values) => Ok((RuntimeByteReferenceCarrierKind::Bytes, values)),
+        other => Err(format!(
+            "{context} expected Array, Bytes, or ByteBuffer backing, got `{other:?}`"
+        )),
+    }
+}
+
+fn runtime_write_byte_reference(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    carrier: RuntimeByteReferenceCarrierKind,
+    values: Vec<u8>,
+    host: &mut dyn RuntimeCoreHost,
+) -> Result<(), String> {
+    let value = match carrier {
+        RuntimeByteReferenceCarrierKind::Array => bytes_to_runtime_array(values),
+        RuntimeByteReferenceCarrierKind::ByteBuffer => RuntimeValue::ByteBuffer(values),
+        RuntimeByteReferenceCarrierKind::Bytes => {
+            return Err("cannot write through an immutable Bytes projection".to_string());
+        }
+    };
+    write_runtime_reference(
+        scopes,
+        plan,
+        current_package_id,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        reference,
+        value,
+        host,
+    )
+}
+
 fn runtime_reference_text_value(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
@@ -17909,7 +9576,7 @@ fn runtime_reference_text_value(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     context: &str,
 ) -> Result<String, String> {
     expect_str(
@@ -17937,7 +9604,7 @@ fn runtime_read_view_values(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     view: &RuntimeReadViewState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     context: &str,
 ) -> Result<Vec<RuntimeValue>, String> {
     match &view.backing {
@@ -17993,739 +9660,6 @@ fn runtime_read_view_values(
     }
 }
 
-fn runtime_byte_view_values(
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    view: &RuntimeByteViewState,
-    host: &mut dyn RuntimeHost,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    match &view.backing {
-        RuntimeByteViewBacking::Buffer(buffer) => {
-            let values = &state
-                .byte_view_buffers
-                .get(buffer)
-                .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
-                .values;
-            let (start, end) = runtime_view_range(view.start, view.len, values.len(), context)?;
-            Ok(values[start..end].to_vec())
-        }
-        RuntimeByteViewBacking::Reference(reference) => {
-            let values = runtime_reference_array_values(
-                scopes,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                reference,
-                host,
-                context,
-            )?;
-            let bytes = values
-                .into_iter()
-                .map(|value| {
-                    let value = expect_int(value, context)?;
-                    if !(0..=255).contains(&value) {
-                        return Err(format!(
-                            "{context} byte `{value}` is out of range `0..=255`"
-                        ));
-                    }
-                    Ok(value as u8)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let (start, end) = runtime_view_range(view.start, view.len, bytes.len(), context)?;
-            Ok(bytes[start..end].to_vec())
-        }
-    }
-}
-
-fn runtime_byte_edit_view_values(
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    view: &RuntimeByteEditViewState,
-    host: &mut dyn RuntimeHost,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    match &view.backing {
-        RuntimeByteViewBacking::Buffer(buffer) => {
-            let values = &state
-                .byte_view_buffers
-                .get(buffer)
-                .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
-                .values;
-            let (start, end) = runtime_view_range(view.start, view.len, values.len(), context)?;
-            Ok(values[start..end].to_vec())
-        }
-        RuntimeByteViewBacking::Reference(reference) => {
-            let values = runtime_reference_array_values(
-                scopes,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                reference,
-                host,
-                context,
-            )?;
-            let bytes = values
-                .into_iter()
-                .map(|value| {
-                    let value = expect_int(value, context)?;
-                    if !(0..=255).contains(&value) {
-                        return Err(format!(
-                            "{context} byte `{value}` is out of range `0..=255`"
-                        ));
-                    }
-                    Ok(value as u8)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let (start, end) = runtime_view_range(view.start, view.len, bytes.len(), context)?;
-            Ok(bytes[start..end].to_vec())
-        }
-    }
-}
-
-fn runtime_str_view_text(
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    view: &RuntimeStrViewState,
-    host: &mut dyn RuntimeHost,
-    context: &str,
-) -> Result<String, String> {
-    match &view.backing {
-        RuntimeStrViewBacking::Buffer(buffer) => {
-            let text = &state
-                .str_view_buffers
-                .get(buffer)
-                .ok_or_else(|| format!("invalid str view buffer `{}`", buffer.0))?
-                .text;
-            let (start, end) = runtime_view_range(view.start, view.len, text.len(), context)?;
-            runtime_string_slice(text, start, end, context)
-        }
-        RuntimeStrViewBacking::Reference(reference) => {
-            let text = runtime_reference_text_value(
-                scopes,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                reference,
-                host,
-                context,
-            )?;
-            let (start, end) = runtime_view_range(view.start, view.len, text.len(), context)?;
-            runtime_string_slice(&text, start, end, context)
-        }
-    }
-}
-
-fn eval_runtime_index_value(
-    base: RuntimeValue,
-    index: RuntimeValue,
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let base = read_runtime_value_if_ref(
-        base,
-        scopes,
-        plan,
-        current_package_id,
-        current_module_id,
-        aliases,
-        type_bindings,
-        state,
-        host,
-    )?;
-    let index = expect_int(index, "index")?;
-    match base {
-        RuntimeValue::List(values) => {
-            let index = runtime_index_to_usize(index, values.len(), "list index")?;
-            values
-                .get(index)
-                .cloned()
-                .ok_or_else(|| format!("list index `{index}` is out of bounds"))
-        }
-        RuntimeValue::Array(values) => {
-            let index = runtime_index_to_usize(index, values.len(), "array index")?;
-            values
-                .get(index)
-                .cloned()
-                .ok_or_else(|| format!("array index `{index}` is out of bounds"))
-        }
-        other => Err(format!(
-            "runtime index expects List or Array, got `{other:?}`"
-        )),
-    }
-}
-
-fn eval_runtime_slice_value(
-    base: RuntimeValue,
-    start: Option<RuntimeValue>,
-    end: Option<RuntimeValue>,
-    inclusive_end: bool,
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let base = read_runtime_value_if_ref(
-        base,
-        scopes,
-        plan,
-        current_package_id,
-        current_module_id,
-        aliases,
-        type_bindings,
-        state,
-        host,
-    )?;
-    let (values, slice_kind) = match base {
-        RuntimeValue::List(values) => (values, "list"),
-        RuntimeValue::Array(values) => (values, "array"),
-        other => {
-            return Err(format!(
-                "runtime slice expects List or Array, got `{other:?}`"
-            ));
-        }
-    };
-    let len = values.len();
-    let start = runtime_slice_bound_to_usize(
-        start
-            .map(|value| expect_int(value, "slice start"))
-            .transpose()?,
-        0,
-        len,
-        "slice",
-        "start",
-    )?;
-    let raw_end = runtime_slice_bound_to_usize(
-        end.clone()
-            .map(|value| expect_int(value, "slice end"))
-            .transpose()?,
-        len,
-        len,
-        "slice",
-        "end",
-    )?;
-    let end = if inclusive_end {
-        if end.is_some() {
-            if raw_end >= len {
-                return Err(format!(
-                    "slice inclusive end `{raw_end}` is out of bounds for length `{len}`"
-                ));
-            }
-            raw_end + 1
-        } else {
-            len
-        }
-    } else {
-        raw_end
-    };
-    if start > end {
-        return Err(format!(
-            "slice start `{start}` must be less than or equal to end `{end}`"
-        ));
-    }
-    let sliced = values[start..end].to_vec();
-    Ok(match slice_kind {
-        "list" => RuntimeValue::List(sliced),
-        "array" => RuntimeValue::Array(sliced),
-        _ => unreachable!("validated runtime slice carrier kind"),
-    })
-}
-
-fn runtime_slice_window(
-    start: Option<i64>,
-    end: Option<i64>,
-    inclusive_end: bool,
-    len: usize,
-    context: &str,
-) -> Result<(usize, usize), String> {
-    let start = runtime_slice_bound_to_usize(start, 0, len, context, "start")?;
-    let has_end = end.is_some();
-    let raw_end = runtime_slice_bound_to_usize(end, len, len, context, "end")?;
-    let end = if inclusive_end {
-        if has_end {
-            if raw_end >= len {
-                return Err(format!(
-                    "{context} inclusive end `{raw_end}` is out of bounds for length `{len}`"
-                ));
-            }
-            raw_end + 1
-        } else {
-            len
-        }
-    } else {
-        raw_end
-    };
-    if start > end {
-        return Err(format!(
-            "{context} start `{start}` must be less than or equal to end `{end}`"
-        ));
-    }
-    Ok((start, end))
-}
-
-fn eval_runtime_borrowed_slice_view(
-    base_expr: &ParsedExpr,
-    start: Option<&ParsedExpr>,
-    end: Option<&ParsedExpr>,
-    inclusive_end: bool,
-    mutable: bool,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let borrowed_place = expr_to_assign_target(base_expr)
-        .and_then(|target| resolve_assign_target_place(scopes, &target).ok());
-    if mutable
-        && let Some(place) = &borrowed_place
-        && !place.mode.allows_write()
-    {
-        return Err("runtime mutable borrowed slices require writable backing".to_string());
-    }
-    let base = read_runtime_value_if_ref(
-        eval_expr(
-            base_expr,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )
-        .map_err(runtime_eval_message)?,
-        scopes,
-        plan,
-        current_package_id,
-        current_module_id,
-        aliases,
-        type_bindings,
-        state,
-        host,
-    )?;
-    let start = eval_optional_runtime_int_expr(
-        start,
-        plan,
-        current_package_id,
-        current_module_id,
-        scopes,
-        aliases,
-        type_bindings,
-        state,
-        host,
-        "borrowed slice start",
-    )
-    .map_err(runtime_eval_message)?;
-    let end = eval_optional_runtime_int_expr(
-        end,
-        plan,
-        current_package_id,
-        current_module_id,
-        scopes,
-        aliases,
-        type_bindings,
-        state,
-        host,
-        "borrowed slice end",
-    )
-    .map_err(runtime_eval_message)?;
-    match base {
-        RuntimeValue::List(_) => Err(
-            "runtime borrowed slices require contiguous backing; `List` is not supported"
-                .to_string(),
-        ),
-        RuntimeValue::Array(values) => {
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, values.len(), "borrowed slice")?;
-            let len = end - start;
-            if let Some(place) = borrowed_place {
-                if let RuntimeReferenceTarget::Local { local, .. } = &place.target
-                    && let Some((_, runtime_local)) =
-                        lookup_local_with_name_by_handle(scopes, *local)
-                {
-                    state
-                        .captured_local_values
-                        .entry(*local)
-                        .or_insert_with(|| runtime_local.value.clone());
-                }
-                let reference = RuntimeReferenceValue {
-                    mode: place.mode,
-                    target: place.target,
-                };
-                if mutable {
-                    runtime_reject_live_reference_or_opaque_conflict(
-                        Some(scopes.as_slice()),
-                        None,
-                        state,
-                        |candidate| candidate.target == reference.target,
-                        |opaque, state| runtime_opaque_matches_reference_predicate(
-                            opaque,
-                            state,
-                            &|candidate| candidate.target == reference.target,
-                        ),
-                        None,
-                        None,
-                        |_| false,
-                        "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
-                    )?;
-                    let handle =
-                        insert_runtime_edit_view_from_reference(state, &[], reference, start, len);
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)))
-                } else {
-                    let handle =
-                        insert_runtime_read_view_from_reference(state, &[], reference, start, len);
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)))
-                }
-            } else if mutable {
-                let handle = insert_runtime_edit_view(state, &[], values[start..end].to_vec());
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)))
-            } else {
-                let handle = insert_runtime_read_view(state, &[], values[start..end].to_vec());
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)))
-            }
-        }
-        RuntimeValue::Str(text) => {
-            if mutable {
-                return Err(
-                    "runtime string slices are read-only; `&edit x[a..b]` is not allowed"
-                        .to_string(),
-                );
-            }
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, text.len(), "borrowed slice")?;
-            let handle = {
-                let backing = insert_runtime_str_view_buffer(state, text);
-                insert_runtime_str_view_from_buffer(state, backing, start, end - start)
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)))
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) => {
-            if mutable {
-                return Err("runtime mutable borrowed slices require editable backing".to_string());
-            }
-            let (type_args, backing, view_start, view_len) = {
-                let view = state
-                    .read_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
-                (
-                    view.type_args.clone(),
-                    view.backing.clone(),
-                    view.start,
-                    view.len,
-                )
-            };
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, view_len, "borrowed slice")?;
-            let next = insert_runtime_read_view_from_backing(
-                state,
-                &type_args,
-                backing,
-                view_start + start,
-                end - start,
-            );
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) => {
-            let (type_args, backing, view_start, view_len) = {
-                let view = state
-                    .edit_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
-                (
-                    view.type_args.clone(),
-                    view.backing.clone(),
-                    view.start,
-                    view.len,
-                )
-            };
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, view_len, "borrowed slice")?;
-            if mutable {
-                let next = match backing {
-                    RuntimeElementViewBacking::Buffer(buffer) => {
-                        runtime_reject_live_reference_or_opaque_conflict(
-                            Some(scopes.as_slice()),
-                            None,
-                            state,
-                            |_| false,
-                            |opaque, state| {
-                                runtime_opaque_matches_element_buffer(opaque, state, buffer)
-                            },
-                            None,
-                            Some(RuntimeOpaqueValue::EditView(handle)),
-                            |_| false,
-                            "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
-                        )?;
-                        insert_runtime_edit_view_from_buffer(
-                            state,
-                            &type_args,
-                            buffer,
-                            view_start + start,
-                            end - start,
-                        )
-                    }
-                    RuntimeElementViewBacking::Reference(reference) => {
-                        runtime_reject_live_reference_or_opaque_conflict(
-                            Some(scopes.as_slice()),
-                            None,
-                            state,
-                            |candidate| candidate.target == reference.target,
-                            |opaque, state| runtime_opaque_matches_reference_predicate(
-                                opaque,
-                                state,
-                                &|candidate| candidate.target == reference.target,
-                            ),
-                            None,
-                            Some(RuntimeOpaqueValue::EditView(handle)),
-                            |_| false,
-                            "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
-                        )?;
-                        insert_runtime_edit_view_from_reference(
-                            state,
-                            &type_args,
-                            reference,
-                            view_start + start,
-                            end - start,
-                        )
-                    }
-                    RuntimeElementViewBacking::RingWindow { arena, slots } => {
-                        let active = runtime_ring_window_active_slots(
-                            &slots,
-                            view_start + start,
-                            end - start,
-                        )
-                        .ok_or_else(|| {
-                            "runtime mutable borrowed slice range is out of bounds for ring window"
-                                .to_string()
-                        })?
-                        .to_vec();
-                        let ids = runtime_ring_ids_for_slots(state, arena, &active)?;
-                        runtime_reject_live_reference_or_opaque_conflict(
-                            Some(scopes.as_slice()),
-                            None,
-                            state,
-                            |candidate| ids.iter().any(|id| runtime_reference_targets_ring_id(candidate, *id)),
-                            |opaque, state| runtime_opaque_matches_ring_window_predicate(
-                                opaque,
-                                state,
-                                &|candidate_arena, candidate_slots| {
-                                    runtime_ring_window_overlaps_slots(
-                                        arena,
-                                        &active,
-                                        candidate_arena,
-                                        candidate_slots,
-                                    )
-                                },
-                            ),
-                            None,
-                            Some(RuntimeOpaqueValue::EditView(handle)),
-                            |_| false,
-                            "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
-                        )?;
-                        insert_runtime_edit_view_from_ring_window(
-                            state,
-                            &type_args,
-                            arena,
-                            slots,
-                            view_start + start,
-                            end - start,
-                        )
-                    }
-                };
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(next)))
-            } else {
-                let next = insert_runtime_read_view_from_backing(
-                    state,
-                    &type_args,
-                    backing,
-                    view_start + start,
-                    end - start,
-                );
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
-            }
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)) => {
-            if mutable {
-                return Err("runtime mutable borrowed slices require editable backing".to_string());
-            }
-            let view = state
-                .byte_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
-                .clone();
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, view.len, "borrowed slice")?;
-            let next = match view.backing {
-                RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
-                    state,
-                    buffer,
-                    view.start + start,
-                    end - start,
-                ),
-                RuntimeByteViewBacking::Reference(reference) => {
-                    insert_runtime_byte_view_from_reference(
-                        state,
-                        reference,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(handle)) => {
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, view.len, "borrowed slice")?;
-            if mutable {
-                runtime_reject_live_reference_or_opaque_conflict(
-                    Some(scopes.as_slice()),
-                    None,
-                    state,
-                    |candidate| match &view.backing {
-                        RuntimeByteViewBacking::Buffer(_) => false,
-                        RuntimeByteViewBacking::Reference(reference) => {
-                            candidate.target == reference.target
-                        }
-                    },
-                    |opaque, state| match &view.backing {
-                        RuntimeByteViewBacking::Buffer(buffer) => {
-                            runtime_opaque_matches_byte_buffer(opaque, state, *buffer)
-                        }
-                        RuntimeByteViewBacking::Reference(reference) => {
-                            runtime_opaque_matches_reference_predicate(
-                                opaque,
-                                state,
-                                &|candidate| candidate.target == reference.target,
-                            )
-                        }
-                    },
-                    None,
-                    Some(RuntimeOpaqueValue::ByteEditView(handle)),
-                    |_| false,
-                    "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
-                )?;
-                let next = match view.backing {
-                    RuntimeByteViewBacking::Buffer(buffer) => {
-                        insert_runtime_byte_edit_view_from_buffer(
-                            state,
-                            buffer,
-                            view.start + start,
-                            end - start,
-                        )
-                    }
-                    RuntimeByteViewBacking::Reference(reference) => {
-                        insert_runtime_byte_edit_view_from_reference(
-                            state,
-                            reference,
-                            view.start + start,
-                            end - start,
-                        )
-                    }
-                };
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(next)))
-            } else {
-                let next = match view.backing {
-                    RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
-                        state,
-                        buffer,
-                        view.start + start,
-                        end - start,
-                    ),
-                    RuntimeByteViewBacking::Reference(reference) => {
-                        insert_runtime_byte_view_from_reference(
-                            state,
-                            reference,
-                            view.start + start,
-                            end - start,
-                        )
-                    }
-                };
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
-            }
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) => {
-            if mutable {
-                return Err(
-                    "runtime string slices are read-only; `&edit x[a..b]` is not allowed"
-                        .to_string(),
-                );
-            }
-            let view = state
-                .str_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
-                .clone();
-            let (start, end) =
-                runtime_slice_window(start, end, inclusive_end, view.len, "borrowed slice")?;
-            let next = match view.backing {
-                RuntimeStrViewBacking::Buffer(buffer) => insert_runtime_str_view_from_buffer(
-                    state,
-                    buffer,
-                    view.start + start,
-                    end - start,
-                ),
-                RuntimeStrViewBacking::Reference(reference) => {
-                    insert_runtime_str_view_from_reference(
-                        state,
-                        reference,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(next)))
-        }
-        other => Err(format!(
-            "runtime borrowed slice expects contiguous array, view, or string backing, got `{other:?}`"
-        )),
-    }
-}
-
 fn eval_optional_runtime_int_expr(
     expr: Option<&ParsedExpr>,
     plan: &RuntimePackagePlan,
@@ -18735,7 +9669,7 @@ fn eval_optional_runtime_int_expr(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     context: &str,
 ) -> RuntimeEvalResult<Option<i64>> {
     expr.map(|expr| {
@@ -18768,20 +9702,30 @@ fn eval_match_expr(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let subject = eval_expr(
-        subject,
+    let subject = read_runtime_value_if_ref(
+        eval_expr(
+            subject,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )
+        .map_err(runtime_eval_message)?,
+        scopes,
         plan,
         current_package_id,
         current_module_id,
-        scopes,
         aliases,
         type_bindings,
         state,
         host,
-    )
-    .map_err(runtime_eval_message)?;
+    )?;
     for arm in arms {
         for pattern in &arm.patterns {
             let mut bindings = BTreeMap::new();
@@ -18808,9 +9752,7 @@ fn eval_match_expr(
             return result;
         }
     }
-    Err("runtime match expression had no matching arm"
-        .to_string()
-        .into())
+    Err(format!("runtime match expression had no matching arm for subject `{subject:?}`").into())
 }
 
 fn err_variant(message: String) -> RuntimeValue {
@@ -18860,7 +9802,7 @@ fn try_construct_record_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     if !attached.is_empty() {
         return Ok(None);
@@ -18930,7 +9872,7 @@ fn try_construct_variant_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     if !looks_like_variant_constructor(callable) || !attached.is_empty() {
         return Ok(None);
@@ -19063,7 +10005,7 @@ fn try_execute_builtin_numeric_conversion(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     let [target] = callable else {
         return Ok(None);
@@ -19121,7 +10063,7 @@ fn try_construct_array_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     if !attached.is_empty() || args.iter().any(|arg| arg.name.is_some()) {
         return Ok(None);
@@ -19426,7 +10368,7 @@ fn execute_call_by_path(
     plan: &RuntimePackagePlan,
     scopes: &mut Vec<RuntimeScope>,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     allow_async: bool,
 ) -> RuntimeEvalResult<RuntimeValue> {
     if let Some(value) = try_execute_arcana_owned_api_call(
@@ -19481,6 +10423,22 @@ fn execute_call_by_path(
                         )
                     })?;
                 let mut final_args = values;
+                for (index, param) in routine.params.iter().enumerate() {
+                    if param.mode.as_deref() == Some("edit") {
+                        continue;
+                    }
+                    final_args[index] = read_runtime_value_if_ref(
+                        final_args[index].clone(),
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                        state,
+                        host,
+                    )?;
+                }
                 let value = execute_runtime_intrinsic(
                     intrinsic,
                     &type_args,
@@ -19497,11 +10455,24 @@ fn execute_call_by_path(
                 Ok(RoutineExecutionOutcome {
                     value,
                     final_args,
+                    skip_write_back_edit_indices: BTreeSet::new(),
                     control: None,
                 })
             } else if let Some(native_impl) = &routine.native_impl {
-                execute_runtime_native_binding_import(plan, routine, native_impl, &values, host)
-                    .map_err(RuntimeEvalSignal::from)
+                execute_runtime_native_binding_import(
+                    plan,
+                    routine,
+                    native_impl,
+                    &values,
+                    scopes,
+                    current_package_id,
+                    current_module_id,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    state,
+                    host,
+                )
+                .map_err(RuntimeEvalSignal::from)
             } else {
                 execute_routine_call_with_state(
                     plan,
@@ -19530,6 +10501,7 @@ fn execute_call_by_path(
             &BTreeMap::new(),
             &BTreeMap::new(),
             state,
+            &outcome.skip_write_back_edit_indices,
             routine,
             &bound_args,
             &outcome.final_args,
@@ -19550,11 +10522,28 @@ fn execute_call_by_path(
     let intrinsic = resolve_runtime_intrinsic_path(callable)
         .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
     let call_args = bind_call_args_for_intrinsic(callable, call_args)?;
-    consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
+    consume_take_call_args(scopes, take_arg_indices(intrinsic), &call_args)?;
     let mut values = call_args
         .iter()
         .map(|arg| arg.value.clone())
         .collect::<Vec<_>>();
+    let edit_indices = edit_arg_indices(intrinsic);
+    for index in 0..values.len() {
+        if edit_indices.contains(&index) {
+            continue;
+        }
+        values[index] = read_runtime_value_if_ref(
+            values[index].clone(),
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            state,
+            host,
+        )?;
+    }
     let value = execute_runtime_intrinsic(
         intrinsic,
         &type_args,
@@ -19568,6 +10557,7 @@ fn execute_call_by_path(
         state,
         host,
     )?;
+    let skip_edit_arg_indices = BTreeSet::new();
     write_back_call_args(
         scopes,
         plan,
@@ -19576,7 +10566,8 @@ fn execute_call_by_path(
         &BTreeMap::new(),
         &BTreeMap::new(),
         state,
-        intrinsic_edit_arg_indices(intrinsic),
+        &skip_edit_arg_indices,
+        edit_arg_indices(intrinsic),
         &call_args,
         &values,
         host,
@@ -19598,7 +10589,7 @@ fn execute_runtime_apply_phrase(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
     allow_async: bool,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let callable = resolved_callable
@@ -19721,7 +10712,7 @@ fn execute_runtime_method_call_with_type_args(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let receiver = read_runtime_value_if_ref(
         eval_expr(
@@ -19799,7 +10790,7 @@ fn execute_runtime_named_qualifier_call(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let receiver = read_runtime_value_if_ref(
         eval_expr(
@@ -19880,7 +10871,7 @@ fn eval_qualifier(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     execute_runtime_method_call_with_type_args(
         subject,
@@ -19934,7 +10925,7 @@ fn eval_try_qualifier(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     if !args.is_empty() {
         return Err("`:: ?` does not accept arguments".to_string().into());
@@ -19957,677 +10948,6 @@ fn eval_try_qualifier(
     )?)
 }
 
-fn is_runtime_app_shell_intrinsic(intrinsic: RuntimeIntrinsic) -> bool {
-    matches!(
-        intrinsic,
-        RuntimeIntrinsic::WindowOpenTry
-            | RuntimeIntrinsic::WindowSize
-            | RuntimeIntrinsic::WindowResized
-            | RuntimeIntrinsic::WindowFullscreen
-            | RuntimeIntrinsic::WindowMinimized
-            | RuntimeIntrinsic::WindowMaximized
-            | RuntimeIntrinsic::WindowFocused
-            | RuntimeIntrinsic::WindowId
-            | RuntimeIntrinsic::WindowPosition
-            | RuntimeIntrinsic::WindowTitle
-            | RuntimeIntrinsic::WindowVisible
-            | RuntimeIntrinsic::WindowDecorated
-            | RuntimeIntrinsic::WindowResizable
-            | RuntimeIntrinsic::WindowTopmost
-            | RuntimeIntrinsic::WindowCursorVisible
-            | RuntimeIntrinsic::WindowMinSize
-            | RuntimeIntrinsic::WindowMaxSize
-            | RuntimeIntrinsic::WindowScaleFactorMilli
-            | RuntimeIntrinsic::WindowThemeCode
-            | RuntimeIntrinsic::WindowTransparent
-            | RuntimeIntrinsic::WindowThemeOverrideCode
-            | RuntimeIntrinsic::WindowCursorIconCode
-            | RuntimeIntrinsic::WindowCursorGrabMode
-            | RuntimeIntrinsic::WindowCursorPosition
-            | RuntimeIntrinsic::WindowTextInputEnabled
-            | RuntimeIntrinsic::WindowCurrentMonitorIndex
-            | RuntimeIntrinsic::WindowPrimaryMonitorIndex
-            | RuntimeIntrinsic::WindowMonitorCount
-            | RuntimeIntrinsic::WindowMonitorName
-            | RuntimeIntrinsic::WindowMonitorPosition
-            | RuntimeIntrinsic::WindowMonitorSize
-            | RuntimeIntrinsic::WindowMonitorScaleFactorMilli
-            | RuntimeIntrinsic::WindowMonitorIsPrimary
-            | RuntimeIntrinsic::WindowSetTitle
-            | RuntimeIntrinsic::WindowSetPosition
-            | RuntimeIntrinsic::WindowSetSize
-            | RuntimeIntrinsic::WindowSetVisible
-            | RuntimeIntrinsic::WindowSetDecorated
-            | RuntimeIntrinsic::WindowSetResizable
-            | RuntimeIntrinsic::WindowSetMinSize
-            | RuntimeIntrinsic::WindowSetMaxSize
-            | RuntimeIntrinsic::WindowSetFullscreen
-            | RuntimeIntrinsic::WindowSetMinimized
-            | RuntimeIntrinsic::WindowSetMaximized
-            | RuntimeIntrinsic::WindowSetTopmost
-            | RuntimeIntrinsic::WindowSetCursorVisible
-            | RuntimeIntrinsic::WindowSetTransparent
-            | RuntimeIntrinsic::WindowSetThemeOverrideCode
-            | RuntimeIntrinsic::WindowSetCursorIconCode
-            | RuntimeIntrinsic::WindowSetCursorGrabMode
-            | RuntimeIntrinsic::WindowSetCursorPosition
-            | RuntimeIntrinsic::WindowTextInputSetEnabled
-            | RuntimeIntrinsic::WindowRequestRedraw
-            | RuntimeIntrinsic::WindowRequestAttention
-            | RuntimeIntrinsic::WindowClose
-            | RuntimeIntrinsic::EventsPoll
-            | RuntimeIntrinsic::EventsSessionOpen
-            | RuntimeIntrinsic::EventsSessionClose
-            | RuntimeIntrinsic::EventsSessionAttachWindow
-            | RuntimeIntrinsic::EventsSessionDetachWindow
-            | RuntimeIntrinsic::EventsSessionWindowById
-            | RuntimeIntrinsic::EventsSessionWindowIds
-            | RuntimeIntrinsic::EventsSessionPump
-            | RuntimeIntrinsic::EventsSessionWait
-            | RuntimeIntrinsic::EventsSessionDeviceEvents
-            | RuntimeIntrinsic::EventsSessionSetDeviceEvents
-            | RuntimeIntrinsic::EventsSessionCreateWake
-            | RuntimeIntrinsic::EventsWakeSignal
-    )
-}
-
-#[inline(never)]
-fn execute_runtime_app_shell_intrinsic(
-    intrinsic: RuntimeIntrinsic,
-    args: &[RuntimeValue],
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let args = args.to_vec();
-    match intrinsic {
-        RuntimeIntrinsic::WindowOpenTry => {
-            if args.len() != 3 {
-                return Err("window_open expects three arguments".to_string());
-            }
-            let title = expect_str(args[0].clone(), "window_open")?;
-            let width = expect_int(args[1].clone(), "window_open")?;
-            let height = expect_int(args[2].clone(), "window_open")?;
-            Ok(match host.window_open(&title, width, height) {
-                Ok(handle) => ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(handle))),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::WindowSize => {
-            let window = expect_window(expect_single_arg(args, "window_size")?, "window_size")?;
-            let (width, height) = host.window_size(window)?;
-            Ok(make_pair(
-                RuntimeValue::Int(width),
-                RuntimeValue::Int(height),
-            ))
-        }
-        RuntimeIntrinsic::WindowResized => {
-            let window =
-                expect_window(expect_single_arg(args, "window_resized")?, "window_resized")?;
-            Ok(RuntimeValue::Bool(host.window_resized(window)?))
-        }
-        RuntimeIntrinsic::WindowFullscreen => {
-            let window = expect_window(
-                expect_single_arg(args, "window_fullscreen")?,
-                "window_fullscreen",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_fullscreen(window)?))
-        }
-        RuntimeIntrinsic::WindowMinimized => {
-            let window = expect_window(
-                expect_single_arg(args, "window_minimized")?,
-                "window_minimized",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_minimized(window)?))
-        }
-        RuntimeIntrinsic::WindowMaximized => {
-            let window = expect_window(
-                expect_single_arg(args, "window_maximized")?,
-                "window_maximized",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_maximized(window)?))
-        }
-        RuntimeIntrinsic::WindowFocused => {
-            let window =
-                expect_window(expect_single_arg(args, "window_focused")?, "window_focused")?;
-            Ok(RuntimeValue::Bool(host.window_focused(window)?))
-        }
-        RuntimeIntrinsic::WindowId => {
-            let window = expect_window(expect_single_arg(args, "window_id")?, "window_id")?;
-            Ok(RuntimeValue::Int(host.window_id(window)?))
-        }
-        RuntimeIntrinsic::WindowPosition => {
-            let window = expect_window(
-                expect_single_arg(args, "window_position")?,
-                "window_position",
-            )?;
-            let (x, y) = host.window_position(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowTitle => {
-            let window = expect_window(expect_single_arg(args, "window_title")?, "window_title")?;
-            Ok(RuntimeValue::Str(host.window_title(window)?))
-        }
-        RuntimeIntrinsic::WindowVisible => {
-            let window =
-                expect_window(expect_single_arg(args, "window_visible")?, "window_visible")?;
-            Ok(RuntimeValue::Bool(host.window_visible(window)?))
-        }
-        RuntimeIntrinsic::WindowDecorated => {
-            let window = expect_window(
-                expect_single_arg(args, "window_decorated")?,
-                "window_decorated",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_decorated(window)?))
-        }
-        RuntimeIntrinsic::WindowResizable => {
-            let window = expect_window(
-                expect_single_arg(args, "window_resizable")?,
-                "window_resizable",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_resizable(window)?))
-        }
-        RuntimeIntrinsic::WindowTopmost => {
-            let window =
-                expect_window(expect_single_arg(args, "window_topmost")?, "window_topmost")?;
-            Ok(RuntimeValue::Bool(host.window_topmost(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorVisible => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_visible")?,
-                "window_cursor_visible",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_cursor_visible(window)?))
-        }
-        RuntimeIntrinsic::WindowMinSize => {
-            let window = expect_window(
-                expect_single_arg(args, "window_min_size")?,
-                "window_min_size",
-            )?;
-            let (width, height) = host.window_min_size(window)?;
-            Ok(make_pair(
-                RuntimeValue::Int(width),
-                RuntimeValue::Int(height),
-            ))
-        }
-        RuntimeIntrinsic::WindowMaxSize => {
-            let window = expect_window(
-                expect_single_arg(args, "window_max_size")?,
-                "window_max_size",
-            )?;
-            let (width, height) = host.window_max_size(window)?;
-            Ok(make_pair(
-                RuntimeValue::Int(width),
-                RuntimeValue::Int(height),
-            ))
-        }
-        RuntimeIntrinsic::WindowScaleFactorMilli => {
-            let window = expect_window(
-                expect_single_arg(args, "window_scale_factor_milli")?,
-                "window_scale_factor_milli",
-            )?;
-            Ok(RuntimeValue::Int(host.window_scale_factor_milli(window)?))
-        }
-        RuntimeIntrinsic::WindowThemeCode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_theme_code")?,
-                "window_theme_code",
-            )?;
-            Ok(RuntimeValue::Int(host.window_theme_code(window)?))
-        }
-        RuntimeIntrinsic::WindowTransparent => {
-            let window = expect_window(
-                expect_single_arg(args, "window_transparent")?,
-                "window_transparent",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_transparent(window)?))
-        }
-        RuntimeIntrinsic::WindowThemeOverrideCode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_theme_override_code")?,
-                "window_theme_override_code",
-            )?;
-            Ok(RuntimeValue::Int(host.window_theme_override_code(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorIconCode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_icon_code")?,
-                "window_cursor_icon_code",
-            )?;
-            Ok(RuntimeValue::Int(host.window_cursor_icon_code(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorGrabMode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_grab_mode")?,
-                "window_cursor_grab_mode",
-            )?;
-            Ok(RuntimeValue::Int(host.window_cursor_grab_mode(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorPosition => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_position")?,
-                "window_cursor_position",
-            )?;
-            let (x, y) = host.window_cursor_position(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowTextInputEnabled => {
-            let window = expect_window(
-                expect_single_arg(args, "window_text_input_enabled")?,
-                "window_text_input_enabled",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_text_input_enabled(window)?))
-        }
-        RuntimeIntrinsic::WindowCurrentMonitorIndex => {
-            let window = expect_window(
-                expect_single_arg(args, "window_current_monitor_index")?,
-                "window_current_monitor_index",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.window_current_monitor_index(window)?,
-            ))
-        }
-        RuntimeIntrinsic::WindowPrimaryMonitorIndex => {
-            if !args.is_empty() {
-                return Err("window_primary_monitor_index expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.window_primary_monitor_index()?))
-        }
-        RuntimeIntrinsic::WindowMonitorCount => {
-            if !args.is_empty() {
-                return Err("window_monitor_count expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.window_monitor_count()?))
-        }
-        RuntimeIntrinsic::WindowMonitorName => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_name")?,
-                "window_monitor_name",
-            )?;
-            Ok(RuntimeValue::Str(host.window_monitor_name(index)?))
-        }
-        RuntimeIntrinsic::WindowMonitorPosition => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_position")?,
-                "window_monitor_position",
-            )?;
-            let (x, y) = host.window_monitor_position(index)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowMonitorSize => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_size")?,
-                "window_monitor_size",
-            )?;
-            let (width, height) = host.window_monitor_size(index)?;
-            Ok(make_pair(
-                RuntimeValue::Int(width),
-                RuntimeValue::Int(height),
-            ))
-        }
-        RuntimeIntrinsic::WindowMonitorScaleFactorMilli => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_scale_factor_milli")?,
-                "window_monitor_scale_factor_milli",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.window_monitor_scale_factor_milli(index)?,
-            ))
-        }
-        RuntimeIntrinsic::WindowMonitorIsPrimary => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_is_primary")?,
-                "window_monitor_is_primary",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_monitor_is_primary(index)?))
-        }
-        RuntimeIntrinsic::WindowSetTitle => {
-            if args.len() != 2 {
-                return Err("window_set_title expects two arguments".to_string());
-            }
-            host.window_set_title(
-                expect_window(args[0].clone(), "window_set_title")?,
-                &expect_str(args[1].clone(), "window_set_title")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetPosition => {
-            if args.len() != 3 {
-                return Err("window_set_position expects three arguments".to_string());
-            }
-            host.window_set_position(
-                expect_window(args[0].clone(), "window_set_position")?,
-                expect_int(args[1].clone(), "window_set_position")?,
-                expect_int(args[2].clone(), "window_set_position")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetSize => {
-            if args.len() != 3 {
-                return Err("window_set_size expects three arguments".to_string());
-            }
-            host.window_set_size(
-                expect_window(args[0].clone(), "window_set_size")?,
-                expect_int(args[1].clone(), "window_set_size")?,
-                expect_int(args[2].clone(), "window_set_size")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetVisible => {
-            if args.len() != 2 {
-                return Err("window_set_visible expects two arguments".to_string());
-            }
-            host.window_set_visible(
-                expect_window(args[0].clone(), "window_set_visible")?,
-                expect_bool(args[1].clone(), "window_set_visible")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetDecorated => {
-            if args.len() != 2 {
-                return Err("window_set_decorated expects two arguments".to_string());
-            }
-            host.window_set_decorated(
-                expect_window(args[0].clone(), "window_set_decorated")?,
-                expect_bool(args[1].clone(), "window_set_decorated")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetResizable => {
-            if args.len() != 2 {
-                return Err("window_set_resizable expects two arguments".to_string());
-            }
-            host.window_set_resizable(
-                expect_window(args[0].clone(), "window_set_resizable")?,
-                expect_bool(args[1].clone(), "window_set_resizable")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMinSize => {
-            if args.len() != 3 {
-                return Err("window_set_min_size expects three arguments".to_string());
-            }
-            host.window_set_min_size(
-                expect_window(args[0].clone(), "window_set_min_size")?,
-                expect_int(args[1].clone(), "window_set_min_size")?,
-                expect_int(args[2].clone(), "window_set_min_size")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMaxSize => {
-            if args.len() != 3 {
-                return Err("window_set_max_size expects three arguments".to_string());
-            }
-            host.window_set_max_size(
-                expect_window(args[0].clone(), "window_set_max_size")?,
-                expect_int(args[1].clone(), "window_set_max_size")?,
-                expect_int(args[2].clone(), "window_set_max_size")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetFullscreen => {
-            if args.len() != 2 {
-                return Err("window_set_fullscreen expects two arguments".to_string());
-            }
-            host.window_set_fullscreen(
-                expect_window(args[0].clone(), "window_set_fullscreen")?,
-                expect_bool(args[1].clone(), "window_set_fullscreen")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMinimized => {
-            if args.len() != 2 {
-                return Err("window_set_minimized expects two arguments".to_string());
-            }
-            host.window_set_minimized(
-                expect_window(args[0].clone(), "window_set_minimized")?,
-                expect_bool(args[1].clone(), "window_set_minimized")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMaximized => {
-            if args.len() != 2 {
-                return Err("window_set_maximized expects two arguments".to_string());
-            }
-            host.window_set_maximized(
-                expect_window(args[0].clone(), "window_set_maximized")?,
-                expect_bool(args[1].clone(), "window_set_maximized")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetTopmost => {
-            if args.len() != 2 {
-                return Err("window_set_topmost expects two arguments".to_string());
-            }
-            host.window_set_topmost(
-                expect_window(args[0].clone(), "window_set_topmost")?,
-                expect_bool(args[1].clone(), "window_set_topmost")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorVisible => {
-            if args.len() != 2 {
-                return Err("window_set_cursor_visible expects two arguments".to_string());
-            }
-            host.window_set_cursor_visible(
-                expect_window(args[0].clone(), "window_set_cursor_visible")?,
-                expect_bool(args[1].clone(), "window_set_cursor_visible")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetTransparent => {
-            if args.len() != 2 {
-                return Err("window_set_transparent expects two arguments".to_string());
-            }
-            host.window_set_transparent(
-                expect_window(args[0].clone(), "window_set_transparent")?,
-                expect_bool(args[1].clone(), "window_set_transparent")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetThemeOverrideCode => {
-            if args.len() != 2 {
-                return Err("window_set_theme_override_code expects two arguments".to_string());
-            }
-            host.window_set_theme_override_code(
-                expect_window(args[0].clone(), "window_set_theme_override_code")?,
-                expect_int(args[1].clone(), "window_set_theme_override_code")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorIconCode => {
-            if args.len() != 2 {
-                return Err("window_set_cursor_icon_code expects two arguments".to_string());
-            }
-            host.window_set_cursor_icon_code(
-                expect_window(args[0].clone(), "window_set_cursor_icon_code")?,
-                expect_int(args[1].clone(), "window_set_cursor_icon_code")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorGrabMode => {
-            if args.len() != 2 {
-                return Err("window_set_cursor_grab_mode expects two arguments".to_string());
-            }
-            host.window_set_cursor_grab_mode(
-                expect_window(args[0].clone(), "window_set_cursor_grab_mode")?,
-                expect_int(args[1].clone(), "window_set_cursor_grab_mode")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorPosition => {
-            if args.len() != 3 {
-                return Err("window_set_cursor_position expects three arguments".to_string());
-            }
-            host.window_set_cursor_position(
-                expect_window(args[0].clone(), "window_set_cursor_position")?,
-                expect_int(args[1].clone(), "window_set_cursor_position")?,
-                expect_int(args[2].clone(), "window_set_cursor_position")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowTextInputSetEnabled => {
-            if args.len() != 2 {
-                return Err("window_text_input_set_enabled expects two arguments".to_string());
-            }
-            host.window_set_text_input_enabled(
-                expect_window(args[0].clone(), "window_text_input_set_enabled")?,
-                expect_bool(args[1].clone(), "window_text_input_set_enabled")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowRequestRedraw => {
-            let window = expect_window(
-                expect_single_arg(args, "window_request_redraw")?,
-                "window_request_redraw",
-            )?;
-            host.window_request_redraw(window)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowRequestAttention => {
-            if args.len() != 2 {
-                return Err("window_request_attention expects two arguments".to_string());
-            }
-            host.window_request_attention(
-                expect_window(args[0].clone(), "window_request_attention")?,
-                expect_bool(args[1].clone(), "window_request_attention")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowClose => {
-            let window = expect_window(expect_single_arg(args, "window_close")?, "window_close")?;
-            Ok(match host.window_close(window) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::EventsPoll => {
-            let frame = expect_app_frame(expect_single_arg(args, "events_poll")?, "events_poll")?;
-            Ok(match host.events_poll(frame)? {
-                Some(event) => some_variant(runtime_event_record_value(event)),
-                None => none_variant(),
-            })
-        }
-        RuntimeIntrinsic::EventsSessionOpen => {
-            if !args.is_empty() {
-                return Err("events_session_open expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(
-                host.events_session_open()?,
-            )))
-        }
-        RuntimeIntrinsic::EventsSessionClose => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_close")?,
-                "events_session_close",
-            )?;
-            host.events_session_close(session)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionAttachWindow => {
-            if args.len() != 2 {
-                return Err("events_session_attach_window expects two arguments".to_string());
-            }
-            host.events_session_attach_window(
-                expect_app_session(args[0].clone(), "events_session_attach_window")?,
-                expect_window(args[1].clone(), "events_session_attach_window")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionDetachWindow => {
-            if args.len() != 2 {
-                return Err("events_session_detach_window expects two arguments".to_string());
-            }
-            host.events_session_detach_window(
-                expect_app_session(args[0].clone(), "events_session_detach_window")?,
-                expect_window(args[1].clone(), "events_session_detach_window")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionWindowById => {
-            if args.len() != 2 {
-                return Err("events_session_window_by_id expects two arguments".to_string());
-            }
-            Ok(
-                match host.events_session_window_by_id(
-                    expect_app_session(args[0].clone(), "events_session_window_by_id")?,
-                    expect_int(args[1].clone(), "events_session_window_by_id")?,
-                )? {
-                    Some(window) => {
-                        some_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window)))
-                    }
-                    None => none_variant(),
-                },
-            )
-        }
-        RuntimeIntrinsic::EventsSessionWindowIds => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_window_ids")?,
-                "events_session_window_ids",
-            )?;
-            Ok(RuntimeValue::List(
-                host.events_session_window_ids(session)?
-                    .into_iter()
-                    .map(RuntimeValue::Int)
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::EventsSessionPump => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_pump")?,
-                "events_session_pump",
-            )?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_session_pump(session)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsSessionWait => {
-            if args.len() != 2 {
-                return Err("events_session_wait expects two arguments".to_string());
-            }
-            let session = expect_app_session(args[0].clone(), "events_session_wait")?;
-            let timeout = expect_int(args[1].clone(), "events_session_wait")?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_session_wait(session, timeout)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsSessionDeviceEvents => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_device_events")?,
-                "events_session_device_events",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.events_session_device_events(session)?,
-            ))
-        }
-        RuntimeIntrinsic::EventsSessionSetDeviceEvents => {
-            if args.len() != 2 {
-                return Err("events_session_set_device_events expects two arguments".to_string());
-            }
-            let session = expect_app_session(args[0].clone(), "events_session_set_device_events")?;
-            let policy = expect_int(args[1].clone(), "events_session_set_device_events")?;
-            host.events_session_set_device_events(session, policy)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionCreateWake => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_create_wake")?,
-                "events_session_create_wake",
-            )?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(
-                host.events_session_create_wake(session)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsWakeSignal => {
-            let wake = expect_wake(
-                expect_single_arg(args, "events_wake_signal")?,
-                "events_wake_signal",
-            )?;
-            host.events_wake_signal(wake)?;
-            Ok(RuntimeValue::Unit)
-        }
-        _ => unreachable!("non-app-shell intrinsic routed to execute_runtime_app_shell_intrinsic"),
-    }
-}
-
 fn execute_runtime_intrinsic(
     intrinsic: RuntimeIntrinsic,
     type_args: &[String],
@@ -20639,11 +10959,8 @@ fn execute_runtime_intrinsic(
     aliases: Option<&BTreeMap<String, Vec<String>>>,
     type_bindings: Option<&RuntimeTypeBindings>,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
-    if is_runtime_app_shell_intrinsic(intrinsic) {
-        return execute_runtime_app_shell_intrinsic(intrinsic, final_args.as_slice(), host);
-    }
     execute_runtime_core_intrinsic(
         intrinsic,
         type_args,
@@ -20657,5357 +10974,6 @@ fn execute_runtime_intrinsic(
         state,
         host,
     )
-}
-
-fn execute_runtime_core_intrinsic(
-    intrinsic: RuntimeIntrinsic,
-    type_args: &[String],
-    final_args: &mut Vec<RuntimeValue>,
-    plan: &RuntimePackagePlan,
-    mut scopes: Option<&mut Vec<RuntimeScope>>,
-    current_package_id: Option<&str>,
-    current_module_id: Option<&str>,
-    aliases: Option<&BTreeMap<String, Vec<String>>>,
-    type_bindings: Option<&RuntimeTypeBindings>,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let args = final_args.clone();
-    match intrinsic {
-        RuntimeIntrinsic::IoPrint => {
-            let value = expect_single_arg(args, "print")?;
-            host.print(&runtime_value_to_string(&value))?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::IoPrintLine => {
-            let value = expect_single_arg(args, "print_line")?;
-            host.print(&runtime_value_to_string(&value))?;
-            host.print("\n")?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::IoEprint => {
-            let value = expect_single_arg(args, "eprint")?;
-            host.eprint(&runtime_value_to_string(&value))?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::IoEprintLine => {
-            let value = expect_single_arg(args, "eprint_line")?;
-            host.eprint(&runtime_value_to_string(&value))?;
-            host.eprint("\n")?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::IoFlushStdout => {
-            if !args.is_empty() {
-                return Err("flush_stdout expects zero arguments".to_string());
-            }
-            host.flush_stdout()?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::IoFlushStderr => {
-            if !args.is_empty() {
-                return Err("flush_stderr expects zero arguments".to_string());
-            }
-            host.flush_stderr()?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::IoStdinReadLineTry => {
-            if !args.is_empty() {
-                return Err("stdin_read_line expects zero arguments".to_string());
-            }
-            Ok(match host.stdin_read_line() {
-                Ok(line) => ok_variant(RuntimeValue::Str(line)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::ArgCount => {
-            if !args.is_empty() {
-                return Err("arg_count expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(
-                i64::try_from(host.arg_count()?)
-                    .map_err(|_| "runtime arg count does not fit in i64".to_string())?,
-            ))
-        }
-        RuntimeIntrinsic::ArgGet => {
-            let index = expect_int(expect_single_arg(args, "arg_get")?, "arg_get")?;
-            if index < 0 {
-                return Err("arg_get index must be non-negative".to_string());
-            }
-            Ok(RuntimeValue::Str(host.arg_get(index as usize)?))
-        }
-        RuntimeIntrinsic::EnvHas => {
-            let name = expect_str(expect_single_arg(args, "env_has")?, "env_has")?;
-            Ok(RuntimeValue::Bool(host.env_has(&name)?))
-        }
-        RuntimeIntrinsic::EnvGet => {
-            let name = expect_str(expect_single_arg(args, "env_get")?, "env_get")?;
-            Ok(RuntimeValue::Str(host.env_get(&name)?))
-        }
-        RuntimeIntrinsic::PackageAssetRootTry => {
-            if !args.is_empty() {
-                return Err("package_asset_root expects zero arguments".to_string());
-            }
-            let package_id = current_package_id.unwrap_or(&plan.package_id);
-            Ok(match runtime_current_package_asset_root(package_id, host) {
-                Ok(path) => ok_variant(RuntimeValue::Str(runtime_path_string(&path))),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::PathCwd => {
-            if !args.is_empty() {
-                return Err("path_cwd expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Str(host.cwd()?))
-        }
-        RuntimeIntrinsic::PathJoin => {
-            if args.len() != 2 {
-                return Err("path_join expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Str(host.path_join(
-                &expect_str(args[0].clone(), "path_join")?,
-                &expect_str(args[1].clone(), "path_join")?,
-            )?))
-        }
-        RuntimeIntrinsic::PathNormalize => {
-            let path = expect_str(expect_single_arg(args, "path_normalize")?, "path_normalize")?;
-            Ok(RuntimeValue::Str(host.path_normalize(&path)?))
-        }
-        RuntimeIntrinsic::PathParent => {
-            let path = expect_str(expect_single_arg(args, "path_parent")?, "path_parent")?;
-            Ok(RuntimeValue::Str(host.path_parent(&path)?))
-        }
-        RuntimeIntrinsic::PathFileName => {
-            let path = expect_str(expect_single_arg(args, "path_file_name")?, "path_file_name")?;
-            Ok(RuntimeValue::Str(host.path_file_name(&path)?))
-        }
-        RuntimeIntrinsic::PathExt => {
-            let path = expect_str(expect_single_arg(args, "path_ext")?, "path_ext")?;
-            Ok(RuntimeValue::Str(host.path_ext(&path)?))
-        }
-        RuntimeIntrinsic::PathIsAbsolute => {
-            let path = expect_str(
-                expect_single_arg(args, "path_is_absolute")?,
-                "path_is_absolute",
-            )?;
-            Ok(RuntimeValue::Bool(host.path_is_absolute(&path)?))
-        }
-        RuntimeIntrinsic::PathStemTry => {
-            let path = expect_str(expect_single_arg(args, "path_stem")?, "path_stem")?;
-            Ok(match host.path_stem(&path) {
-                Ok(stem) => ok_variant(RuntimeValue::Str(stem)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::PathWithExt => {
-            if args.len() != 2 {
-                return Err("path_with_ext expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Str(host.path_with_ext(
-                &expect_str(args[0].clone(), "path_with_ext")?,
-                &expect_str(args[1].clone(), "path_with_ext")?,
-            )?))
-        }
-        RuntimeIntrinsic::PathRelativeToTry => {
-            if args.len() != 2 {
-                return Err("path_relative_to expects two arguments".to_string());
-            }
-            Ok(
-                match host.path_relative_to(
-                    &expect_str(args[0].clone(), "path_relative_to")?,
-                    &expect_str(args[1].clone(), "path_relative_to")?,
-                ) {
-                    Ok(path) => ok_variant(RuntimeValue::Str(path)),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::PathCanonicalizeTry => {
-            let path = expect_str(
-                expect_single_arg(args, "path_canonicalize")?,
-                "path_canonicalize",
-            )?;
-            Ok(match host.path_canonicalize(&path) {
-                Ok(path) => ok_variant(RuntimeValue::Str(path)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::PathStripPrefixTry => {
-            if args.len() != 2 {
-                return Err("path_strip_prefix expects two arguments".to_string());
-            }
-            Ok(
-                match host.path_strip_prefix(
-                    &expect_str(args[0].clone(), "path_strip_prefix")?,
-                    &expect_str(args[1].clone(), "path_strip_prefix")?,
-                ) {
-                    Ok(path) => ok_variant(RuntimeValue::Str(path)),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::FsExists => {
-            let path = expect_str(expect_single_arg(args, "fs_exists")?, "fs_exists")?;
-            Ok(RuntimeValue::Bool(host.fs_exists(&path)?))
-        }
-        RuntimeIntrinsic::FsIsFile => {
-            let path = expect_str(expect_single_arg(args, "fs_is_file")?, "fs_is_file")?;
-            Ok(RuntimeValue::Bool(host.fs_is_file(&path)?))
-        }
-        RuntimeIntrinsic::FsIsDir => {
-            let path = expect_str(expect_single_arg(args, "fs_is_dir")?, "fs_is_dir")?;
-            Ok(RuntimeValue::Bool(host.fs_is_dir(&path)?))
-        }
-        RuntimeIntrinsic::FsReadTextTry => {
-            let path = expect_str(expect_single_arg(args, "fs_read_text")?, "fs_read_text")?;
-            Ok(match host.fs_read_text(&path) {
-                Ok(text) => ok_variant(RuntimeValue::Str(text)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsReadBytesTry => {
-            let path = expect_str(expect_single_arg(args, "fs_read_bytes")?, "fs_read_bytes")?;
-            Ok(match host.fs_read_bytes(&path) {
-                Ok(bytes) => ok_variant(bytes_to_runtime_array(bytes)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsStreamOpenReadTry => {
-            let path = expect_str(
-                expect_single_arg(args, "fs_stream_open_read")?,
-                "fs_stream_open_read",
-            )?;
-            Ok(match host.fs_stream_open_read(&path) {
-                Ok(handle) => {
-                    ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(handle)))
-                }
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsStreamOpenWriteTry => {
-            if args.len() != 2 {
-                return Err("fs_stream_open_write expects two arguments".to_string());
-            }
-            let path = expect_str(args[0].clone(), "fs_stream_open_write")?;
-            let append = expect_bool(args[1].clone(), "fs_stream_open_write")?;
-            Ok(match host.fs_stream_open_write(&path, append) {
-                Ok(handle) => {
-                    ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(handle)))
-                }
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsStreamReadTry => {
-            if args.len() != 2 {
-                return Err("fs_stream_read expects two arguments".to_string());
-            }
-            let stream = expect_file_stream(args[0].clone(), "fs_stream_read")?;
-            let max_bytes = expect_int(args[1].clone(), "fs_stream_read")?;
-            if max_bytes < 0 {
-                return Err("fs_stream_read max_bytes must be non-negative".to_string());
-            }
-            Ok(match host.fs_stream_read(stream, max_bytes as usize) {
-                Ok(bytes) => ok_variant(bytes_to_runtime_array(bytes)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsStreamWriteTry => {
-            if args.len() != 2 {
-                return Err("fs_stream_write expects two arguments".to_string());
-            }
-            let stream = expect_file_stream(args[0].clone(), "fs_stream_write")?;
-            let bytes = expect_byte_array(args[1].clone(), "fs_stream_write")?;
-            Ok(match host.fs_stream_write(stream, &bytes) {
-                Ok(written) => {
-                    ok_variant(RuntimeValue::Int(i64::try_from(written).map_err(|_| {
-                        "fs_stream_write byte count does not fit in i64".to_string()
-                    })?))
-                }
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsStreamEofTry => {
-            let stream =
-                expect_file_stream(expect_single_arg(args, "fs_stream_eof")?, "fs_stream_eof")?;
-            Ok(match host.fs_stream_eof(stream) {
-                Ok(done) => ok_variant(RuntimeValue::Bool(done)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsStreamCloseTry => {
-            let stream = expect_file_stream(
-                expect_single_arg(args, "fs_stream_close")?,
-                "fs_stream_close",
-            )?;
-            Ok(match host.fs_stream_close(stream) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsWriteTextTry => {
-            if args.len() != 2 {
-                return Err("fs_write_text expects two arguments".to_string());
-            }
-            Ok(
-                match host.fs_write_text(
-                    &expect_str(args[0].clone(), "fs_write_text")?,
-                    &expect_str(args[1].clone(), "fs_write_text")?,
-                ) {
-                    Ok(()) => ok_variant(RuntimeValue::Unit),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::FsWriteBytesTry => {
-            if args.len() != 2 {
-                return Err("fs_write_bytes expects two arguments".to_string());
-            }
-            Ok(
-                match host.fs_write_bytes(
-                    &expect_str(args[0].clone(), "fs_write_bytes")?,
-                    &expect_byte_array(args[1].clone(), "fs_write_bytes")?,
-                ) {
-                    Ok(()) => ok_variant(RuntimeValue::Unit),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::FsListDirTry => {
-            let path = expect_str(expect_single_arg(args, "fs_list_dir")?, "fs_list_dir")?;
-            Ok(match host.fs_list_dir(&path) {
-                Ok(entries) => ok_variant(RuntimeValue::List(
-                    entries.into_iter().map(RuntimeValue::Str).collect(),
-                )),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsMkdirAllTry => {
-            let path = expect_str(expect_single_arg(args, "fs_mkdir_all")?, "fs_mkdir_all")?;
-            Ok(match host.fs_mkdir_all(&path) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsCreateDirTry => {
-            let path = expect_str(expect_single_arg(args, "fs_create_dir")?, "fs_create_dir")?;
-            Ok(match host.fs_create_dir(&path) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsRemoveFileTry => {
-            let path = expect_str(expect_single_arg(args, "fs_remove_file")?, "fs_remove_file")?;
-            Ok(match host.fs_remove_file(&path) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsRemoveDirTry => {
-            let path = expect_str(expect_single_arg(args, "fs_remove_dir")?, "fs_remove_dir")?;
-            Ok(match host.fs_remove_dir(&path) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsRemoveDirAllTry => {
-            let path = expect_str(
-                expect_single_arg(args, "fs_remove_dir_all")?,
-                "fs_remove_dir_all",
-            )?;
-            Ok(match host.fs_remove_dir_all(&path) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsCopyFileTry => {
-            if args.len() != 2 {
-                return Err("fs_copy_file expects two arguments".to_string());
-            }
-            Ok(
-                match host.fs_copy_file(
-                    &expect_str(args[0].clone(), "fs_copy_file")?,
-                    &expect_str(args[1].clone(), "fs_copy_file")?,
-                ) {
-                    Ok(()) => ok_variant(RuntimeValue::Unit),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::FsRenameTry => {
-            if args.len() != 2 {
-                return Err("fs_rename expects two arguments".to_string());
-            }
-            Ok(
-                match host.fs_rename(
-                    &expect_str(args[0].clone(), "fs_rename")?,
-                    &expect_str(args[1].clone(), "fs_rename")?,
-                ) {
-                    Ok(()) => ok_variant(RuntimeValue::Unit),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::FsFileSizeTry => {
-            let path = expect_str(expect_single_arg(args, "fs_file_size")?, "fs_file_size")?;
-            Ok(match host.fs_file_size(&path) {
-                Ok(size) => ok_variant(RuntimeValue::Int(size)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::FsModifiedUnixMsTry => {
-            let path = expect_str(
-                expect_single_arg(args, "fs_modified_unix_ms")?,
-                "fs_modified_unix_ms",
-            )?;
-            Ok(match host.fs_modified_unix_ms(&path) {
-                Ok(value) => ok_variant(RuntimeValue::Int(value)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::WindowOpenTry => {
-            if args.len() != 3 {
-                return Err("window_open expects three arguments".to_string());
-            }
-            let title = expect_str(args[0].clone(), "window_open")?;
-            let width = expect_int(args[1].clone(), "window_open")?;
-            let height = expect_int(args[2].clone(), "window_open")?;
-            Ok(match host.window_open(&title, width, height) {
-                Ok(handle) => ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(handle))),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::CanvasAlive => {
-            let window = expect_window(expect_single_arg(args, "canvas_alive")?, "canvas_alive")?;
-            let alive = host.window_alive(window)?;
-            Ok(RuntimeValue::Bool(alive))
-        }
-        RuntimeIntrinsic::CanvasFill => {
-            if args.len() != 2 {
-                return Err("canvas_fill expects two arguments".to_string());
-            }
-            host.canvas_fill(
-                expect_window(args[0].clone(), "canvas_fill")?,
-                expect_int(args[1].clone(), "canvas_fill")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasRect => {
-            if args.len() != 6 {
-                return Err("canvas_rect expects six arguments".to_string());
-            }
-            host.canvas_rect(
-                expect_window(args[0].clone(), "canvas_rect")?,
-                expect_int(args[1].clone(), "canvas_rect")?,
-                expect_int(args[2].clone(), "canvas_rect")?,
-                expect_int(args[3].clone(), "canvas_rect")?,
-                expect_int(args[4].clone(), "canvas_rect")?,
-                expect_int(args[5].clone(), "canvas_rect")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasLine => {
-            if args.len() != 6 {
-                return Err("canvas_line expects six arguments".to_string());
-            }
-            host.canvas_line(
-                expect_window(args[0].clone(), "canvas_line")?,
-                expect_int(args[1].clone(), "canvas_line")?,
-                expect_int(args[2].clone(), "canvas_line")?,
-                expect_int(args[3].clone(), "canvas_line")?,
-                expect_int(args[4].clone(), "canvas_line")?,
-                expect_int(args[5].clone(), "canvas_line")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasCircleFill => {
-            if args.len() != 5 {
-                return Err("canvas_circle_fill expects five arguments".to_string());
-            }
-            host.canvas_circle_fill(
-                expect_window(args[0].clone(), "canvas_circle_fill")?,
-                expect_int(args[1].clone(), "canvas_circle_fill")?,
-                expect_int(args[2].clone(), "canvas_circle_fill")?,
-                expect_int(args[3].clone(), "canvas_circle_fill")?,
-                expect_int(args[4].clone(), "canvas_circle_fill")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasLabel => {
-            if args.len() != 5 {
-                return Err("canvas_label expects five arguments".to_string());
-            }
-            host.canvas_label(
-                expect_window(args[0].clone(), "canvas_label")?,
-                expect_int(args[1].clone(), "canvas_label")?,
-                expect_int(args[2].clone(), "canvas_label")?,
-                &expect_str(args[3].clone(), "canvas_label")?,
-                expect_int(args[4].clone(), "canvas_label")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasLabelSize => {
-            let text = expect_str(
-                expect_single_arg(args, "canvas_label_size")?,
-                "canvas_label_size",
-            )?;
-            let (w, h) = host.canvas_label_size(&text)?;
-            Ok(make_pair(RuntimeValue::Int(w), RuntimeValue::Int(h)))
-        }
-        RuntimeIntrinsic::CanvasPresent => {
-            let window =
-                expect_window(expect_single_arg(args, "canvas_present")?, "canvas_present")?;
-            host.canvas_present(window)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasRgb => {
-            if args.len() != 3 {
-                return Err("canvas_rgb expects three arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.canvas_rgb(
-                expect_int(args[0].clone(), "canvas_rgb")?,
-                expect_int(args[1].clone(), "canvas_rgb")?,
-                expect_int(args[2].clone(), "canvas_rgb")?,
-            )?))
-        }
-        RuntimeIntrinsic::ImageLoadTry => {
-            let path = expect_str(expect_single_arg(args, "image_load")?, "image_load")?;
-            Ok(match host.image_load(&path) {
-                Ok(handle) => ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Image(handle))),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::CanvasImageCreate => {
-            if args.len() != 2 {
-                return Err("canvas_image_create expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Image(
-                host.canvas_image_create(
-                    expect_int(args[0].clone(), "canvas_image_create")?,
-                    expect_int(args[1].clone(), "canvas_image_create")?,
-                )?,
-            )))
-        }
-        RuntimeIntrinsic::CanvasImageReplaceRgba => {
-            if args.len() != 2 {
-                return Err("canvas_image_replace_rgba expects two arguments".to_string());
-            }
-            let image = expect_image(args[0].clone(), "canvas_image_replace_rgba")?;
-            let rgba = expect_byte_array(args[1].clone(), "canvas_image_replace_rgba")?;
-            host.canvas_image_replace_rgba(image, &rgba)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasImageSize => {
-            let image = expect_image(
-                expect_single_arg(args, "canvas_image_size")?,
-                "canvas_image_size",
-            )?;
-            let (w, h) = host.canvas_image_size(image)?;
-            Ok(make_pair(RuntimeValue::Int(w), RuntimeValue::Int(h)))
-        }
-        RuntimeIntrinsic::CanvasBlit => {
-            if args.len() != 4 {
-                return Err("canvas_blit expects four arguments".to_string());
-            }
-            let window = expect_window(args[0].clone(), "canvas_blit")?;
-            let image = expect_image(args[1].clone(), "canvas_blit")?;
-            let x = expect_int(args[2].clone(), "canvas_blit")?;
-            let y = expect_int(args[3].clone(), "canvas_blit")?;
-            host.canvas_blit(window, image, x, y)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasBlitScaled => {
-            if args.len() != 6 {
-                return Err("canvas_blit_scaled expects six arguments".to_string());
-            }
-            host.canvas_blit_scaled(
-                expect_window(args[0].clone(), "canvas_blit_scaled")?,
-                expect_image(args[1].clone(), "canvas_blit_scaled")?,
-                expect_int(args[2].clone(), "canvas_blit_scaled")?,
-                expect_int(args[3].clone(), "canvas_blit_scaled")?,
-                expect_int(args[4].clone(), "canvas_blit_scaled")?,
-                expect_int(args[5].clone(), "canvas_blit_scaled")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::CanvasBlitRegion => {
-            if args.len() != 10 {
-                return Err("canvas_blit_region expects ten arguments".to_string());
-            }
-            host.canvas_blit_region(
-                expect_window(args[0].clone(), "canvas_blit_region")?,
-                expect_image(args[1].clone(), "canvas_blit_region")?,
-                expect_int(args[2].clone(), "canvas_blit_region")?,
-                expect_int(args[3].clone(), "canvas_blit_region")?,
-                expect_int(args[4].clone(), "canvas_blit_region")?,
-                expect_int(args[5].clone(), "canvas_blit_region")?,
-                expect_int(args[6].clone(), "canvas_blit_region")?,
-                expect_int(args[7].clone(), "canvas_blit_region")?,
-                expect_int(args[8].clone(), "canvas_blit_region")?,
-                expect_int(args[9].clone(), "canvas_blit_region")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSize => {
-            let window = expect_window(expect_single_arg(args, "window_size")?, "window_size")?;
-            let (w, h) = host.window_size(window)?;
-            Ok(make_pair(RuntimeValue::Int(w), RuntimeValue::Int(h)))
-        }
-        RuntimeIntrinsic::WindowResized => {
-            let window =
-                expect_window(expect_single_arg(args, "window_resized")?, "window_resized")?;
-            Ok(RuntimeValue::Bool(host.window_resized(window)?))
-        }
-        RuntimeIntrinsic::WindowFullscreen => {
-            let window = expect_window(
-                expect_single_arg(args, "window_fullscreen")?,
-                "window_fullscreen",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_fullscreen(window)?))
-        }
-        RuntimeIntrinsic::WindowMinimized => {
-            let window = expect_window(
-                expect_single_arg(args, "window_minimized")?,
-                "window_minimized",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_minimized(window)?))
-        }
-        RuntimeIntrinsic::WindowMaximized => {
-            let window = expect_window(
-                expect_single_arg(args, "window_maximized")?,
-                "window_maximized",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_maximized(window)?))
-        }
-        RuntimeIntrinsic::WindowFocused => {
-            let window =
-                expect_window(expect_single_arg(args, "window_focused")?, "window_focused")?;
-            Ok(RuntimeValue::Bool(host.window_focused(window)?))
-        }
-        RuntimeIntrinsic::WindowId => {
-            let window = expect_window(expect_single_arg(args, "window_id")?, "window_id")?;
-            Ok(RuntimeValue::Int(host.window_id(window)?))
-        }
-        RuntimeIntrinsic::WindowPosition => {
-            let window = expect_window(
-                expect_single_arg(args, "window_position")?,
-                "window_position",
-            )?;
-            let (x, y) = host.window_position(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowTitle => {
-            let window = expect_window(expect_single_arg(args, "window_title")?, "window_title")?;
-            Ok(RuntimeValue::Str(host.window_title(window)?))
-        }
-        RuntimeIntrinsic::WindowVisible => {
-            let window =
-                expect_window(expect_single_arg(args, "window_visible")?, "window_visible")?;
-            Ok(RuntimeValue::Bool(host.window_visible(window)?))
-        }
-        RuntimeIntrinsic::WindowDecorated => {
-            let window = expect_window(
-                expect_single_arg(args, "window_decorated")?,
-                "window_decorated",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_decorated(window)?))
-        }
-        RuntimeIntrinsic::WindowResizable => {
-            let window = expect_window(
-                expect_single_arg(args, "window_resizable")?,
-                "window_resizable",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_resizable(window)?))
-        }
-        RuntimeIntrinsic::WindowTopmost => {
-            let window =
-                expect_window(expect_single_arg(args, "window_topmost")?, "window_topmost")?;
-            Ok(RuntimeValue::Bool(host.window_topmost(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorVisible => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_visible")?,
-                "window_cursor_visible",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_cursor_visible(window)?))
-        }
-        RuntimeIntrinsic::WindowMinSize => {
-            let window = expect_window(
-                expect_single_arg(args, "window_min_size")?,
-                "window_min_size",
-            )?;
-            let (x, y) = host.window_min_size(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowMaxSize => {
-            let window = expect_window(
-                expect_single_arg(args, "window_max_size")?,
-                "window_max_size",
-            )?;
-            let (x, y) = host.window_max_size(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowScaleFactorMilli => {
-            let window = expect_window(
-                expect_single_arg(args, "window_scale_factor_milli")?,
-                "window_scale_factor_milli",
-            )?;
-            Ok(RuntimeValue::Int(host.window_scale_factor_milli(window)?))
-        }
-        RuntimeIntrinsic::WindowThemeCode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_theme_code")?,
-                "window_theme_code",
-            )?;
-            Ok(RuntimeValue::Int(host.window_theme_code(window)?))
-        }
-        RuntimeIntrinsic::WindowTransparent => {
-            let window = expect_window(
-                expect_single_arg(args, "window_transparent")?,
-                "window_transparent",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_transparent(window)?))
-        }
-        RuntimeIntrinsic::WindowThemeOverrideCode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_theme_override_code")?,
-                "window_theme_override_code",
-            )?;
-            Ok(RuntimeValue::Int(host.window_theme_override_code(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorIconCode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_icon_code")?,
-                "window_cursor_icon_code",
-            )?;
-            Ok(RuntimeValue::Int(host.window_cursor_icon_code(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorGrabMode => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_grab_mode")?,
-                "window_cursor_grab_mode",
-            )?;
-            Ok(RuntimeValue::Int(host.window_cursor_grab_mode(window)?))
-        }
-        RuntimeIntrinsic::WindowCursorPosition => {
-            let window = expect_window(
-                expect_single_arg(args, "window_cursor_position")?,
-                "window_cursor_position",
-            )?;
-            let (x, y) = host.window_cursor_position(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowTextInputEnabled => {
-            let window = expect_window(
-                expect_single_arg(args, "window_text_input_enabled")?,
-                "window_text_input_enabled",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_text_input_enabled(window)?))
-        }
-        RuntimeIntrinsic::WindowCurrentMonitorIndex => {
-            let window = expect_window(
-                expect_single_arg(args, "window_current_monitor_index")?,
-                "window_current_monitor_index",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.window_current_monitor_index(window)?,
-            ))
-        }
-        RuntimeIntrinsic::WindowPrimaryMonitorIndex => {
-            if !args.is_empty() {
-                return Err("window_primary_monitor_index expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.window_primary_monitor_index()?))
-        }
-        RuntimeIntrinsic::WindowMonitorCount => {
-            if !args.is_empty() {
-                return Err("window_monitor_count expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.window_monitor_count()?))
-        }
-        RuntimeIntrinsic::WindowMonitorName => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_name")?,
-                "window_monitor_name",
-            )?;
-            Ok(RuntimeValue::Str(host.window_monitor_name(index)?))
-        }
-        RuntimeIntrinsic::WindowMonitorPosition => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_position")?,
-                "window_monitor_position",
-            )?;
-            let (x, y) = host.window_monitor_position(index)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowMonitorSize => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_size")?,
-                "window_monitor_size",
-            )?;
-            let (x, y) = host.window_monitor_size(index)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::WindowMonitorScaleFactorMilli => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_scale_factor_milli")?,
-                "window_monitor_scale_factor_milli",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.window_monitor_scale_factor_milli(index)?,
-            ))
-        }
-        RuntimeIntrinsic::WindowMonitorIsPrimary => {
-            let index = expect_int(
-                expect_single_arg(args, "window_monitor_is_primary")?,
-                "window_monitor_is_primary",
-            )?;
-            Ok(RuntimeValue::Bool(host.window_monitor_is_primary(index)?))
-        }
-        RuntimeIntrinsic::WindowSetTitle => {
-            if args.len() != 2 {
-                return Err("window_set_title expects two arguments".to_string());
-            }
-            host.window_set_title(
-                expect_window(args[0].clone(), "window_set_title")?,
-                &expect_str(args[1].clone(), "window_set_title")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetPosition => {
-            if args.len() != 3 {
-                return Err("window_set_position expects three arguments".to_string());
-            }
-            let window = expect_window(args[0].clone(), "window_set_position")?;
-            let x = expect_int(args[1].clone(), "window_set_position")?;
-            let y = expect_int(args[2].clone(), "window_set_position")?;
-            host.window_set_position(window, x, y)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetSize => {
-            if args.len() != 3 {
-                return Err("window_set_size expects three arguments".to_string());
-            }
-            host.window_set_size(
-                expect_window(args[0].clone(), "window_set_size")?,
-                expect_int(args[1].clone(), "window_set_size")?,
-                expect_int(args[2].clone(), "window_set_size")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetVisible => {
-            if args.len() != 2 {
-                return Err("window_set_visible expects two arguments".to_string());
-            }
-            host.window_set_visible(
-                expect_window(args[0].clone(), "window_set_visible")?,
-                expect_bool(args[1].clone(), "window_set_visible")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetDecorated => {
-            if args.len() != 2 {
-                return Err("window_set_decorated expects two arguments".to_string());
-            }
-            host.window_set_decorated(
-                expect_window(args[0].clone(), "window_set_decorated")?,
-                expect_bool(args[1].clone(), "window_set_decorated")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetResizable => {
-            if args.len() != 2 {
-                return Err("window_set_resizable expects two arguments".to_string());
-            }
-            host.window_set_resizable(
-                expect_window(args[0].clone(), "window_set_resizable")?,
-                expect_bool(args[1].clone(), "window_set_resizable")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMinSize => {
-            if args.len() != 3 {
-                return Err("window_set_min_size expects three arguments".to_string());
-            }
-            host.window_set_min_size(
-                expect_window(args[0].clone(), "window_set_min_size")?,
-                expect_int(args[1].clone(), "window_set_min_size")?,
-                expect_int(args[2].clone(), "window_set_min_size")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMaxSize => {
-            if args.len() != 3 {
-                return Err("window_set_max_size expects three arguments".to_string());
-            }
-            host.window_set_max_size(
-                expect_window(args[0].clone(), "window_set_max_size")?,
-                expect_int(args[1].clone(), "window_set_max_size")?,
-                expect_int(args[2].clone(), "window_set_max_size")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetFullscreen => {
-            if args.len() != 2 {
-                return Err("window_set_fullscreen expects two arguments".to_string());
-            }
-            host.window_set_fullscreen(
-                expect_window(args[0].clone(), "window_set_fullscreen")?,
-                expect_bool(args[1].clone(), "window_set_fullscreen")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMinimized => {
-            if args.len() != 2 {
-                return Err("window_set_minimized expects two arguments".to_string());
-            }
-            host.window_set_minimized(
-                expect_window(args[0].clone(), "window_set_minimized")?,
-                expect_bool(args[1].clone(), "window_set_minimized")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetMaximized => {
-            if args.len() != 2 {
-                return Err("window_set_maximized expects two arguments".to_string());
-            }
-            host.window_set_maximized(
-                expect_window(args[0].clone(), "window_set_maximized")?,
-                expect_bool(args[1].clone(), "window_set_maximized")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetTopmost => {
-            if args.len() != 2 {
-                return Err("window_set_topmost expects two arguments".to_string());
-            }
-            host.window_set_topmost(
-                expect_window(args[0].clone(), "window_set_topmost")?,
-                expect_bool(args[1].clone(), "window_set_topmost")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorVisible => {
-            if args.len() != 2 {
-                return Err("window_set_cursor_visible expects two arguments".to_string());
-            }
-            host.window_set_cursor_visible(
-                expect_window(args[0].clone(), "window_set_cursor_visible")?,
-                expect_bool(args[1].clone(), "window_set_cursor_visible")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetTransparent => {
-            if args.len() != 2 {
-                return Err("window_set_transparent expects two arguments".to_string());
-            }
-            host.window_set_transparent(
-                expect_window(args[0].clone(), "window_set_transparent")?,
-                expect_bool(args[1].clone(), "window_set_transparent")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetThemeOverrideCode => {
-            if args.len() != 2 {
-                return Err("window_set_theme_override_code expects two arguments".to_string());
-            }
-            host.window_set_theme_override_code(
-                expect_window(args[0].clone(), "window_set_theme_override_code")?,
-                expect_int(args[1].clone(), "window_set_theme_override_code")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorIconCode => {
-            if args.len() != 2 {
-                return Err("window_set_cursor_icon_code expects two arguments".to_string());
-            }
-            host.window_set_cursor_icon_code(
-                expect_window(args[0].clone(), "window_set_cursor_icon_code")?,
-                expect_int(args[1].clone(), "window_set_cursor_icon_code")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorGrabMode => {
-            if args.len() != 2 {
-                return Err("window_set_cursor_grab_mode expects two arguments".to_string());
-            }
-            host.window_set_cursor_grab_mode(
-                expect_window(args[0].clone(), "window_set_cursor_grab_mode")?,
-                expect_int(args[1].clone(), "window_set_cursor_grab_mode")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowSetCursorPosition => {
-            if args.len() != 3 {
-                return Err("window_set_cursor_position expects three arguments".to_string());
-            }
-            host.window_set_cursor_position(
-                expect_window(args[0].clone(), "window_set_cursor_position")?,
-                expect_int(args[1].clone(), "window_set_cursor_position")?,
-                expect_int(args[2].clone(), "window_set_cursor_position")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowTextInputSetEnabled => {
-            if args.len() != 2 {
-                return Err("window_text_input_set_enabled expects two arguments".to_string());
-            }
-            host.window_set_text_input_enabled(
-                expect_window(args[0].clone(), "window_text_input_set_enabled")?,
-                expect_bool(args[1].clone(), "window_text_input_set_enabled")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowRequestRedraw => {
-            let window = expect_window(
-                expect_single_arg(args, "window_request_redraw")?,
-                "window_request_redraw",
-            )?;
-            host.window_request_redraw(window)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowRequestAttention => {
-            if args.len() != 2 {
-                return Err("window_request_attention expects two arguments".to_string());
-            }
-            host.window_request_attention(
-                expect_window(args[0].clone(), "window_request_attention")?,
-                expect_bool(args[1].clone(), "window_request_attention")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::WindowClose => {
-            let window = expect_window(expect_single_arg(args, "window_close")?, "window_close")?;
-            Ok(match host.window_close(window) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::EventsPump => {
-            let window = expect_window(expect_single_arg(args, "events_pump")?, "events_pump")?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_pump(window)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsPoll => {
-            let frame = expect_app_frame(expect_single_arg(args, "events_poll")?, "events_poll")?;
-            Ok(match host.events_poll(frame)? {
-                Some(event) => some_variant(runtime_event_record_value(event)),
-                None => none_variant(),
-            })
-        }
-        RuntimeIntrinsic::EventsSessionOpen => {
-            if !args.is_empty() {
-                return Err("events_session_open expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(
-                host.events_session_open()?,
-            )))
-        }
-        RuntimeIntrinsic::EventsSessionClose => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_close")?,
-                "events_session_close",
-            )?;
-            host.events_session_close(session)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionAttachWindow => {
-            if args.len() != 2 {
-                return Err("events_session_attach_window expects two arguments".to_string());
-            }
-            host.events_session_attach_window(
-                expect_app_session(args[0].clone(), "events_session_attach_window")?,
-                expect_window(args[1].clone(), "events_session_attach_window")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionDetachWindow => {
-            if args.len() != 2 {
-                return Err("events_session_detach_window expects two arguments".to_string());
-            }
-            host.events_session_detach_window(
-                expect_app_session(args[0].clone(), "events_session_detach_window")?,
-                expect_window(args[1].clone(), "events_session_detach_window")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionWindowById => {
-            if args.len() != 2 {
-                return Err("events_session_window_by_id expects two arguments".to_string());
-            }
-            Ok(
-                match host.events_session_window_by_id(
-                    expect_app_session(args[0].clone(), "events_session_window_by_id")?,
-                    expect_int(args[1].clone(), "events_session_window_by_id")?,
-                )? {
-                    Some(window) => {
-                        some_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window)))
-                    }
-                    None => none_variant(),
-                },
-            )
-        }
-        RuntimeIntrinsic::EventsSessionWindowIds => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_window_ids")?,
-                "events_session_window_ids",
-            )?;
-            Ok(RuntimeValue::List(
-                host.events_session_window_ids(session)?
-                    .into_iter()
-                    .map(RuntimeValue::Int)
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::EventsSessionPump => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_pump")?,
-                "events_session_pump",
-            )?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_session_pump(session)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsSessionWait => {
-            if args.len() != 2 {
-                return Err("events_session_wait expects two arguments".to_string());
-            }
-            let session = expect_app_session(args[0].clone(), "events_session_wait")?;
-            let timeout = expect_int(args[1].clone(), "events_session_wait")?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_session_wait(session, timeout)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsSessionDeviceEvents => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_device_events")?,
-                "events_session_device_events",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.events_session_device_events(session)?,
-            ))
-        }
-        RuntimeIntrinsic::EventsSessionSetDeviceEvents => {
-            if args.len() != 2 {
-                return Err("events_session_set_device_events expects two arguments".to_string());
-            }
-            let session = expect_app_session(args[0].clone(), "events_session_set_device_events")?;
-            let policy = expect_int(args[1].clone(), "events_session_set_device_events")?;
-            host.events_session_set_device_events(session, policy)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EventsSessionCreateWake => {
-            let session = expect_app_session(
-                expect_single_arg(args, "events_session_create_wake")?,
-                "events_session_create_wake",
-            )?;
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(
-                host.events_session_create_wake(session)?,
-            )))
-        }
-        RuntimeIntrinsic::EventsWakeSignal => {
-            let wake = expect_wake(
-                expect_single_arg(args, "events_wake_signal")?,
-                "events_wake_signal",
-            )?;
-            host.events_wake_signal(wake)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::InputKeyCode => {
-            let name = expect_str(expect_single_arg(args, "input_key_code")?, "input_key_code")?;
-            Ok(RuntimeValue::Int(host.input_key_code(&name)?))
-        }
-        RuntimeIntrinsic::InputKeyDown => {
-            if args.len() != 2 {
-                return Err("input_key_down expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.input_key_down(
-                expect_app_frame(args[0].clone(), "input_key_down")?,
-                expect_int(args[1].clone(), "input_key_down")?,
-            )?))
-        }
-        RuntimeIntrinsic::InputKeyPressed => {
-            if args.len() != 2 {
-                return Err("input_key_pressed expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.input_key_pressed(
-                expect_app_frame(args[0].clone(), "input_key_pressed")?,
-                expect_int(args[1].clone(), "input_key_pressed")?,
-            )?))
-        }
-        RuntimeIntrinsic::InputKeyReleased => {
-            if args.len() != 2 {
-                return Err("input_key_released expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.input_key_released(
-                expect_app_frame(args[0].clone(), "input_key_released")?,
-                expect_int(args[1].clone(), "input_key_released")?,
-            )?))
-        }
-        RuntimeIntrinsic::InputMouseButtonCode => {
-            let name = expect_str(
-                expect_single_arg(args, "input_mouse_button_code")?,
-                "input_mouse_button_code",
-            )?;
-            Ok(RuntimeValue::Int(host.input_mouse_button_code(&name)?))
-        }
-        RuntimeIntrinsic::InputMousePos => {
-            let frame = expect_app_frame(
-                expect_single_arg(args, "input_mouse_pos")?,
-                "input_mouse_pos",
-            )?;
-            let (x, y) = host.input_mouse_pos(frame)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::InputMouseDown => {
-            if args.len() != 2 {
-                return Err("input_mouse_down expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.input_mouse_down(
-                expect_app_frame(args[0].clone(), "input_mouse_down")?,
-                expect_int(args[1].clone(), "input_mouse_down")?,
-            )?))
-        }
-        RuntimeIntrinsic::InputMousePressed => {
-            if args.len() != 2 {
-                return Err("input_mouse_pressed expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.input_mouse_pressed(
-                expect_app_frame(args[0].clone(), "input_mouse_pressed")?,
-                expect_int(args[1].clone(), "input_mouse_pressed")?,
-            )?))
-        }
-        RuntimeIntrinsic::InputMouseReleased => {
-            if args.len() != 2 {
-                return Err("input_mouse_released expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.input_mouse_released(
-                expect_app_frame(args[0].clone(), "input_mouse_released")?,
-                expect_int(args[1].clone(), "input_mouse_released")?,
-            )?))
-        }
-        RuntimeIntrinsic::InputMouseWheelY => {
-            let frame = expect_app_frame(
-                expect_single_arg(args, "input_mouse_wheel_y")?,
-                "input_mouse_wheel_y",
-            )?;
-            Ok(RuntimeValue::Int(host.input_mouse_wheel_y(frame)?))
-        }
-        RuntimeIntrinsic::InputMouseInWindow => {
-            let frame = expect_app_frame(
-                expect_single_arg(args, "input_mouse_in_window")?,
-                "input_mouse_in_window",
-            )?;
-            Ok(RuntimeValue::Bool(host.input_mouse_in_window(frame)?))
-        }
-        RuntimeIntrinsic::ClipboardReadTextTry => {
-            if !args.is_empty() {
-                return Err("clipboard_read_text expects zero arguments".to_string());
-            }
-            Ok(match host.clipboard_read_text() {
-                Ok(text) => ok_variant(RuntimeValue::Str(text)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::ClipboardWriteTextTry => {
-            let text = expect_str(
-                expect_single_arg(args, "clipboard_write_text")?,
-                "clipboard_write_text",
-            )?;
-            Ok(match host.clipboard_write_text(&text) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::ClipboardReadBytesTry => {
-            if !args.is_empty() {
-                return Err("clipboard_read_bytes expects zero arguments".to_string());
-            }
-            Ok(match host.clipboard_read_bytes() {
-                Ok(bytes) => ok_variant(bytes_to_runtime_array(bytes)),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::ClipboardWriteBytesTry => {
-            let bytes = expect_byte_array(
-                expect_single_arg(args, "clipboard_write_bytes")?,
-                "clipboard_write_bytes",
-            )?;
-            Ok(match host.clipboard_write_bytes(&bytes) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::TextInputCompositionAreaActive => {
-            let window = expect_window(
-                expect_single_arg(args, "text_input_composition_area_active")?,
-                "text_input_composition_area_active",
-            )?;
-            Ok(RuntimeValue::Bool(
-                host.text_input_composition_area_active(window)?,
-            ))
-        }
-        RuntimeIntrinsic::TextInputCompositionAreaPosition => {
-            let window = expect_window(
-                expect_single_arg(args, "text_input_composition_area_position")?,
-                "text_input_composition_area_position",
-            )?;
-            let (x, y) = host.text_input_composition_area_position(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::TextInputCompositionAreaSize => {
-            let window = expect_window(
-                expect_single_arg(args, "text_input_composition_area_size")?,
-                "text_input_composition_area_size",
-            )?;
-            let (x, y) = host.text_input_composition_area_size(window)?;
-            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
-        }
-        RuntimeIntrinsic::TextInputSetCompositionArea => {
-            if args.len() != 3 {
-                return Err("text_input_set_composition_area expects three arguments".to_string());
-            }
-            let (x, y) = expect_int_pair(args[1].clone(), "text_input_set_composition_area")?;
-            let (width, height) =
-                expect_int_pair(args[2].clone(), "text_input_set_composition_area")?;
-            host.text_input_set_composition_area(
-                expect_window(args[0].clone(), "text_input_set_composition_area")?,
-                x,
-                y,
-                width,
-                height,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::TextInputClearCompositionArea => {
-            let window = expect_window(
-                expect_single_arg(args, "text_input_clear_composition_area")?,
-                "text_input_clear_composition_area",
-            )?;
-            host.text_input_clear_composition_area(window)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::StdTimeMonotonicNowMs => {
-            if !args.is_empty() {
-                return Err("monotonic_now_ms expects zero arguments".to_string());
-            }
-            Ok(std_types_core_monotonic_time_ms_record(
-                host.monotonic_now_ms()?,
-            ))
-        }
-        RuntimeIntrinsic::TimeMonotonicNowMs => {
-            if !args.is_empty() {
-                return Err("monotonic_now_ms expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.monotonic_now_ms()?))
-        }
-        RuntimeIntrinsic::TimeMonotonicNowNs => {
-            if !args.is_empty() {
-                return Err("monotonic_now_ns expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(host.monotonic_now_ns()?))
-        }
-        RuntimeIntrinsic::ConcurrentSleep => {
-            let ms = expect_int(expect_single_arg(args, "sleep")?, "sleep")?;
-            host.sleep_ms(ms)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::ConcurrentBehaviorStep => {
-            let phase = expect_str(expect_single_arg(args, "behavior_step")?, "behavior_step")?;
-            Ok(RuntimeValue::Int(runtime_behavior_step(
-                plan, &phase, state, host,
-            )?))
-        }
-        RuntimeIntrinsic::ConcurrentThreadId => {
-            if !args.is_empty() {
-                return Err("thread_id expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Int(state.current_thread_id))
-        }
-        RuntimeIntrinsic::ConcurrentTaskDone => {
-            let handle = expect_task(expect_single_arg(args, "task_done")?, "task_done")?;
-            let task = state
-                .tasks
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(pending_state_is_done(&task.state)))
-        }
-        RuntimeIntrinsic::ConcurrentTaskJoin => {
-            let handle = expect_task(expect_single_arg(args, "task_join")?, "task_join")?;
-            drive_runtime_task(handle, plan, state, host)?;
-            let task = state
-                .tasks
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?;
-            pending_state_value(&task.state, &format!("Task `{}`", handle.0))
-        }
-        RuntimeIntrinsic::ConcurrentThreadDone => {
-            let handle = expect_thread(expect_single_arg(args, "thread_done")?, "thread_done")?;
-            let thread = state
-                .threads
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(pending_state_is_done(&thread.state)))
-        }
-        RuntimeIntrinsic::ConcurrentThreadJoin => {
-            let handle = expect_thread(expect_single_arg(args, "thread_join")?, "thread_join")?;
-            drive_runtime_thread(handle, plan, state, host)?;
-            let thread = state
-                .threads
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?;
-            pending_state_value(&thread.state, &format!("Thread `{}`", handle.0))
-        }
-        RuntimeIntrinsic::ConcurrentChannelNew => {
-            let capacity = expect_int(expect_single_arg(args, "channel_new")?, "channel_new")?;
-            if capacity < 0 {
-                return Err("channel_new capacity must be non-negative".to_string());
-            }
-            let handle = insert_runtime_channel(state, type_args, capacity as usize);
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)))
-        }
-        RuntimeIntrinsic::ConcurrentChannelSend => {
-            if args.len() != 2 {
-                return Err("channel_send expects two arguments".to_string());
-            }
-            let handle = expect_channel(args[0].clone(), "channel_send")?;
-            runtime_validate_split_value(&args[1], state, "channel_send payload")?;
-            let channel = state
-                .channels
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Channel handle `{}`", handle.0))?;
-            if channel.queue.len() >= channel.capacity {
-                return Err("channel_send would exceed channel capacity".to_string());
-            }
-            channel.queue.push_back(args[1].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::ConcurrentChannelRecv => {
-            let handle = expect_channel(expect_single_arg(args, "channel_recv")?, "channel_recv")?;
-            let channel = state
-                .channels
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Channel handle `{}`", handle.0))?;
-            channel
-                .queue
-                .pop_front()
-                .ok_or_else(|| "channel_recv called on empty channel".to_string())
-        }
-        RuntimeIntrinsic::ConcurrentMutexNew => {
-            let value = expect_single_arg(args, "mutex_new")?;
-            runtime_validate_split_value(&value, state, "mutex_new payload")?;
-            let handle = insert_runtime_mutex(state, type_args, value);
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)))
-        }
-        RuntimeIntrinsic::ConcurrentMutexTake => {
-            let handle = expect_mutex(expect_single_arg(args, "mutex_take")?, "mutex_take")?;
-            let mutex = state
-                .mutexes
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Mutex handle `{}`", handle.0))?;
-            mutex
-                .value
-                .take()
-                .ok_or_else(|| "mutex_take called on empty mutex".to_string())
-        }
-        RuntimeIntrinsic::ConcurrentMutexPut => {
-            if args.len() != 2 {
-                return Err("mutex_put expects two arguments".to_string());
-            }
-            let handle = expect_mutex(args[0].clone(), "mutex_put")?;
-            runtime_validate_split_value(&args[1], state, "mutex_put payload")?;
-            let mutex = state
-                .mutexes
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Mutex handle `{}`", handle.0))?;
-            if mutex.value.is_some() {
-                return Err("mutex_put called while mutex already holds a value".to_string());
-            }
-            mutex.value = Some(args[1].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::ConcurrentAtomicIntNew => {
-            let value = expect_int(expect_single_arg(args, "atomic_int_new")?, "atomic_int_new")?;
-            let handle = insert_runtime_atomic_int(state, value);
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(handle)))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicIntLoad => {
-            let handle = expect_atomic_int(
-                expect_single_arg(args, "atomic_int_load")?,
-                "atomic_int_load",
-            )?;
-            let value = state
-                .atomic_ints
-                .get(&handle)
-                .copied()
-                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(value))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicIntStore => {
-            if args.len() != 2 {
-                return Err("atomic_int_store expects two arguments".to_string());
-            }
-            let handle = expect_atomic_int(args[0].clone(), "atomic_int_store")?;
-            let value = expect_int(args[1].clone(), "atomic_int_store")?;
-            let slot = state
-                .atomic_ints
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
-            *slot = value;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::ConcurrentAtomicIntAdd => {
-            if args.len() != 2 {
-                return Err("atomic_int_add expects two arguments".to_string());
-            }
-            let handle = expect_atomic_int(args[0].clone(), "atomic_int_add")?;
-            let delta = expect_int(args[1].clone(), "atomic_int_add")?;
-            let slot = state
-                .atomic_ints
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
-            *slot += delta;
-            Ok(RuntimeValue::Int(*slot))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicIntSub => {
-            if args.len() != 2 {
-                return Err("atomic_int_sub expects two arguments".to_string());
-            }
-            let handle = expect_atomic_int(args[0].clone(), "atomic_int_sub")?;
-            let delta = expect_int(args[1].clone(), "atomic_int_sub")?;
-            let slot = state
-                .atomic_ints
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
-            *slot -= delta;
-            Ok(RuntimeValue::Int(*slot))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicIntSwap => {
-            if args.len() != 2 {
-                return Err("atomic_int_swap expects two arguments".to_string());
-            }
-            let handle = expect_atomic_int(args[0].clone(), "atomic_int_swap")?;
-            let value = expect_int(args[1].clone(), "atomic_int_swap")?;
-            let slot = state
-                .atomic_ints
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
-            let old = *slot;
-            *slot = value;
-            Ok(RuntimeValue::Int(old))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicBoolNew => {
-            let value = expect_bool(
-                expect_single_arg(args, "atomic_bool_new")?,
-                "atomic_bool_new",
-            )?;
-            let handle = insert_runtime_atomic_bool(state, value);
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(handle)))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicBoolLoad => {
-            let handle = expect_atomic_bool(
-                expect_single_arg(args, "atomic_bool_load")?,
-                "atomic_bool_load",
-            )?;
-            let value = state
-                .atomic_bools
-                .get(&handle)
-                .copied()
-                .ok_or_else(|| format!("invalid AtomicBool handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(value))
-        }
-        RuntimeIntrinsic::ConcurrentAtomicBoolStore => {
-            if args.len() != 2 {
-                return Err("atomic_bool_store expects two arguments".to_string());
-            }
-            let handle = expect_atomic_bool(args[0].clone(), "atomic_bool_store")?;
-            let value = expect_bool(args[1].clone(), "atomic_bool_store")?;
-            let slot = state
-                .atomic_bools
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid AtomicBool handle `{}`", handle.0))?;
-            *slot = value;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::ConcurrentAtomicBoolSwap => {
-            if args.len() != 2 {
-                return Err("atomic_bool_swap expects two arguments".to_string());
-            }
-            let handle = expect_atomic_bool(args[0].clone(), "atomic_bool_swap")?;
-            let value = expect_bool(args[1].clone(), "atomic_bool_swap")?;
-            let slot = state
-                .atomic_bools
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid AtomicBool handle `{}`", handle.0))?;
-            let old = *slot;
-            *slot = value;
-            Ok(RuntimeValue::Bool(old))
-        }
-        RuntimeIntrinsic::MemoryArenaNew => {
-            let capacity = expect_int(expect_single_arg(args, "arena_new")?, "arena_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "arena_new capacity")?;
-            let handle =
-                insert_runtime_arena(state, type_args, default_runtime_arena_policy(capacity));
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(handle)))
-        }
-        RuntimeIntrinsic::MemoryArenaAlloc => {
-            if args.len() != 2 {
-                return Err("arena_alloc expects two arguments".to_string());
-            }
-            let handle = expect_arena(args[0].clone(), "arena_alloc")?;
-            let arena = state
-                .arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            ensure_runtime_arena_capacity(arena)?;
-            let slot = arena.next_slot;
-            arena.next_slot += 1;
-            arena.slots.insert(slot, args[1].clone());
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(
-                RuntimeArenaIdValue {
-                    arena: handle,
-                    slot,
-                    generation: arena.generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemoryArenaLen => {
-            let handle = expect_arena(expect_single_arg(args, "arena_len")?, "arena_len")?;
-            let arena = state
-                .arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.slots.len() as i64))
-        }
-        RuntimeIntrinsic::MemoryArenaHas => {
-            if args.len() != 2 {
-                return Err("arena_has expects two arguments".to_string());
-            }
-            let handle = expect_arena(args[0].clone(), "arena_has")?;
-            let id = expect_arena_id(args[1].clone(), "arena_has")?;
-            let arena = state
-                .arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(arena_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemoryArenaGet => {
-            if args.len() != 2 {
-                return Err("arena access expects two arguments".to_string());
-            }
-            let handle = expect_arena(args[0].clone(), "arena_access")?;
-            let id = expect_arena_id(args[1].clone(), "arena_access")?;
-            let arena = state
-                .arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            if !arena_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid ArenaId `{}` for Arena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("Arena slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemoryArenaBorrowRead | RuntimeIntrinsic::MemoryArenaBorrowEdit => {
-            if args.len() != 2 {
-                return Err("arena borrow expects two arguments".to_string());
-            }
-            let handle = expect_arena(args[0].clone(), "arena_borrow")?;
-            let id = expect_arena_id(args[1].clone(), "arena_borrow")?;
-            let arena = state
-                .arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            if !arena_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid ArenaId `{}` for Arena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
-                    handle.0
-                ));
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemoryArenaBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::ArenaSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemoryArenaSet => {
-            if args.len() != 3 {
-                return Err("arena_set expects three arguments".to_string());
-            }
-            let handle = expect_arena(args[0].clone(), "arena_set")?;
-            let id = expect_arena_id(args[1].clone(), "arena_set")?;
-            let arena = state
-                .arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            if !arena_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid ArenaId `{}` for Arena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryArenaRemove => {
-            if args.len() != 2 {
-                return Err("arena_remove expects two arguments".to_string());
-            }
-            let handle = expect_arena(args[0].clone(), "arena_remove")?;
-            let id = expect_arena_id(args[1].clone(), "arena_remove")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_arena_id(reference, id),
-                format!(
-                    "arena_remove rejects invalidation while borrowed views for ArenaId `{}` are live",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id)))
-                ),
-            )?;
-            let arena = state
-                .arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            if !arena_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid ArenaId `{}` for Arena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.remove(&id.slot);
-            Ok(RuntimeValue::Bool(true))
-        }
-        RuntimeIntrinsic::MemoryArenaReset => {
-            let handle = expect_arena(expect_single_arg(args, "arena_reset")?, "arena_reset")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_arena(reference, handle),
-                format!(
-                    "arena_reset rejects invalidation while borrowed views for Arena `{}` are live",
-                    handle.0
-                ),
-            )?;
-            let arena = state
-                .arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
-            arena.generation += 1;
-            if matches!(arena.policy.handle, RuntimeMemoryHandlePolicy::Unstable) {
-                arena.next_slot = 0;
-            }
-            arena.slots.clear();
-            arena.policy.current_limit = arena.policy.base_capacity;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryFrameNew => {
-            let capacity = expect_int(expect_single_arg(args, "frame_new")?, "frame_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "frame_new capacity")?;
-            let handle = insert_runtime_frame_arena(
-                state,
-                type_args,
-                default_runtime_frame_policy(capacity),
-            );
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)))
-        }
-        RuntimeIntrinsic::MemoryFrameAlloc => {
-            if args.len() != 2 {
-                return Err("frame_alloc expects two arguments".to_string());
-            }
-            let handle = expect_frame_arena(args[0].clone(), "frame_alloc")?;
-            let arena = state
-                .frame_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            ensure_runtime_frame_capacity(arena)?;
-            let slot = arena.next_slot;
-            arena.next_slot += 1;
-            arena.slots.insert(slot, args[1].clone());
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(
-                RuntimeFrameIdValue {
-                    arena: handle,
-                    slot,
-                    generation: arena.generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemoryFrameLen => {
-            let handle = expect_frame_arena(expect_single_arg(args, "frame_len")?, "frame_len")?;
-            let arena = state
-                .frame_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.slots.len() as i64))
-        }
-        RuntimeIntrinsic::MemoryFrameHas => {
-            if args.len() != 2 {
-                return Err("frame_has expects two arguments".to_string());
-            }
-            let handle = expect_frame_arena(args[0].clone(), "frame_has")?;
-            let id = expect_frame_id(args[1].clone(), "frame_has")?;
-            let arena = state
-                .frame_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(frame_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemoryFrameGet => {
-            if args.len() != 2 {
-                return Err("frame access expects two arguments".to_string());
-            }
-            let handle = expect_frame_arena(args[0].clone(), "frame_access")?;
-            let id = expect_frame_id(args[1].clone(), "frame_access")?;
-            let arena = state
-                .frame_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            if !frame_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid FrameId `{}` for FrameArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("FrameArena slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemoryFrameBorrowRead | RuntimeIntrinsic::MemoryFrameBorrowEdit => {
-            if args.len() != 2 {
-                return Err("frame borrow expects two arguments".to_string());
-            }
-            let handle = expect_frame_arena(args[0].clone(), "frame_borrow")?;
-            let id = expect_frame_id(args[1].clone(), "frame_borrow")?;
-            let arena = state
-                .frame_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            if !frame_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid FrameId `{}` for FrameArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id))),
-                    handle.0
-                ));
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemoryFrameBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::FrameSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemoryFrameSet => {
-            if args.len() != 3 {
-                return Err("frame_set expects three arguments".to_string());
-            }
-            let handle = expect_frame_arena(args[0].clone(), "frame_set")?;
-            let id = expect_frame_id(args[1].clone(), "frame_set")?;
-            let arena = state
-                .frame_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            if !frame_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid FrameId `{}` for FrameArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryFrameReset => {
-            let handle =
-                expect_frame_arena(expect_single_arg(args, "frame_reset")?, "frame_reset")?;
-            runtime_reset_frame_arena_handle(state, handle, "frame_reset")?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryPoolNew => {
-            let capacity = expect_int(expect_single_arg(args, "pool_new")?, "pool_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "pool_new capacity")?;
-            let handle =
-                insert_runtime_pool_arena(state, type_args, default_runtime_pool_policy(capacity));
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle)))
-        }
-        RuntimeIntrinsic::MemoryPoolAlloc => {
-            if args.len() != 2 {
-                return Err("pool_alloc expects two arguments".to_string());
-            }
-            let handle = expect_pool_arena(args[0].clone(), "pool_alloc")?;
-            let arena = state
-                .pool_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            let slot = if matches!(arena.policy.recycle, RuntimePoolRecyclePolicy::FreeList) {
-                arena.free_slots.pop()
-            } else {
-                None
-            }
-            .unwrap_or_else(|| {
-                if arena.slots.len() >= arena.policy.current_limit
-                    && matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
-                {
-                    let _ = runtime_try_grow_limit(
-                        &mut arena.policy.current_limit,
-                        arena.policy.growth_step,
-                    );
-                }
-                let has_capacity = arena.slots.len() < arena.policy.current_limit;
-                if !has_capacity {
-                    return u64::MAX;
-                }
-                let slot = arena.next_slot;
-                arena.next_slot += 1;
-                arena.generations.entry(slot).or_insert(0);
-                slot
-            });
-            if slot == u64::MAX {
-                return Err(format!(
-                    "pool capacity exhausted at {}; growth={} pressure={:?} recycle={:?}",
-                    arena.policy.current_limit,
-                    arena.policy.growth_step,
-                    arena.policy.pressure,
-                    arena.policy.recycle
-                ));
-            }
-            let generation = pool_slot_generation(arena, slot);
-            arena.slots.insert(slot, args[1].clone());
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(
-                RuntimePoolIdValue {
-                    arena: handle,
-                    slot,
-                    generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemoryPoolLen => {
-            let handle = expect_pool_arena(expect_single_arg(args, "pool_len")?, "pool_len")?;
-            let arena = state
-                .pool_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.slots.len() as i64))
-        }
-        RuntimeIntrinsic::MemoryPoolHas => {
-            if args.len() != 2 {
-                return Err("pool_has expects two arguments".to_string());
-            }
-            let handle = expect_pool_arena(args[0].clone(), "pool_has")?;
-            let id = expect_pool_id(args[1].clone(), "pool_has")?;
-            let arena = state
-                .pool_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(pool_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemoryPoolGet => {
-            if args.len() != 2 {
-                return Err("pool access expects two arguments".to_string());
-            }
-            let handle = expect_pool_arena(args[0].clone(), "pool_access")?;
-            let id = expect_pool_id(args[1].clone(), "pool_access")?;
-            let arena = state
-                .pool_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            if !pool_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid PoolId `{}` for PoolArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("PoolArena slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemoryPoolBorrowRead | RuntimeIntrinsic::MemoryPoolBorrowEdit => {
-            if args.len() != 2 {
-                return Err("pool borrow expects two arguments".to_string());
-            }
-            let handle = expect_pool_arena(args[0].clone(), "pool_borrow")?;
-            let id = expect_pool_id(args[1].clone(), "pool_borrow")?;
-            let arena = state
-                .pool_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            if !pool_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid PoolId `{}` for PoolArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
-                    handle.0
-                ));
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemoryPoolBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::PoolSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemoryPoolSet => {
-            if args.len() != 3 {
-                return Err("pool_set expects three arguments".to_string());
-            }
-            let handle = expect_pool_arena(args[0].clone(), "pool_set")?;
-            let id = expect_pool_id(args[1].clone(), "pool_set")?;
-            let arena = state
-                .pool_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            if !pool_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid PoolId `{}` for PoolArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryPoolRemove => {
-            if args.len() != 2 {
-                return Err("pool_remove expects two arguments".to_string());
-            }
-            let handle = expect_pool_arena(args[0].clone(), "pool_remove")?;
-            let id = expect_pool_id(args[1].clone(), "pool_remove")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_pool_id(reference, id),
-                format!(
-                    "pool_remove rejects invalidation while borrowed views for PoolId `{}` are live",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id)))
-                ),
-            )?;
-            let arena = state
-                .pool_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            if !pool_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid PoolId `{}` for PoolArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.remove(&id.slot);
-            *arena.generations.entry(id.slot).or_insert(0) += 1;
-            if matches!(arena.policy.recycle, RuntimePoolRecyclePolicy::FreeList) {
-                arena.free_slots.push(id.slot);
-            }
-            Ok(RuntimeValue::Bool(true))
-        }
-        RuntimeIntrinsic::MemoryPoolReset => {
-            let handle = expect_pool_arena(expect_single_arg(args, "pool_reset")?, "pool_reset")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_pool_arena(reference, handle),
-                format!(
-                    "pool_reset rejects invalidation while borrowed views for PoolArena `{}` are live",
-                    handle.0
-                ),
-            )?;
-            let arena = state
-                .pool_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            arena.slots.clear();
-            for generation in arena.generations.values_mut() {
-                *generation += 1;
-            }
-            match arena.policy.recycle {
-                RuntimePoolRecyclePolicy::FreeList => {
-                    arena.free_slots = arena.generations.keys().copied().rev().collect();
-                }
-                RuntimePoolRecyclePolicy::Strict => {
-                    arena.next_slot = 0;
-                    arena.free_slots.clear();
-                }
-            }
-            arena.policy.current_limit = arena.policy.base_capacity;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryPoolLiveIds => {
-            let handle =
-                expect_pool_arena(expect_single_arg(args, "pool_live_ids")?, "pool_live_ids")?;
-            let arena = state
-                .pool_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::List(
-                arena
-                    .slots
-                    .keys()
-                    .copied()
-                    .map(|slot| {
-                        RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(RuntimePoolIdValue {
-                            arena: handle,
-                            slot,
-                            generation: pool_slot_generation(arena, slot),
-                        }))
-                    })
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::MemoryPoolCompact => {
-            let handle =
-                expect_pool_arena(expect_single_arg(args, "pool_compact")?, "pool_compact")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_pool_arena(reference, handle),
-                format!(
-                    "pool_compact rejects invalidation while borrowed views for PoolArena `{}` are live",
-                    handle.0
-                ),
-            )?;
-            let arena = state
-                .pool_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            let old_slots = arena.slots.keys().copied().collect::<Vec<_>>();
-            let mut new_slots = BTreeMap::new();
-            let mut new_generations = BTreeMap::new();
-            let mut relocations = Vec::new();
-            for (next_index, old_slot) in old_slots.iter().copied().enumerate() {
-                let generation = pool_slot_generation(arena, old_slot);
-                let next_generation = generation + 1;
-                let value = arena
-                    .slots
-                    .remove(&old_slot)
-                    .ok_or_else(|| format!("PoolArena slot `{old_slot}` is missing"))?;
-                let new_slot = next_index as u64;
-                new_slots.insert(new_slot, value);
-                new_generations.insert(new_slot, next_generation);
-                let mut fields = BTreeMap::new();
-                fields.insert(
-                    "old".to_string(),
-                    RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(RuntimePoolIdValue {
-                        arena: handle,
-                        slot: old_slot,
-                        generation,
-                    })),
-                );
-                fields.insert(
-                    "new".to_string(),
-                    RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(RuntimePoolIdValue {
-                        arena: handle,
-                        slot: new_slot,
-                        generation: next_generation,
-                    })),
-                );
-                relocations.push(RuntimeValue::Record {
-                    name: "std.memory.PoolRelocation".to_string(),
-                    fields,
-                });
-            }
-            arena.slots = new_slots;
-            arena.generations = new_generations;
-            arena.next_slot = arena.slots.len() as u64;
-            arena.free_slots.clear();
-            Ok(RuntimeValue::List(relocations))
-        }
-        RuntimeIntrinsic::MemoryTempNew => {
-            let capacity = expect_int(expect_single_arg(args, "temp_new")?, "temp_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "temp_new capacity")?;
-            let handle =
-                insert_runtime_temp_arena(state, type_args, default_runtime_temp_policy(capacity));
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)))
-        }
-        RuntimeIntrinsic::MemoryTempAlloc => {
-            if args.len() != 2 {
-                return Err("temp_alloc expects two arguments".to_string());
-            }
-            let handle = expect_temp_arena(args[0].clone(), "temp_alloc")?;
-            let arena = state
-                .temp_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
-            ensure_runtime_temp_capacity(arena)?;
-            let slot = arena.next_slot;
-            arena.next_slot += 1;
-            arena.slots.insert(slot, args[1].clone());
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(
-                RuntimeTempIdValue {
-                    arena: handle,
-                    slot,
-                    generation: arena.generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemoryTempLen => {
-            let handle = expect_temp_arena(expect_single_arg(args, "temp_len")?, "temp_len")?;
-            let arena = state
-                .temp_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.slots.len() as i64))
-        }
-        RuntimeIntrinsic::MemoryTempHas => {
-            if args.len() != 2 {
-                return Err("temp_has expects two arguments".to_string());
-            }
-            let handle = expect_temp_arena(args[0].clone(), "temp_has")?;
-            let id = expect_temp_id(args[1].clone(), "temp_has")?;
-            let arena = state
-                .temp_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(temp_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemoryTempGet => {
-            if args.len() != 2 {
-                return Err("temp_get expects two arguments".to_string());
-            }
-            let handle = expect_temp_arena(args[0].clone(), "temp_get")?;
-            let id = expect_temp_id(args[1].clone(), "temp_get")?;
-            let arena = state
-                .temp_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
-            if !temp_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid TempId `{}` for TempArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("TempArena slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemoryTempBorrowRead | RuntimeIntrinsic::MemoryTempBorrowEdit => {
-            if args.len() != 2 {
-                return Err("temp borrow expects two arguments".to_string());
-            }
-            let handle = expect_temp_arena(args[0].clone(), "temp_borrow")?;
-            let id = expect_temp_id(args[1].clone(), "temp_borrow")?;
-            let arena = state
-                .temp_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
-            if !temp_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid TempId `{}` for TempArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id))),
-                    handle.0
-                ));
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemoryTempBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::TempSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemoryTempSet => {
-            if args.len() != 3 {
-                return Err("temp_set expects three arguments".to_string());
-            }
-            let handle = expect_temp_arena(args[0].clone(), "temp_set")?;
-            let id = expect_temp_id(args[1].clone(), "temp_set")?;
-            let arena = state
-                .temp_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
-            if !temp_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid TempId `{}` for TempArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryTempReset => {
-            let handle = expect_temp_arena(expect_single_arg(args, "temp_reset")?, "temp_reset")?;
-            runtime_reset_temp_arena_handle(state, handle, "temp_reset")?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySessionNew => {
-            let capacity = expect_int(expect_single_arg(args, "session_new")?, "session_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "session_new capacity")?;
-            let handle = insert_runtime_session_arena(
-                state,
-                type_args,
-                default_runtime_session_policy(capacity),
-            );
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
-                handle,
-            )))
-        }
-        RuntimeIntrinsic::MemorySessionAlloc => {
-            if args.len() != 2 {
-                return Err("session_alloc expects two arguments".to_string());
-            }
-            let handle = expect_session_arena(args[0].clone(), "session_alloc")?;
-            let arena = state
-                .session_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("session_alloc rejects mutation while sealed".to_string());
-            }
-            ensure_runtime_session_capacity(arena)?;
-            let slot = arena.next_slot;
-            arena.next_slot += 1;
-            arena.slots.insert(slot, args[1].clone());
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
-                RuntimeSessionIdValue {
-                    arena: handle,
-                    slot,
-                    generation: arena.generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemorySessionLen => {
-            let handle =
-                expect_session_arena(expect_single_arg(args, "session_len")?, "session_len")?;
-            let arena = state
-                .session_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.slots.len() as i64))
-        }
-        RuntimeIntrinsic::MemorySessionHas => {
-            if args.len() != 2 {
-                return Err("session_has expects two arguments".to_string());
-            }
-            let handle = expect_session_arena(args[0].clone(), "session_has")?;
-            let id = expect_session_id(args[1].clone(), "session_has")?;
-            let arena = state
-                .session_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(session_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemorySessionGet => {
-            if args.len() != 2 {
-                return Err("session_get expects two arguments".to_string());
-            }
-            let handle = expect_session_arena(args[0].clone(), "session_get")?;
-            let id = expect_session_id(args[1].clone(), "session_get")?;
-            let arena = state
-                .session_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            if !session_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SessionId `{}` for SessionArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
-                        id
-                    ))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemorySessionBorrowRead | RuntimeIntrinsic::MemorySessionBorrowEdit => {
-            if args.len() != 2 {
-                return Err("session borrow expects two arguments".to_string());
-            }
-            let handle = expect_session_arena(args[0].clone(), "session_borrow")?;
-            let id = expect_session_id(args[1].clone(), "session_borrow")?;
-            let arena = state
-                .session_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            if !session_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SessionId `{}` for SessionArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
-                        id
-                    ))),
-                    handle.0
-                ));
-            }
-            if arena.sealed && matches!(intrinsic, RuntimeIntrinsic::MemorySessionBorrowEdit) {
-                return Err("session_borrow_edit rejects mutation while sealed".to_string());
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemorySessionBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::SessionSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemorySessionSet => {
-            if args.len() != 3 {
-                return Err("session_set expects three arguments".to_string());
-            }
-            let handle = expect_session_arena(args[0].clone(), "session_set")?;
-            let id = expect_session_id(args[1].clone(), "session_set")?;
-            let arena = state
-                .session_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("session_set rejects mutation while sealed".to_string());
-            }
-            if !session_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SessionId `{}` for SessionArena `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
-                        id
-                    ))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySessionReset => {
-            let handle =
-                expect_session_arena(expect_single_arg(args, "session_reset")?, "session_reset")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_session_arena(reference, handle),
-                format!(
-                    "session_reset rejects invalidation while borrowed views for SessionArena `{}` are live",
-                    handle.0
-                ),
-            )?;
-            let arena = state
-                .session_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("session_reset rejects mutation while sealed".to_string());
-            }
-            arena.generation += 1;
-            arena.next_slot = 0;
-            arena.slots.clear();
-            arena.policy.current_limit = arena.policy.base_capacity;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySessionSeal => {
-            let handle =
-                expect_session_arena(expect_single_arg(args, "session_seal")?, "session_seal")?;
-            let arena = state
-                .session_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            arena.sealed = true;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySessionUnseal => {
-            let handle =
-                expect_session_arena(expect_single_arg(args, "session_unseal")?, "session_unseal")?;
-            runtime_reject_live_reference_or_opaque_conflict(
-                scopes.as_ref().map(|scopes| scopes.as_slice()),
-                Some(final_args.as_slice()),
-                state,
-                |reference| runtime_reference_targets_session_arena(reference, handle),
-                |opaque, state| {
-                    runtime_opaque_matches_reference_predicate(opaque, state, &|reference| {
-                        runtime_reference_targets_session_arena(reference, handle)
-                    })
-                },
-                None,
-                None,
-                |state| {
-                    runtime_any_live_element_view_reference(state, |reference| {
-                        runtime_reference_targets_session_arena(reference, handle)
-                    })
-                },
-                format!(
-                    "session_unseal rejects publication rollback while borrowed views or borrows for SessionArena `{}` are live",
-                    handle.0
-                ),
-            )?;
-            if state
-                .exported_descriptor_counts
-                .contains_key(&RuntimeExportedDescriptorTarget::SessionArena(handle))
-            {
-                return Err(format!(
-                    "session_unseal rejects publication rollback while exported descriptor views for SessionArena `{}` are live",
-                    handle.0
-                ));
-            }
-            let arena = state
-                .session_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            arena.sealed = false;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySessionIsSealed => {
-            let handle = expect_session_arena(
-                expect_single_arg(args, "session_is_sealed")?,
-                "session_is_sealed",
-            )?;
-            let arena = state
-                .session_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(arena.sealed))
-        }
-        RuntimeIntrinsic::MemorySessionLiveIds => {
-            let handle = expect_session_arena(
-                expect_single_arg(args, "session_live_ids")?,
-                "session_live_ids",
-            )?;
-            let arena = state
-                .session_arenas
-                .get(&handle)
-                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
-            Ok(RuntimeValue::List(
-                arena
-                    .slots
-                    .keys()
-                    .copied()
-                    .map(|slot| {
-                        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(RuntimeSessionIdValue {
-                            arena: handle,
-                            slot,
-                            generation: arena.generation,
-                        }))
-                    })
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::MemoryRingNew => {
-            let capacity = expect_int(expect_single_arg(args, "ring_new")?, "ring_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "ring_new capacity")?;
-            let handle =
-                insert_runtime_ring_buffer(state, type_args, default_runtime_ring_policy(capacity));
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)))
-        }
-        RuntimeIntrinsic::MemoryRingPush => {
-            if args.len() != 2 {
-                return Err("ring_push expects two arguments".to_string());
-            }
-            let handle = expect_ring_buffer(args[0].clone(), "ring_push")?;
-            if let Some((oldest_id, oldest_slot)) =
-                state.ring_buffers.get(&handle).and_then(|arena| {
-                    if arena.slots.len() < arena.policy.current_limit {
-                        return None;
-                    }
-                    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic) {
-                        return None;
-                    }
-                    if !matches!(arena.policy.overwrite, RuntimeRingOverwritePolicy::Oldest) {
-                        return None;
-                    }
-                    let oldest_slot = *arena.order.front()?;
-                    Some((
-                        RuntimeRingIdValue {
-                            arena: handle,
-                            slot: oldest_slot,
-                            generation: ring_slot_generation(arena, oldest_slot),
-                        },
-                        oldest_slot,
-                    ))
-                })
-            {
-                runtime_reject_live_reference_or_opaque_conflict(
-                    scopes.as_ref().map(|scopes| scopes.as_slice()),
-                    Some(args.as_slice()),
-                    state,
-                    |reference| runtime_reference_targets_ring_id(reference, oldest_id),
-                    |opaque, state| {
-                        runtime_opaque_matches_ring_window_predicate(
-                            opaque,
-                            state,
-                            &|candidate_arena, candidate_slots| {
-                                runtime_ring_window_overlaps_slots(
-                                    handle,
-                                    &[oldest_slot],
-                                    candidate_arena,
-                                    candidate_slots,
-                                )
-                            },
-                        )
-                    },
-                    None,
-                    None,
-                    |_| false,
-                    format!(
-                        "ring_push rejects overwrite while borrowed views for RingId `{}` are live",
-                        runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(
-                            oldest_id
-                        )))
-                    ),
-                )?;
-            }
-            let arena = state
-                .ring_buffers
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            ensure_runtime_ring_capacity(arena)?;
-            let slot = arena.next_slot;
-            arena.next_slot += 1;
-            let generation = ring_slot_generation(arena, slot);
-            arena.slots.insert(slot, args[1].clone());
-            arena.order.push_back(slot);
-            arena.generations.entry(slot).or_insert(generation);
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(
-                RuntimeRingIdValue {
-                    arena: handle,
-                    slot,
-                    generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemoryRingTryPop => {
-            let handle = expect_ring_buffer(
-                expect_single_arg(args.clone(), "ring_try_pop")?,
-                "ring_try_pop",
-            )?;
-            if let Some((oldest_id, oldest_slot)) =
-                state.ring_buffers.get(&handle).and_then(|arena| {
-                    let oldest_slot = *arena.order.front()?;
-                    Some((
-                        RuntimeRingIdValue {
-                            arena: handle,
-                            slot: oldest_slot,
-                            generation: ring_slot_generation(arena, oldest_slot),
-                        },
-                        oldest_slot,
-                    ))
-                })
-            {
-                runtime_reject_live_reference_or_opaque_conflict(
-                    scopes.as_ref().map(|scopes| scopes.as_slice()),
-                    Some(args.as_slice()),
-                    state,
-                    |reference| runtime_reference_targets_ring_id(reference, oldest_id),
-                    |opaque, state| {
-                        runtime_opaque_matches_ring_window_predicate(
-                            opaque,
-                            state,
-                            &|candidate_arena, candidate_slots| {
-                                runtime_ring_window_overlaps_slots(
-                                    handle,
-                                    &[oldest_slot],
-                                    candidate_arena,
-                                    candidate_slots,
-                                )
-                            },
-                        )
-                    },
-                    None,
-                    None,
-                    |_| false,
-                    format!(
-                        "ring_try_pop rejects invalidation while borrowed views for RingId `{}` are live",
-                        runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(
-                            oldest_id
-                        )))
-                    ),
-                )?;
-            }
-            let arena = state
-                .ring_buffers
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            let Some(slot) = arena.order.pop_front() else {
-                return Ok(none_variant());
-            };
-            let value = arena
-                .slots
-                .remove(&slot)
-                .ok_or_else(|| format!("RingBuffer slot `{slot}` is missing"))?;
-            *arena.generations.entry(slot).or_insert(0) += 1;
-            Ok(some_variant(value))
-        }
-        RuntimeIntrinsic::MemoryRingLen => {
-            let handle = expect_ring_buffer(expect_single_arg(args, "ring_len")?, "ring_len")?;
-            let arena = state
-                .ring_buffers
-                .get(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.order.len() as i64))
-        }
-        RuntimeIntrinsic::MemoryRingHas => {
-            if args.len() != 2 {
-                return Err("ring_has expects two arguments".to_string());
-            }
-            let handle = expect_ring_buffer(args[0].clone(), "ring_has")?;
-            let id = expect_ring_id(args[1].clone(), "ring_has")?;
-            let arena = state
-                .ring_buffers
-                .get(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(ring_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemoryRingGet => {
-            if args.len() != 2 {
-                return Err("ring_get expects two arguments".to_string());
-            }
-            let handle = expect_ring_buffer(args[0].clone(), "ring_get")?;
-            let id = expect_ring_id(args[1].clone(), "ring_get")?;
-            let arena = state
-                .ring_buffers
-                .get(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            if !ring_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid RingId `{}` for RingBuffer `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("RingBuffer slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemoryRingBorrowRead | RuntimeIntrinsic::MemoryRingBorrowEdit => {
-            if args.len() != 2 {
-                return Err("ring borrow expects two arguments".to_string());
-            }
-            let handle = expect_ring_buffer(args[0].clone(), "ring_borrow")?;
-            let id = expect_ring_id(args[1].clone(), "ring_borrow")?;
-            let arena = state
-                .ring_buffers
-                .get(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            if !ring_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid RingId `{}` for RingBuffer `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id))),
-                    handle.0
-                ));
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemoryRingBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::RingSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemoryRingSet => {
-            if args.len() != 3 {
-                return Err("ring_set expects three arguments".to_string());
-            }
-            let handle = expect_ring_buffer(args[0].clone(), "ring_set")?;
-            let id = expect_ring_id(args[1].clone(), "ring_set")?;
-            let arena = state
-                .ring_buffers
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            if !ring_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid RingId `{}` for RingBuffer `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryRingReset => {
-            let handle =
-                expect_ring_buffer(expect_single_arg(args.clone(), "ring_reset")?, "ring_reset")?;
-            runtime_reject_live_reference_or_opaque_conflict(
-                scopes.as_ref().map(|scopes| scopes.as_slice()),
-                Some(args.as_slice()),
-                state,
-                |reference| runtime_reference_targets_ring_arena(reference, handle),
-                |opaque, state| {
-                    runtime_opaque_matches_ring_window_predicate(
-                        opaque,
-                        state,
-                        &|candidate_arena, _| candidate_arena == handle,
-                    )
-                },
-                None,
-                None,
-                |_| false,
-                format!(
-                    "ring_reset rejects invalidation while borrowed views for RingBuffer `{}` are live",
-                    handle.0
-                ),
-            )?;
-            let arena = state
-                .ring_buffers
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            for slot in arena.slots.keys().copied().collect::<Vec<_>>() {
-                *arena.generations.entry(slot).or_insert(0) += 1;
-            }
-            arena.slots.clear();
-            arena.order.clear();
-            arena.policy.current_limit = arena.policy.base_capacity;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySlabNew => {
-            let capacity = expect_int(expect_single_arg(args, "slab_new")?, "slab_new")?;
-            let capacity = runtime_non_negative_usize(capacity, "slab_new capacity")?;
-            let handle =
-                insert_runtime_slab(state, type_args, default_runtime_slab_policy(capacity));
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)))
-        }
-        RuntimeIntrinsic::MemorySlabAlloc => {
-            if args.len() != 2 {
-                return Err("slab_alloc expects two arguments".to_string());
-            }
-            let handle = expect_slab(args[0].clone(), "slab_alloc")?;
-            let arena = state
-                .slabs
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("slab_alloc rejects mutation while sealed".to_string());
-            }
-            ensure_runtime_slab_capacity(arena)?;
-            let slot = arena.free_slots.pop().unwrap_or_else(|| {
-                let next = arena.next_slot;
-                arena.next_slot += 1;
-                arena.generations.entry(next).or_insert(0);
-                next
-            });
-            let generation = slab_slot_generation(arena, slot);
-            arena.slots.insert(slot, args[1].clone());
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(
-                RuntimeSlabIdValue {
-                    arena: handle,
-                    slot,
-                    generation,
-                },
-            )))
-        }
-        RuntimeIntrinsic::MemorySlabLen => {
-            let handle = expect_slab(expect_single_arg(args, "slab_len")?, "slab_len")?;
-            let arena = state
-                .slabs
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Int(arena.slots.len() as i64))
-        }
-        RuntimeIntrinsic::MemorySlabHas => {
-            if args.len() != 2 {
-                return Err("slab_has expects two arguments".to_string());
-            }
-            let handle = expect_slab(args[0].clone(), "slab_has")?;
-            let id = expect_slab_id(args[1].clone(), "slab_has")?;
-            let arena = state
-                .slabs
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(slab_id_is_live(handle, arena, id)))
-        }
-        RuntimeIntrinsic::MemorySlabGet => {
-            if args.len() != 2 {
-                return Err("slab_get expects two arguments".to_string());
-            }
-            let handle = expect_slab(args[0].clone(), "slab_get")?;
-            let id = expect_slab_id(args[1].clone(), "slab_get")?;
-            let arena = state
-                .slabs
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            if !slab_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SlabId `{}` for Slab `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
-                    handle.0
-                ));
-            }
-            arena
-                .slots
-                .get(&id.slot)
-                .cloned()
-                .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))
-        }
-        RuntimeIntrinsic::MemorySlabBorrowRead | RuntimeIntrinsic::MemorySlabBorrowEdit => {
-            if args.len() != 2 {
-                return Err("slab borrow expects two arguments".to_string());
-            }
-            let handle = expect_slab(args[0].clone(), "slab_borrow")?;
-            let id = expect_slab_id(args[1].clone(), "slab_borrow")?;
-            let arena = state
-                .slabs
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            if !slab_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SlabId `{}` for Slab `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
-                    handle.0
-                ));
-            }
-            if arena.sealed && matches!(intrinsic, RuntimeIntrinsic::MemorySlabBorrowEdit) {
-                return Err("slab_borrow_edit rejects mutation while sealed".to_string());
-            }
-            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mode: runtime_reference_mode_for_place(matches!(
-                    intrinsic,
-                    RuntimeIntrinsic::MemorySlabBorrowEdit
-                )),
-                target: RuntimeReferenceTarget::SlabSlot {
-                    id,
-                    members: Vec::new(),
-                },
-            }))
-        }
-        RuntimeIntrinsic::MemorySlabSet => {
-            if args.len() != 3 {
-                return Err("slab_set expects three arguments".to_string());
-            }
-            let handle = expect_slab(args[0].clone(), "slab_set")?;
-            let id = expect_slab_id(args[1].clone(), "slab_set")?;
-            let arena = state
-                .slabs
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("slab_set rejects mutation while sealed".to_string());
-            }
-            if !slab_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SlabId `{}` for Slab `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.insert(id.slot, args[2].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySlabRemove => {
-            if args.len() != 2 {
-                return Err("slab_remove expects two arguments".to_string());
-            }
-            let handle = expect_slab(args[0].clone(), "slab_remove")?;
-            let id = expect_slab_id(args[1].clone(), "slab_remove")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_slab_id(reference, id),
-                format!(
-                    "slab_remove rejects invalidation while borrowed views for SlabId `{}` are live",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)))
-                ),
-            )?;
-            let arena = state
-                .slabs
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("slab_remove rejects mutation while sealed".to_string());
-            }
-            if !slab_id_is_live(handle, arena, id) {
-                return Err(format!(
-                    "stale or invalid SlabId `{}` for Slab `{}`",
-                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
-                    handle.0
-                ));
-            }
-            arena.slots.remove(&id.slot);
-            *arena.generations.entry(id.slot).or_insert(0) += 1;
-            arena.free_slots.push(id.slot);
-            Ok(RuntimeValue::Bool(true))
-        }
-        RuntimeIntrinsic::MemorySlabReset => {
-            let handle = expect_slab(expect_single_arg(args, "slab_reset")?, "slab_reset")?;
-            runtime_reject_live_view_conflict(
-                state,
-                |reference| runtime_reference_targets_slab_arena(reference, handle),
-                format!(
-                    "slab_reset rejects invalidation while borrowed views for Slab `{}` are live",
-                    handle.0
-                ),
-            )?;
-            let arena = state
-                .slabs
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            if arena.sealed {
-                return Err("slab_reset rejects mutation while sealed".to_string());
-            }
-            arena.slots.clear();
-            for generation in arena.generations.values_mut() {
-                *generation += 1;
-            }
-            arena.free_slots = arena.generations.keys().copied().rev().collect();
-            arena.policy.current_limit = arena.policy.base_capacity;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySlabSeal => {
-            let handle = expect_slab(expect_single_arg(args, "slab_seal")?, "slab_seal")?;
-            let arena = state
-                .slabs
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            arena.sealed = true;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySlabUnseal => {
-            let handle = expect_slab(expect_single_arg(args, "slab_unseal")?, "slab_unseal")?;
-            runtime_reject_live_reference_or_opaque_conflict(
-                scopes.as_ref().map(|scopes| scopes.as_slice()),
-                Some(final_args.as_slice()),
-                state,
-                |reference| runtime_reference_targets_slab_arena(reference, handle),
-                |opaque, state| {
-                    runtime_opaque_matches_reference_predicate(opaque, state, &|reference| {
-                        runtime_reference_targets_slab_arena(reference, handle)
-                    })
-                },
-                None,
-                None,
-                |state| {
-                    runtime_any_live_element_view_reference(state, |reference| {
-                        runtime_reference_targets_slab_arena(reference, handle)
-                    })
-                },
-                format!(
-                    "slab_unseal rejects publication rollback while borrowed views or borrows for Slab `{}` are live",
-                    handle.0
-                ),
-            )?;
-            if state
-                .exported_descriptor_counts
-                .contains_key(&RuntimeExportedDescriptorTarget::Slab(handle))
-            {
-                return Err(format!(
-                    "slab_unseal rejects publication rollback while exported descriptor views for Slab `{}` are live",
-                    handle.0
-                ));
-            }
-            let arena = state
-                .slabs
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            arena.sealed = false;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemorySlabIsSealed => {
-            let handle = expect_slab(expect_single_arg(args, "slab_is_sealed")?, "slab_is_sealed")?;
-            let arena = state
-                .slabs
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            Ok(RuntimeValue::Bool(arena.sealed))
-        }
-        RuntimeIntrinsic::MemorySlabLiveIds => {
-            let handle = expect_slab(expect_single_arg(args, "slab_live_ids")?, "slab_live_ids")?;
-            let arena = state
-                .slabs
-                .get(&handle)
-                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
-            Ok(RuntimeValue::List(
-                arena
-                    .slots
-                    .keys()
-                    .copied()
-                    .map(|slot| {
-                        RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(RuntimeSlabIdValue {
-                            arena: handle,
-                            slot,
-                            generation: slab_slot_generation(arena, slot),
-                        }))
-                    })
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::MemoryRingWindowRead | RuntimeIntrinsic::MemoryRingWindowEdit => {
-            if args.len() != 3 {
-                return Err("ring_window expects three arguments".to_string());
-            }
-            let handle = expect_ring_buffer(args[0].clone(), "ring_window")?;
-            let start = expect_int(args[1].clone(), "ring_window start")?;
-            let len = expect_int(args[2].clone(), "ring_window len")?;
-            if len < 0 {
-                return Err("ring_window len must be non-negative".to_string());
-            }
-            let arena = state
-                .ring_buffers
-                .get(&handle)
-                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
-            let start = runtime_non_negative_usize(start, "ring_window start")?;
-            let count = runtime_non_negative_usize(len, "ring_window len")?;
-            if count > arena.policy.window {
-                return Err(format!(
-                    "ring_window len `{count}` exceeds configured window `{}` for RingBuffer `{}`",
-                    arena.policy.window, handle.0
-                ));
-            }
-            let end = start
-                .checked_add(count)
-                .ok_or_else(|| "ring_window range overflowed".to_string())?;
-            if end > arena.order.len() {
-                return Err(format!(
-                    "ring_window `{start}..{end}` is out of bounds for length `{}`",
-                    arena.order.len()
-                ));
-            }
-            let slots = arena
-                .order
-                .iter()
-                .skip(start)
-                .take(count)
-                .copied()
-                .collect::<Vec<_>>();
-            if matches!(intrinsic, RuntimeIntrinsic::MemoryRingWindowEdit) {
-                let ids = runtime_ring_ids_for_slots(state, handle, &slots)?;
-                runtime_reject_live_reference_or_opaque_conflict(
-                    scopes.as_ref().map(|scopes| scopes.as_slice()),
-                    Some(args.as_slice()),
-                    state,
-                    |candidate| ids.iter().any(|id| runtime_reference_targets_ring_id(candidate, *id)),
-                    |opaque, state| runtime_opaque_matches_ring_window_predicate(
-                        opaque,
-                        state,
-                        &|candidate_arena, candidate_slots| {
-                            runtime_ring_window_overlaps_slots(
-                                handle,
-                                &slots,
-                                candidate_arena,
-                                candidate_slots,
-                            )
-                        },
-                    ),
-                    None,
-                    None,
-                    |_| false,
-                    "ring_window_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-                )?;
-                let view = insert_runtime_edit_view_from_ring_window(
-                    state, type_args, handle, slots, 0, count,
-                );
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
-            } else {
-                let view = insert_runtime_read_view_from_ring_window(
-                    state, type_args, handle, slots, 0, count,
-                );
-                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
-            }
-        }
-        RuntimeIntrinsic::MemoryArrayViewRead | RuntimeIntrinsic::MemoryArrayViewEdit => {
-            if args.len() != 3 {
-                return Err("array_view expects three arguments".to_string());
-            }
-            let reference = match &args[0] {
-                RuntimeValue::Ref(reference) => Some(reference.clone()),
-                _ => None,
-            };
-            let values = if let Some(reference) = reference.as_ref() {
-                let scopes = scopes
-                    .as_deref_mut()
-                    .ok_or_else(|| "array_view on refs requires runtime scopes".to_string())?;
-                let current_package_id = current_package_id
-                    .ok_or_else(|| "array_view on refs requires package context".to_string())?;
-                let current_module_id = current_module_id
-                    .ok_or_else(|| "array_view on refs requires module context".to_string())?;
-                let empty_aliases = BTreeMap::new();
-                let aliases = aliases.unwrap_or(&empty_aliases);
-                let empty_type_bindings = BTreeMap::new();
-                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
-                expect_runtime_array(
-                    read_runtime_reference(
-                        scopes,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        reference,
-                        host,
-                    )?,
-                    "array_view",
-                )?
-            } else {
-                expect_runtime_array(args[0].clone(), "array_view")?
-            };
-            let start = expect_int(args[1].clone(), "array_view start")?;
-            let end = expect_int(args[2].clone(), "array_view end")?;
-            let (start, end) = runtime_view_bounds(start, end, values.len(), "array_view")?;
-            if let Some(reference) = reference {
-                if matches!(intrinsic, RuntimeIntrinsic::MemoryArrayViewEdit) {
-                    runtime_reject_live_reference_or_opaque_conflict(
-                        scopes.as_ref().map(|scopes| scopes.as_slice()),
-                        Some(args.as_slice()),
-                        state,
-                        |candidate| candidate.target == reference.target,
-                        |opaque, state| runtime_opaque_matches_reference_predicate(
-                            opaque,
-                            state,
-                            &|candidate| candidate.target == reference.target,
-                        ),
-                        Some(&reference),
-                        None,
-                        |_| false,
-                        "array_view_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-                    )?;
-                    let view = insert_runtime_edit_view_from_reference(
-                        state,
-                        type_args,
-                        reference,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
-                } else {
-                    let view = insert_runtime_read_view_from_reference(
-                        state,
-                        type_args,
-                        reference,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
-                }
-            } else {
-                let backing = insert_runtime_element_view_buffer(state, type_args, values);
-                if matches!(intrinsic, RuntimeIntrinsic::MemoryArrayViewEdit) {
-                    let view = insert_runtime_edit_view_from_buffer(
-                        state,
-                        type_args,
-                        backing,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
-                } else {
-                    let view = insert_runtime_read_view_from_buffer(
-                        state,
-                        type_args,
-                        backing,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
-                }
-            }
-        }
-        RuntimeIntrinsic::MemoryBytesView | RuntimeIntrinsic::MemoryBytesViewEdit => {
-            if args.len() != 3 {
-                return Err("bytes_view expects three arguments".to_string());
-            }
-            let reference = match &args[0] {
-                RuntimeValue::Ref(reference) => Some(reference.clone()),
-                _ => None,
-            };
-            let values = if let Some(reference) = reference.as_ref() {
-                let scopes = scopes
-                    .as_deref_mut()
-                    .ok_or_else(|| "bytes_view on refs requires runtime scopes".to_string())?;
-                let current_package_id = current_package_id
-                    .ok_or_else(|| "bytes_view on refs requires package context".to_string())?;
-                let current_module_id = current_module_id
-                    .ok_or_else(|| "bytes_view on refs requires module context".to_string())?;
-                let empty_aliases = BTreeMap::new();
-                let aliases = aliases.unwrap_or(&empty_aliases);
-                let empty_type_bindings = BTreeMap::new();
-                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
-                runtime_reference_array_values(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    reference,
-                    host,
-                    "bytes_view",
-                )?
-            } else {
-                expect_runtime_array(args[0].clone(), "bytes_view")?
-            };
-            let byte_count = values
-                .into_iter()
-                .map(|value| {
-                    let value = expect_int(value, "bytes_view")?;
-                    if !(0..=255).contains(&value) {
-                        return Err(format!(
-                            "bytes_view byte `{value}` is out of range `0..=255`"
-                        ));
-                    }
-                    Ok(())
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .len();
-            let start = expect_int(args[1].clone(), "bytes_view start")?;
-            let end = expect_int(args[2].clone(), "bytes_view end")?;
-            let (start, end) = runtime_view_bounds(start, end, byte_count, "bytes_view")?;
-            if let Some(reference) = reference {
-                if matches!(intrinsic, RuntimeIntrinsic::MemoryBytesViewEdit) {
-                    runtime_reject_live_reference_or_opaque_conflict(
-                        scopes.as_ref().map(|scopes| scopes.as_slice()),
-                        Some(args.as_slice()),
-                        state,
-                        |candidate| candidate.target == reference.target,
-                        |opaque, state| runtime_opaque_matches_reference_predicate(
-                            opaque,
-                            state,
-                            &|candidate| candidate.target == reference.target,
-                        ),
-                        Some(&reference),
-                        None,
-                        |_| false,
-                        "bytes_view_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-                    )?;
-                    let view = insert_runtime_byte_edit_view_from_reference(
-                        state,
-                        reference,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(view)))
-                } else {
-                    let view = insert_runtime_byte_view_from_reference(
-                        state,
-                        reference,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(view)))
-                }
-            } else {
-                let bytes = expect_runtime_array(args[0].clone(), "bytes_view")?
-                    .into_iter()
-                    .map(|value| {
-                        let value = expect_int(value, "bytes_view")?;
-                        if !(0..=255).contains(&value) {
-                            return Err(format!(
-                                "bytes_view byte `{value}` is out of range `0..=255`"
-                            ));
-                        }
-                        Ok(value as u8)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let backing = insert_runtime_byte_view_buffer(state, bytes);
-                if matches!(intrinsic, RuntimeIntrinsic::MemoryBytesViewEdit) {
-                    let view = insert_runtime_byte_edit_view_from_buffer(
-                        state,
-                        backing,
-                        start,
-                        end - start,
-                    );
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(view)))
-                } else {
-                    let view =
-                        insert_runtime_byte_view_from_buffer(state, backing, start, end - start);
-                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(view)))
-                }
-            }
-        }
-        RuntimeIntrinsic::MemoryStrView => {
-            if args.len() != 3 {
-                return Err("str_view expects three arguments".to_string());
-            }
-            let reference = match &args[0] {
-                RuntimeValue::Ref(reference) => Some(reference.clone()),
-                _ => None,
-            };
-            let text = if let Some(reference) = reference.as_ref() {
-                let scopes = scopes
-                    .as_deref_mut()
-                    .ok_or_else(|| "str_view on refs requires runtime scopes".to_string())?;
-                let current_package_id = current_package_id
-                    .ok_or_else(|| "str_view on refs requires package context".to_string())?;
-                let current_module_id = current_module_id
-                    .ok_or_else(|| "str_view on refs requires module context".to_string())?;
-                let empty_aliases = BTreeMap::new();
-                let aliases = aliases.unwrap_or(&empty_aliases);
-                let empty_type_bindings = BTreeMap::new();
-                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
-                runtime_reference_text_value(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    reference,
-                    host,
-                    "str_view",
-                )?
-            } else {
-                expect_str(args[0].clone(), "str_view")?
-            };
-            let start = expect_int(args[1].clone(), "str_view start")?;
-            let end = expect_int(args[2].clone(), "str_view end")?;
-            let (start, end) = runtime_view_bounds(start, end, text.len(), "str_view")?;
-            let view = if let Some(reference) = reference {
-                insert_runtime_str_view_from_reference(state, reference, start, end - start)
-            } else {
-                let backing = insert_runtime_str_view_buffer(state, text);
-                insert_runtime_str_view_from_buffer(state, backing, start, end - start)
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(view)))
-        }
-        RuntimeIntrinsic::MemoryViewLen => {
-            let handle = expect_read_view(expect_single_arg(args, "view_len")?, "view_len")?;
-            let (backing, view_start, view_len) = {
-                let view = state
-                    .read_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
-                (view.backing.clone(), view.start, view.len)
-            };
-            match &backing {
-                RuntimeElementViewBacking::Buffer(buffer) => {
-                    let values = &state
-                        .element_view_buffers
-                        .get(buffer)
-                        .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
-                        .values;
-                    let _ = runtime_view_range(view_start, view_len, values.len(), "view_len")?;
-                }
-                RuntimeElementViewBacking::Reference(reference) => {
-                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                        "view_len on reference-backed ReadView requires runtime call context"
-                            .to_string()
-                    })?;
-                    let values = runtime_reference_array_values(
-                        scopes,
-                        plan,
-                        current_package_id.ok_or_else(|| {
-                            "view_len is missing current package context".to_string()
-                        })?,
-                        current_module_id.ok_or_else(|| {
-                            "view_len is missing current module context".to_string()
-                        })?,
-                        aliases.ok_or_else(|| "view_len is missing alias context".to_string())?,
-                        type_bindings.ok_or_else(|| {
-                            "view_len is missing type binding context".to_string()
-                        })?,
-                        state,
-                        reference,
-                        host,
-                        "view_len",
-                    )?;
-                    let _ = runtime_view_range(view_start, view_len, values.len(), "view_len")?;
-                }
-                RuntimeElementViewBacking::RingWindow { slots, .. } => {
-                    let _ = runtime_view_range(view_start, view_len, slots.len(), "view_len")?;
-                }
-            }
-            Ok(RuntimeValue::Int(view_len as i64))
-        }
-        RuntimeIntrinsic::MemoryViewGet => {
-            if args.len() != 2 {
-                return Err("view_get expects two arguments".to_string());
-            }
-            let handle = expect_read_view(args[0].clone(), "view_get")?;
-            let view = state
-                .read_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "view_get index")?,
-                view.len,
-                "view_get",
-            )?;
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "view_get on borrowed views requires runtime call context".to_string()
-            })?;
-            Ok(runtime_read_view_values(
-                scopes,
-                plan,
-                current_package_id
-                    .ok_or_else(|| "view_get is missing current package context".to_string())?,
-                current_module_id
-                    .ok_or_else(|| "view_get is missing current module context".to_string())?,
-                aliases.ok_or_else(|| "view_get is missing alias context".to_string())?,
-                type_bindings
-                    .ok_or_else(|| "view_get is missing type binding context".to_string())?,
-                state,
-                &view,
-                host,
-                "view_get",
-            )?[index]
-                .clone())
-        }
-        RuntimeIntrinsic::MemoryViewSubview => {
-            if args.len() != 3 {
-                return Err("view_subview expects three arguments".to_string());
-            }
-            let handle = expect_read_view(args[0].clone(), "view_subview")?;
-            let (type_args, backing, view_start, view_len) = {
-                let view = state
-                    .read_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
-                (
-                    view.type_args.clone(),
-                    view.backing.clone(),
-                    view.start,
-                    view.len,
-                )
-            };
-            let start = expect_int(args[1].clone(), "view_subview start")?;
-            let end = expect_int(args[2].clone(), "view_subview end")?;
-            let (start, end) = runtime_view_bounds(start, end, view_len, "view_subview")?;
-            let next = insert_runtime_read_view_from_backing(
-                state,
-                &type_args,
-                backing,
-                view_start + start,
-                end - start,
-            );
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
-        }
-        RuntimeIntrinsic::MemoryEditViewLen => {
-            let handle =
-                expect_edit_view(expect_single_arg(args, "edit_view_len")?, "edit_view_len")?;
-            let (backing, view_start, view_len) = {
-                let view = state
-                    .edit_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
-                (view.backing.clone(), view.start, view.len)
-            };
-            match &backing {
-                RuntimeElementViewBacking::Buffer(buffer) => {
-                    let values = &state
-                        .element_view_buffers
-                        .get(buffer)
-                        .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
-                        .values;
-                    let _ =
-                        runtime_view_range(view_start, view_len, values.len(), "edit_view_len")?;
-                }
-                RuntimeElementViewBacking::Reference(reference) => {
-                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                        "edit_view_len on reference-backed EditView requires runtime call context"
-                            .to_string()
-                    })?;
-                    let values = runtime_reference_array_values(
-                        scopes,
-                        plan,
-                        current_package_id.ok_or_else(|| {
-                            "edit_view_len is missing current package context".to_string()
-                        })?,
-                        current_module_id.ok_or_else(|| {
-                            "edit_view_len is missing current module context".to_string()
-                        })?,
-                        aliases
-                            .ok_or_else(|| "edit_view_len is missing alias context".to_string())?,
-                        type_bindings.ok_or_else(|| {
-                            "edit_view_len is missing type binding context".to_string()
-                        })?,
-                        state,
-                        reference,
-                        host,
-                        "edit_view_len",
-                    )?;
-                    let _ =
-                        runtime_view_range(view_start, view_len, values.len(), "edit_view_len")?;
-                }
-                RuntimeElementViewBacking::RingWindow { slots, .. } => {
-                    let _ = runtime_view_range(view_start, view_len, slots.len(), "edit_view_len")?;
-                }
-            }
-            Ok(RuntimeValue::Int(view_len as i64))
-        }
-        RuntimeIntrinsic::MemoryEditViewGet => {
-            if args.len() != 2 {
-                return Err("edit_view_get expects two arguments".to_string());
-            }
-            let handle = expect_edit_view(args[0].clone(), "edit_view_get")?;
-            let view = state
-                .edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "edit_view_get index")?,
-                view.len,
-                "edit_view_get",
-            )?;
-            let read_view = RuntimeReadViewState {
-                type_args: view.type_args.clone(),
-                backing: view.backing.clone(),
-                start: view.start,
-                len: view.len,
-            };
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "edit_view_get on borrowed views requires runtime call context".to_string()
-            })?;
-            Ok(runtime_read_view_values(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "edit_view_get is missing current package context".to_string()
-                })?,
-                current_module_id
-                    .ok_or_else(|| "edit_view_get is missing current module context".to_string())?,
-                aliases.ok_or_else(|| "edit_view_get is missing alias context".to_string())?,
-                type_bindings
-                    .ok_or_else(|| "edit_view_get is missing type binding context".to_string())?,
-                state,
-                &read_view,
-                host,
-                "edit_view_get",
-            )?[index]
-                .clone())
-        }
-        RuntimeIntrinsic::MemoryEditViewSet => {
-            if args.len() != 3 {
-                return Err("edit_view_set expects three arguments".to_string());
-            }
-            let handle = expect_edit_view(args[0].clone(), "edit_view_set")?;
-            let view = state
-                .edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "edit_view_set index")?,
-                view.len,
-                "edit_view_set",
-            )?;
-            match view.backing {
-                RuntimeElementViewBacking::Buffer(buffer) => {
-                    let values = &mut state
-                        .element_view_buffers
-                        .get_mut(&buffer)
-                        .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
-                        .values;
-                    let absolute = view.start + index;
-                    if absolute >= values.len() {
-                        return Err(format!(
-                            "edit_view_set index `{index}` is out of bounds for length `{}`",
-                            view.len
-                        ));
-                    }
-                    values[absolute] = args[2].clone();
-                }
-                RuntimeElementViewBacking::Reference(reference) => {
-                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                        "edit_view_set on borrowed views requires runtime call context".to_string()
-                    })?;
-                    let mut values = runtime_reference_array_values(
-                        scopes,
-                        plan,
-                        current_package_id.ok_or_else(|| {
-                            "edit_view_set is missing current package context".to_string()
-                        })?,
-                        current_module_id.ok_or_else(|| {
-                            "edit_view_set is missing current module context".to_string()
-                        })?,
-                        aliases
-                            .ok_or_else(|| "edit_view_set is missing alias context".to_string())?,
-                        type_bindings.ok_or_else(|| {
-                            "edit_view_set is missing type binding context".to_string()
-                        })?,
-                        state,
-                        &reference,
-                        host,
-                        "edit_view_set",
-                    )?;
-                    let absolute = view.start + index;
-                    if absolute >= values.len() {
-                        return Err(format!(
-                            "edit_view_set index `{index}` is out of bounds for length `{}`",
-                            view.len
-                        ));
-                    }
-                    values[absolute] = args[2].clone();
-                    write_runtime_reference(
-                        scopes,
-                        plan,
-                        current_package_id.ok_or_else(|| {
-                            "edit_view_set is missing current package context".to_string()
-                        })?,
-                        current_module_id.ok_or_else(|| {
-                            "edit_view_set is missing current module context".to_string()
-                        })?,
-                        aliases
-                            .ok_or_else(|| "edit_view_set is missing alias context".to_string())?,
-                        type_bindings.ok_or_else(|| {
-                            "edit_view_set is missing type binding context".to_string()
-                        })?,
-                        state,
-                        &reference,
-                        RuntimeValue::Array(values),
-                        host,
-                    )?;
-                }
-                RuntimeElementViewBacking::RingWindow { arena, slots } => {
-                    let absolute = view.start + index;
-                    let slot = *slots.get(absolute).ok_or_else(|| {
-                        format!(
-                            "edit_view_set index `{index}` is out of bounds for length `{}`",
-                            view.len
-                        )
-                    })?;
-                    let ring = state
-                        .ring_buffers
-                        .get_mut(&arena)
-                        .ok_or_else(|| format!("invalid RingBuffer handle `{}`", arena.0))?;
-                    let entry = ring
-                        .slots
-                        .get_mut(&slot)
-                        .ok_or_else(|| format!("RingBuffer slot `{slot}` is missing"))?;
-                    *entry = args[2].clone();
-                }
-            }
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryEditViewSubviewRead => {
-            if args.len() != 3 {
-                return Err("edit_view_subview_read expects three arguments".to_string());
-            }
-            let handle = expect_edit_view(args[0].clone(), "edit_view_subview_read")?;
-            let (type_args, backing, view_start, view_len) = {
-                let view = state
-                    .edit_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
-                (
-                    view.type_args.clone(),
-                    view.backing.clone(),
-                    view.start,
-                    view.len,
-                )
-            };
-            let start = expect_int(args[1].clone(), "edit_view_subview_read start")?;
-            let end = expect_int(args[2].clone(), "edit_view_subview_read end")?;
-            let (start, end) = runtime_view_bounds(start, end, view_len, "edit_view_subview_read")?;
-            let next = insert_runtime_read_view_from_backing(
-                state,
-                &type_args,
-                backing,
-                view_start + start,
-                end - start,
-            );
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
-        }
-        RuntimeIntrinsic::MemoryEditViewSubviewEdit => {
-            if args.len() != 3 {
-                return Err("edit_view_subview_edit expects three arguments".to_string());
-            }
-            let handle = expect_edit_view(args[0].clone(), "edit_view_subview_edit")?;
-            let (type_args, backing, view_start, view_len) = {
-                let view = state
-                    .edit_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
-                (
-                    view.type_args.clone(),
-                    view.backing.clone(),
-                    view.start,
-                    view.len,
-                )
-            };
-            let start = expect_int(args[1].clone(), "edit_view_subview_edit start")?;
-            let end = expect_int(args[2].clone(), "edit_view_subview_edit end")?;
-            let (start, end) = runtime_view_bounds(start, end, view_len, "edit_view_subview_edit")?;
-            let next = match backing {
-                RuntimeElementViewBacking::Buffer(buffer) => {
-                    runtime_reject_live_reference_or_opaque_conflict(
-                        scopes.as_ref().map(|scopes| scopes.as_slice()),
-                        Some(args.as_slice()),
-                        state,
-                        |_| false,
-                        |opaque, state| runtime_opaque_matches_element_buffer(opaque, state, buffer),
-                        None,
-                        Some(RuntimeOpaqueValue::EditView(handle)),
-                        |_| false,
-                        "edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-                    )?;
-                    insert_runtime_edit_view_from_buffer(
-                        state,
-                        &type_args,
-                        buffer,
-                        view_start + start,
-                        end - start,
-                    )
-                }
-                RuntimeElementViewBacking::Reference(reference) => {
-                    runtime_reject_live_reference_or_opaque_conflict(
-                        scopes.as_ref().map(|scopes| scopes.as_slice()),
-                        Some(args.as_slice()),
-                        state,
-                        |candidate| candidate.target == reference.target,
-                        |opaque, state| runtime_opaque_matches_reference_predicate(
-                            opaque,
-                            state,
-                            &|candidate| candidate.target == reference.target,
-                        ),
-                        None,
-                        Some(RuntimeOpaqueValue::EditView(handle)),
-                        |_| false,
-                        "edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-                    )?;
-                    insert_runtime_edit_view_from_reference(
-                        state,
-                        &type_args,
-                        reference,
-                        view_start + start,
-                        end - start,
-                    )
-                }
-                RuntimeElementViewBacking::RingWindow { arena, slots } => {
-                    let active = runtime_ring_window_active_slots(
-                        &slots,
-                        view_start + start,
-                        end - start,
-                    )
-                    .ok_or_else(|| {
-                        "edit_view_subview_edit range is out of bounds for RingBuffer-backed EditView"
-                            .to_string()
-                    })?
-                    .to_vec();
-                    let ids = runtime_ring_ids_for_slots(state, arena, &active)?;
-                    runtime_reject_live_reference_or_opaque_conflict(
-                        scopes.as_ref().map(|scopes| scopes.as_slice()),
-                        Some(args.as_slice()),
-                        state,
-                        |candidate| ids.iter().any(|id| runtime_reference_targets_ring_id(candidate, *id)),
-                        |opaque, state| runtime_opaque_matches_ring_window_predicate(
-                            opaque,
-                            state,
-                            &|candidate_arena, candidate_slots| {
-                                runtime_ring_window_overlaps_slots(
-                                    arena,
-                                    &active,
-                                    candidate_arena,
-                                    candidate_slots,
-                                )
-                            },
-                        ),
-                        None,
-                        Some(RuntimeOpaqueValue::EditView(handle)),
-                        |_| false,
-                        "edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-                    )?;
-                    insert_runtime_edit_view_from_ring_window(
-                        state,
-                        &type_args,
-                        arena,
-                        slots,
-                        view_start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(next)))
-        }
-        RuntimeIntrinsic::MemoryByteViewLen => {
-            let handle =
-                expect_byte_view(expect_single_arg(args, "byte_view_len")?, "byte_view_len")?;
-            let view = state
-                .byte_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
-                .clone();
-            if let RuntimeByteViewBacking::Reference(reference) = &view.backing {
-                let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                    "byte_view_len on borrowed ByteView requires runtime call context".to_string()
-                })?;
-                let _ = runtime_reference_array_len(
-                    scopes.as_slice(),
-                    state,
-                    reference,
-                    "byte_view_len",
-                )?;
-            }
-            Ok(RuntimeValue::Int(view.len as i64))
-        }
-        RuntimeIntrinsic::MemoryByteViewAt => {
-            if args.len() != 2 {
-                return Err("byte_view_at expects two arguments".to_string());
-            }
-            let handle = expect_byte_view(args[0].clone(), "byte_view_at")?;
-            let view = state
-                .byte_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "byte_view_at index")?,
-                view.len,
-                "byte_view_at",
-            )?;
-            let value = match &view.backing {
-                RuntimeByteViewBacking::Buffer(buffer) => {
-                    let values = &state
-                        .byte_view_buffers
-                        .get(buffer)
-                        .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
-                        .values;
-                    values
-                        .get(view.start + index)
-                        .copied()
-                        .ok_or_else(|| format!("byte_view_at index `{index}` is out of bounds"))?
-                }
-                RuntimeByteViewBacking::Reference(reference) => {
-                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                        "byte_view_at on borrowed ByteView requires runtime call context"
-                            .to_string()
-                    })?;
-                    runtime_reference_array_byte_at(
-                        scopes.as_slice(),
-                        state,
-                        reference,
-                        view.start + index,
-                        "byte_view_at",
-                    )?
-                    .ok_or_else(|| {
-                        "byte_view_at could not resolve borrowed ByteView backing".to_string()
-                    })?
-                }
-            };
-            Ok(RuntimeValue::Int(i64::from(value)))
-        }
-        RuntimeIntrinsic::MemoryByteViewSubview => {
-            if args.len() != 3 {
-                return Err("byte_view_subview expects three arguments".to_string());
-            }
-            let handle = expect_byte_view(args[0].clone(), "byte_view_subview")?;
-            let view = state
-                .byte_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
-                .clone();
-            let start = expect_int(args[1].clone(), "byte_view_subview start")?;
-            let end = expect_int(args[2].clone(), "byte_view_subview end")?;
-            let (start, end) = runtime_view_bounds(start, end, view.len, "byte_view_subview")?;
-            let next = match view.backing {
-                RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
-                    state,
-                    buffer,
-                    view.start + start,
-                    end - start,
-                ),
-                RuntimeByteViewBacking::Reference(reference) => {
-                    insert_runtime_byte_view_from_reference(
-                        state,
-                        reference,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
-        }
-        RuntimeIntrinsic::MemoryByteViewToArray => {
-            let handle = expect_byte_view(
-                expect_single_arg(args, "byte_view_to_array")?,
-                "byte_view_to_array",
-            )?;
-            let view = state
-                .byte_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
-                .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "byte_view_to_array on borrowed ByteView requires runtime call context".to_string()
-            })?;
-            Ok(bytes_to_runtime_array(runtime_byte_view_values(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "byte_view_to_array is missing current package context".to_string()
-                })?,
-                current_module_id.ok_or_else(|| {
-                    "byte_view_to_array is missing current module context".to_string()
-                })?,
-                aliases.ok_or_else(|| "byte_view_to_array is missing alias context".to_string())?,
-                type_bindings.ok_or_else(|| {
-                    "byte_view_to_array is missing type binding context".to_string()
-                })?,
-                state,
-                &view,
-                host,
-                "byte_view_to_array",
-            )?))
-        }
-        RuntimeIntrinsic::MemoryByteEditViewLen => {
-            let handle = expect_byte_edit_view(
-                expect_single_arg(args, "byte_edit_view_len")?,
-                "byte_edit_view_len",
-            )?;
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "byte_edit_view_len on borrowed ByteEditView requires runtime call context"
-                    .to_string()
-            })?;
-            let _ = runtime_byte_edit_view_values(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "byte_edit_view_len is missing current package context".to_string()
-                })?,
-                current_module_id.ok_or_else(|| {
-                    "byte_edit_view_len is missing current module context".to_string()
-                })?,
-                aliases.ok_or_else(|| "byte_edit_view_len is missing alias context".to_string())?,
-                type_bindings.ok_or_else(|| {
-                    "byte_edit_view_len is missing type binding context".to_string()
-                })?,
-                state,
-                &view,
-                host,
-                "byte_edit_view_len",
-            )?;
-            Ok(RuntimeValue::Int(view.len as i64))
-        }
-        RuntimeIntrinsic::MemoryByteEditViewAt => {
-            if args.len() != 2 {
-                return Err("byte_edit_view_at expects two arguments".to_string());
-            }
-            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_at")?;
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "byte_edit_view_at index")?,
-                view.len,
-                "byte_edit_view_at",
-            )?;
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "byte_edit_view_at on borrowed ByteEditView requires runtime call context"
-                    .to_string()
-            })?;
-            Ok(RuntimeValue::Int(i64::from(
-                runtime_byte_edit_view_values(
-                    scopes,
-                    plan,
-                    current_package_id.ok_or_else(|| {
-                        "byte_edit_view_at is missing current package context".to_string()
-                    })?,
-                    current_module_id.ok_or_else(|| {
-                        "byte_edit_view_at is missing current module context".to_string()
-                    })?,
-                    aliases
-                        .ok_or_else(|| "byte_edit_view_at is missing alias context".to_string())?,
-                    type_bindings.ok_or_else(|| {
-                        "byte_edit_view_at is missing type binding context".to_string()
-                    })?,
-                    state,
-                    &view,
-                    host,
-                    "byte_edit_view_at",
-                )?[index],
-            )))
-        }
-        RuntimeIntrinsic::MemoryByteEditViewSet => {
-            if args.len() != 3 {
-                return Err("byte_edit_view_set expects three arguments".to_string());
-            }
-            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_set")?;
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "byte_edit_view_set index")?,
-                view.len,
-                "byte_edit_view_set",
-            )?;
-            let byte = expect_int(args[2].clone(), "byte_edit_view_set value")?;
-            if !(0..=255).contains(&byte) {
-                return Err(format!(
-                    "byte_edit_view_set value `{byte}` is out of range `0..=255`"
-                ));
-            }
-            match &view.backing {
-                RuntimeByteViewBacking::Buffer(buffer) => {
-                    let values = &mut state
-                        .byte_view_buffers
-                        .get_mut(buffer)
-                        .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
-                        .values;
-                    let absolute = view.start + index;
-                    if absolute >= values.len() {
-                        return Err(format!(
-                            "byte_edit_view_set index `{index}` is out of bounds for length `{}`",
-                            view.len
-                        ));
-                    }
-                    values[absolute] = byte as u8;
-                }
-                RuntimeByteViewBacking::Reference(reference) => {
-                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                        "byte_edit_view_set on borrowed ByteEditView requires runtime call context"
-                            .to_string()
-                    })?;
-                    let current_package_id = current_package_id.ok_or_else(|| {
-                        "byte_edit_view_set is missing current package context".to_string()
-                    })?;
-                    let current_module_id = current_module_id.ok_or_else(|| {
-                        "byte_edit_view_set is missing current module context".to_string()
-                    })?;
-                    let aliases = aliases
-                        .ok_or_else(|| "byte_edit_view_set is missing alias context".to_string())?;
-                    let type_bindings = type_bindings.ok_or_else(|| {
-                        "byte_edit_view_set is missing type binding context".to_string()
-                    })?;
-                    let mut values = runtime_reference_array_values(
-                        scopes,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        reference,
-                        host,
-                        "byte_edit_view_set",
-                    )?;
-                    let absolute = view.start + index;
-                    if absolute >= values.len() {
-                        return Err(format!(
-                            "byte_edit_view_set index `{index}` is out of bounds for length `{}`",
-                            view.len
-                        ));
-                    }
-                    values[absolute] = RuntimeValue::Int(byte);
-                    write_runtime_reference(
-                        scopes,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        reference,
-                        RuntimeValue::Array(values),
-                        host,
-                    )?;
-                }
-            }
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MemoryByteEditViewSubviewRead => {
-            if args.len() != 3 {
-                return Err("byte_edit_view_subview_read expects three arguments".to_string());
-            }
-            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_subview_read")?;
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let start = expect_int(args[1].clone(), "byte_edit_view_subview_read start")?;
-            let end = expect_int(args[2].clone(), "byte_edit_view_subview_read end")?;
-            let (start, end) =
-                runtime_view_bounds(start, end, view.len, "byte_edit_view_subview_read")?;
-            let next = match view.backing {
-                RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
-                    state,
-                    buffer,
-                    view.start + start,
-                    end - start,
-                ),
-                RuntimeByteViewBacking::Reference(reference) => {
-                    insert_runtime_byte_view_from_reference(
-                        state,
-                        reference,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
-        }
-        RuntimeIntrinsic::MemoryByteEditViewSubviewEdit => {
-            if args.len() != 3 {
-                return Err("byte_edit_view_subview_edit expects three arguments".to_string());
-            }
-            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_subview_edit")?;
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let start = expect_int(args[1].clone(), "byte_edit_view_subview_edit start")?;
-            let end = expect_int(args[2].clone(), "byte_edit_view_subview_edit end")?;
-            let (start, end) =
-                runtime_view_bounds(start, end, view.len, "byte_edit_view_subview_edit")?;
-            runtime_reject_live_reference_or_opaque_conflict(
-                scopes.as_ref().map(|scopes| scopes.as_slice()),
-                Some(args.as_slice()),
-                state,
-                |candidate| match &view.backing {
-                    RuntimeByteViewBacking::Buffer(_) => false,
-                    RuntimeByteViewBacking::Reference(reference) => {
-                        candidate.target == reference.target
-                    }
-                },
-                |opaque, state| match &view.backing {
-                    RuntimeByteViewBacking::Buffer(buffer) => {
-                        runtime_opaque_matches_byte_buffer(opaque, state, *buffer)
-                    }
-                    RuntimeByteViewBacking::Reference(reference) => {
-                        runtime_opaque_matches_reference_predicate(
-                            opaque,
-                            state,
-                            &|candidate| candidate.target == reference.target,
-                        )
-                    }
-                },
-                None,
-                Some(RuntimeOpaqueValue::ByteEditView(handle)),
-                |_| false,
-                "byte_edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
-            )?;
-            let next = match view.backing {
-                RuntimeByteViewBacking::Buffer(buffer) => {
-                    insert_runtime_byte_edit_view_from_buffer(
-                        state,
-                        buffer,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-                RuntimeByteViewBacking::Reference(reference) => {
-                    insert_runtime_byte_edit_view_from_reference(
-                        state,
-                        reference,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(next)))
-        }
-        RuntimeIntrinsic::MemoryByteEditViewToArray => {
-            let handle = expect_byte_edit_view(
-                expect_single_arg(args, "byte_edit_view_to_array")?,
-                "byte_edit_view_to_array",
-            )?;
-            let view = state
-                .byte_edit_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
-                .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "byte_edit_view_to_array on borrowed ByteEditView requires runtime call context"
-                    .to_string()
-            })?;
-            Ok(bytes_to_runtime_array(runtime_byte_edit_view_values(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "byte_edit_view_to_array is missing current package context".to_string()
-                })?,
-                current_module_id.ok_or_else(|| {
-                    "byte_edit_view_to_array is missing current module context".to_string()
-                })?,
-                aliases.ok_or_else(|| {
-                    "byte_edit_view_to_array is missing alias context".to_string()
-                })?,
-                type_bindings.ok_or_else(|| {
-                    "byte_edit_view_to_array is missing type binding context".to_string()
-                })?,
-                state,
-                &view,
-                host,
-                "byte_edit_view_to_array",
-            )?))
-        }
-        RuntimeIntrinsic::MemoryStrViewLenBytes => {
-            let handle = expect_str_view(
-                expect_single_arg(args, "str_view_len_bytes")?,
-                "str_view_len_bytes",
-            )?;
-            let view = state
-                .str_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
-                .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "str_view_len_bytes on borrowed StrView requires runtime call context".to_string()
-            })?;
-            let _ = runtime_str_view_text(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "str_view_len_bytes is missing current package context".to_string()
-                })?,
-                current_module_id.ok_or_else(|| {
-                    "str_view_len_bytes is missing current module context".to_string()
-                })?,
-                aliases.ok_or_else(|| "str_view_len_bytes is missing alias context".to_string())?,
-                type_bindings.ok_or_else(|| {
-                    "str_view_len_bytes is missing type binding context".to_string()
-                })?,
-                state,
-                &view,
-                host,
-                "str_view_len_bytes",
-            )?;
-            Ok(RuntimeValue::Int(view.len as i64))
-        }
-        RuntimeIntrinsic::MemoryStrViewByteAt => {
-            if args.len() != 2 {
-                return Err("str_view_byte_at expects two arguments".to_string());
-            }
-            let handle = expect_str_view(args[0].clone(), "str_view_byte_at")?;
-            let view = state
-                .str_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
-                .clone();
-            let index = runtime_index_to_usize(
-                expect_int(args[1].clone(), "str_view_byte_at index")?,
-                view.len,
-                "str_view_byte_at",
-            )?;
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "str_view_byte_at on borrowed StrView requires runtime call context".to_string()
-            })?;
-            Ok(RuntimeValue::Int(i64::from(
-                runtime_str_view_text(
-                    scopes,
-                    plan,
-                    current_package_id.ok_or_else(|| {
-                        "str_view_byte_at is missing current package context".to_string()
-                    })?,
-                    current_module_id.ok_or_else(|| {
-                        "str_view_byte_at is missing current module context".to_string()
-                    })?,
-                    aliases
-                        .ok_or_else(|| "str_view_byte_at is missing alias context".to_string())?,
-                    type_bindings.ok_or_else(|| {
-                        "str_view_byte_at is missing type binding context".to_string()
-                    })?,
-                    state,
-                    &view,
-                    host,
-                    "str_view_byte_at",
-                )?
-                .as_bytes()[index],
-            )))
-        }
-        RuntimeIntrinsic::MemoryStrViewSubview => {
-            if args.len() != 3 {
-                return Err("str_view_subview expects three arguments".to_string());
-            }
-            let handle = expect_str_view(args[0].clone(), "str_view_subview")?;
-            let view = state
-                .str_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
-                .clone();
-            let start = expect_int(args[1].clone(), "str_view_subview start")?;
-            let end = expect_int(args[2].clone(), "str_view_subview end")?;
-            let (start, end) = runtime_view_bounds(start, end, view.len, "str_view_subview")?;
-            let next = match view.backing {
-                RuntimeStrViewBacking::Buffer(buffer) => insert_runtime_str_view_from_buffer(
-                    state,
-                    buffer,
-                    view.start + start,
-                    end - start,
-                ),
-                RuntimeStrViewBacking::Reference(reference) => {
-                    insert_runtime_str_view_from_reference(
-                        state,
-                        reference,
-                        view.start + start,
-                        end - start,
-                    )
-                }
-            };
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(next)))
-        }
-        RuntimeIntrinsic::MemoryStrViewToStr => {
-            let handle = expect_str_view(
-                expect_single_arg(args, "str_view_to_str")?,
-                "str_view_to_str",
-            )?;
-            let view = state
-                .str_views
-                .get(&handle)
-                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
-                .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "str_view_to_str on borrowed StrView requires runtime call context".to_string()
-            })?;
-            Ok(RuntimeValue::Str(runtime_str_view_text(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "str_view_to_str is missing current package context".to_string()
-                })?,
-                current_module_id.ok_or_else(|| {
-                    "str_view_to_str is missing current module context".to_string()
-                })?,
-                aliases.ok_or_else(|| "str_view_to_str is missing alias context".to_string())?,
-                type_bindings
-                    .ok_or_else(|| "str_view_to_str is missing type binding context".to_string())?,
-                state,
-                &view,
-                host,
-                "str_view_to_str",
-            )?))
-        }
-        RuntimeIntrinsic::AudioDefaultOutputTry => {
-            if !args.is_empty() {
-                return Err("audio_default_output expects zero arguments".to_string());
-            }
-            Ok(match host.audio_default_output() {
-                Ok(handle) => ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::AudioDevice(
-                    handle,
-                ))),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::AudioOutputClose => {
-            let device = expect_audio_device(
-                expect_single_arg(args, "audio_output_close")?,
-                "audio_output_close",
-            )?;
-            Ok(match host.audio_output_close(device) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::AudioOutputSampleRateHz => {
-            let device = expect_audio_device(
-                expect_single_arg(args, "audio_output_sample_rate_hz")?,
-                "audio_output_sample_rate_hz",
-            )?;
-            Ok(RuntimeValue::Int(host.audio_output_sample_rate_hz(device)?))
-        }
-        RuntimeIntrinsic::AudioOutputChannels => {
-            let device = expect_audio_device(
-                expect_single_arg(args, "audio_output_channels")?,
-                "audio_output_channels",
-            )?;
-            Ok(RuntimeValue::Int(host.audio_output_channels(device)?))
-        }
-        RuntimeIntrinsic::AudioBufferLoadWavTry => {
-            let path = expect_str(
-                expect_single_arg(args, "audio_buffer_load_wav")?,
-                "audio_buffer_load_wav",
-            )?;
-            Ok(match host.audio_buffer_load_wav(&path) {
-                Ok(handle) => ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::AudioBuffer(
-                    handle,
-                ))),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::AudioBufferFrames => {
-            let buffer = expect_audio_buffer(
-                expect_single_arg(args, "audio_buffer_frames")?,
-                "audio_buffer_frames",
-            )?;
-            Ok(RuntimeValue::Int(host.audio_buffer_frames(buffer)?))
-        }
-        RuntimeIntrinsic::AudioBufferChannels => {
-            let buffer = expect_audio_buffer(
-                expect_single_arg(args, "audio_buffer_channels")?,
-                "audio_buffer_channels",
-            )?;
-            Ok(RuntimeValue::Int(host.audio_buffer_channels(buffer)?))
-        }
-        RuntimeIntrinsic::AudioBufferSampleRateHz => {
-            let buffer = expect_audio_buffer(
-                expect_single_arg(args, "audio_buffer_sample_rate_hz")?,
-                "audio_buffer_sample_rate_hz",
-            )?;
-            Ok(RuntimeValue::Int(host.audio_buffer_sample_rate_hz(buffer)?))
-        }
-        RuntimeIntrinsic::AudioPlayBufferTry => {
-            if args.len() != 2 {
-                return Err("audio_play_buffer expects two arguments".to_string());
-            }
-            Ok(
-                match host.audio_play_buffer(
-                    expect_audio_device(args[0].clone(), "audio_play_buffer")?,
-                    expect_audio_buffer(args[1].clone(), "audio_play_buffer")?,
-                ) {
-                    Ok(handle) => ok_variant(RuntimeValue::Opaque(
-                        RuntimeOpaqueValue::AudioPlayback(handle),
-                    )),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::AudioOutputSetGainMilli => {
-            if args.len() != 2 {
-                return Err("audio_output_set_gain_milli expects two arguments".to_string());
-            }
-            host.audio_output_set_gain_milli(
-                expect_audio_device(args[0].clone(), "audio_output_set_gain_milli")?,
-                expect_int(args[1].clone(), "audio_output_set_gain_milli")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::AudioPlaybackStop => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_stop")?,
-                "audio_playback_stop",
-            )?;
-            Ok(match host.audio_playback_stop(playback) {
-                Ok(()) => ok_variant(RuntimeValue::Unit),
-                Err(err) => err_variant(err),
-            })
-        }
-        RuntimeIntrinsic::AudioPlaybackPause => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_pause")?,
-                "audio_playback_pause",
-            )?;
-            host.audio_playback_pause(playback)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::AudioPlaybackResume => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_resume")?,
-                "audio_playback_resume",
-            )?;
-            host.audio_playback_resume(playback)?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::AudioPlaybackPlaying => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_playing")?,
-                "audio_playback_playing",
-            )?;
-            Ok(RuntimeValue::Bool(host.audio_playback_playing(playback)?))
-        }
-        RuntimeIntrinsic::AudioPlaybackPaused => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_paused")?,
-                "audio_playback_paused",
-            )?;
-            Ok(RuntimeValue::Bool(host.audio_playback_paused(playback)?))
-        }
-        RuntimeIntrinsic::AudioPlaybackFinished => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_finished")?,
-                "audio_playback_finished",
-            )?;
-            Ok(RuntimeValue::Bool(host.audio_playback_finished(playback)?))
-        }
-        RuntimeIntrinsic::AudioPlaybackSetGainMilli => {
-            if args.len() != 2 {
-                return Err("audio_playback_set_gain_milli expects two arguments".to_string());
-            }
-            host.audio_playback_set_gain_milli(
-                expect_audio_playback(args[0].clone(), "audio_playback_set_gain_milli")?,
-                expect_int(args[1].clone(), "audio_playback_set_gain_milli")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::AudioPlaybackSetLooping => {
-            if args.len() != 2 {
-                return Err("audio_playback_set_looping expects two arguments".to_string());
-            }
-            host.audio_playback_set_looping(
-                expect_audio_playback(args[0].clone(), "audio_playback_set_looping")?,
-                expect_bool(args[1].clone(), "audio_playback_set_looping")?,
-            )?;
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::AudioPlaybackLooping => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_looping")?,
-                "audio_playback_looping",
-            )?;
-            Ok(RuntimeValue::Bool(host.audio_playback_looping(playback)?))
-        }
-        RuntimeIntrinsic::AudioPlaybackPositionFrames => {
-            let playback = expect_audio_playback(
-                expect_single_arg(args, "audio_playback_position_frames")?,
-                "audio_playback_position_frames",
-            )?;
-            Ok(RuntimeValue::Int(
-                host.audio_playback_position_frames(playback)?,
-            ))
-        }
-        RuntimeIntrinsic::ProcessExecStatusTry => {
-            if args.len() != 2 {
-                return Err("process_exec_status expects two arguments".to_string());
-            }
-            Ok(
-                match host.process_exec_status(
-                    &expect_str(args[0].clone(), "process_exec_status")?,
-                    &expect_string_list(args[1].clone(), "process_exec_status")?,
-                ) {
-                    Ok(status) => ok_variant(RuntimeValue::Int(status)),
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::ProcessExecCaptureTry => {
-            if args.len() != 2 {
-                return Err("process_exec_capture expects two arguments".to_string());
-            }
-            Ok(
-                match host.process_exec_capture(
-                    &expect_str(args[0].clone(), "process_exec_capture")?,
-                    &expect_string_list(args[1].clone(), "process_exec_capture")?,
-                ) {
-                    Ok((status, stdout, stderr, stdout_utf8, stderr_utf8)) => {
-                        ok_variant(make_pair(
-                            RuntimeValue::Int(status),
-                            make_pair(
-                                bytes_to_runtime_array(stdout),
-                                make_pair(
-                                    bytes_to_runtime_array(stderr),
-                                    make_pair(
-                                        RuntimeValue::Bool(stdout_utf8),
-                                        RuntimeValue::Bool(stderr_utf8),
-                                    ),
-                                ),
-                            ),
-                        ))
-                    }
-                    Err(err) => err_variant(err),
-                },
-            )
-        }
-        RuntimeIntrinsic::TextLenBytes => {
-            let text = expect_str(expect_single_arg(args, "text_len_bytes")?, "text_len_bytes")?;
-            Ok(RuntimeValue::Int(host.text_len_bytes(&text)?))
-        }
-        RuntimeIntrinsic::TextByteAt => {
-            if args.len() != 2 {
-                return Err("text_byte_at expects two arguments".to_string());
-            }
-            let text = expect_str(args[0].clone(), "text_byte_at")?;
-            let index = expect_int(args[1].clone(), "text_byte_at")?;
-            if index < 0 {
-                return Err("text_byte_at index must be non-negative".to_string());
-            }
-            Ok(RuntimeValue::Int(host.text_byte_at(&text, index as usize)?))
-        }
-        RuntimeIntrinsic::TextSliceBytes => {
-            if args.len() != 3 {
-                return Err("text_slice_bytes expects three arguments".to_string());
-            }
-            let text = expect_str(args[0].clone(), "text_slice_bytes")?;
-            let start = expect_int(args[1].clone(), "text_slice_bytes")?;
-            let end = expect_int(args[2].clone(), "text_slice_bytes")?;
-            if start < 0 || end < 0 {
-                return Err("text_slice_bytes bounds must be non-negative".to_string());
-            }
-            if end < start {
-                return Err(
-                    "text_slice_bytes end must be greater than or equal to start".to_string(),
-                );
-            }
-            Ok(RuntimeValue::Str(host.text_slice_bytes(
-                &text,
-                start as usize,
-                end as usize,
-            )?))
-        }
-        RuntimeIntrinsic::TextStartsWith => {
-            if args.len() != 2 {
-                return Err("text_starts_with expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.text_starts_with(
-                &expect_str(args[0].clone(), "text_starts_with")?,
-                &expect_str(args[1].clone(), "text_starts_with")?,
-            )?))
-        }
-        RuntimeIntrinsic::TextEndsWith => {
-            if args.len() != 2 {
-                return Err("text_ends_with expects two arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(host.text_ends_with(
-                &expect_str(args[0].clone(), "text_ends_with")?,
-                &expect_str(args[1].clone(), "text_ends_with")?,
-            )?))
-        }
-        RuntimeIntrinsic::TextFind => {
-            if args.len() != 3 {
-                return Err("text_find expects three arguments".to_string());
-            }
-            let text = expect_str(args[0].clone(), "text_find")?;
-            let start = expect_int(args[1].clone(), "text_find")?;
-            let needle = expect_str(args[2].clone(), "text_find")?;
-            Ok(RuntimeValue::Int(runtime_text_find(
-                host, &text, start, &needle,
-            )?))
-        }
-        RuntimeIntrinsic::TextContains => {
-            if args.len() != 2 {
-                return Err("text_contains expects two arguments".to_string());
-            }
-            let text = expect_str(args[0].clone(), "text_contains")?;
-            let needle = expect_str(args[1].clone(), "text_contains")?;
-            Ok(RuntimeValue::Bool(
-                runtime_text_find(host, &text, 0, &needle)? >= 0,
-            ))
-        }
-        RuntimeIntrinsic::TextTrimStart => {
-            let text = expect_str(
-                expect_single_arg(args, "text_trim_start")?,
-                "text_trim_start",
-            )?;
-            Ok(RuntimeValue::Str(runtime_text_trim_start(host, &text)?))
-        }
-        RuntimeIntrinsic::TextTrimEnd => {
-            let text = expect_str(expect_single_arg(args, "text_trim_end")?, "text_trim_end")?;
-            Ok(RuntimeValue::Str(runtime_text_trim_end(host, &text)?))
-        }
-        RuntimeIntrinsic::TextTrim => {
-            let text = expect_str(expect_single_arg(args, "text_trim")?, "text_trim")?;
-            Ok(RuntimeValue::Str(runtime_text_trim(host, &text)?))
-        }
-        RuntimeIntrinsic::TextSplit => {
-            if args.len() != 2 {
-                return Err("text_split expects two arguments".to_string());
-            }
-            let text = expect_str(args[0].clone(), "text_split")?;
-            let delim = expect_str(args[1].clone(), "text_split")?;
-            Ok(RuntimeValue::List(
-                runtime_text_split(host, &text, &delim)?
-                    .into_iter()
-                    .map(RuntimeValue::Str)
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::TextJoin => {
-            if args.len() != 2 {
-                return Err("text_join expects two arguments".to_string());
-            }
-            let parts = expect_string_list(args[0].clone(), "text_join")?;
-            let delim = expect_str(args[1].clone(), "text_join")?;
-            Ok(RuntimeValue::Str(runtime_text_join(parts, &delim)))
-        }
-        RuntimeIntrinsic::TextRepeat => {
-            if args.len() != 2 {
-                return Err("text_repeat expects two arguments".to_string());
-            }
-            let text = expect_str(args[0].clone(), "text_repeat")?;
-            let count = expect_int(args[1].clone(), "text_repeat")?;
-            Ok(RuntimeValue::Str(runtime_text_repeat(&text, count)))
-        }
-        RuntimeIntrinsic::TextSplitLines => {
-            let text = expect_str(
-                expect_single_arg(args, "text_split_lines")?,
-                "text_split_lines",
-            )?;
-            Ok(RuntimeValue::List(
-                host.text_split_lines(&text)?
-                    .into_iter()
-                    .map(RuntimeValue::Str)
-                    .collect(),
-            ))
-        }
-        RuntimeIntrinsic::TextFromInt => {
-            let value = expect_int(expect_single_arg(args, "text_from_int")?, "text_from_int")?;
-            Ok(RuntimeValue::Str(host.text_from_int(value)?))
-        }
-        RuntimeIntrinsic::TextToIntTry => {
-            let text = expect_str(expect_single_arg(args, "text_to_int")?, "text_to_int")?;
-            Ok(match runtime_text_to_int(host, &text)? {
-                Ok(value) => ok_variant(RuntimeValue::Int(value)),
-                Err(message) => err_variant(message),
-            })
-        }
-        RuntimeIntrinsic::BytesFromStrUtf8 => {
-            let text = expect_str(
-                expect_single_arg(args, "bytes_from_str_utf8")?,
-                "bytes_from_str_utf8",
-            )?;
-            Ok(bytes_to_runtime_array(host.bytes_from_str_utf8(&text)?))
-        }
-        RuntimeIntrinsic::BytesToStrUtf8 => {
-            let bytes = expect_byte_array(
-                expect_single_arg(args, "bytes_to_str_utf8")?,
-                "bytes_to_str_utf8",
-            )?;
-            Ok(RuntimeValue::Str(host.bytes_to_str_utf8(&bytes)?))
-        }
-        RuntimeIntrinsic::BytesLen => {
-            let bytes = expect_byte_array(expect_single_arg(args, "bytes_len")?, "bytes_len")?;
-            Ok(RuntimeValue::Int(i64::try_from(bytes.len()).map_err(
-                |_| "bytes length does not fit in i64".to_string(),
-            )?))
-        }
-        RuntimeIntrinsic::BytesAt => {
-            if args.len() != 2 {
-                return Err("bytes_at expects two arguments".to_string());
-            }
-            let bytes = expect_byte_array(args[0].clone(), "bytes_at")?;
-            let index = expect_int(args[1].clone(), "bytes_at")?;
-            if index < 0 {
-                return Err("bytes_at index must be non-negative".to_string());
-            }
-            Ok(RuntimeValue::Int(i64::from(
-                *bytes
-                    .get(index as usize)
-                    .ok_or_else(|| format!("bytes_at index `{index}` is out of bounds"))?,
-            )))
-        }
-        RuntimeIntrinsic::BytesSlice => {
-            if args.len() != 3 {
-                return Err("bytes_slice expects three arguments".to_string());
-            }
-            let bytes = expect_byte_array(args[0].clone(), "bytes_slice")?;
-            let start = expect_int(args[1].clone(), "bytes_slice")?;
-            let end = expect_int(args[2].clone(), "bytes_slice")?;
-            if start < 0 || end < 0 {
-                return Err("bytes_slice bounds must be non-negative".to_string());
-            }
-            if end < start {
-                return Err("bytes_slice end must be greater than or equal to start".to_string());
-            }
-            let slice = bytes
-                .get(start as usize..end as usize)
-                .ok_or_else(|| format!("bytes_slice `{start}..{end}` is out of bounds"))?;
-            Ok(bytes_to_runtime_array(slice.iter().copied()))
-        }
-        RuntimeIntrinsic::BytesSha256Hex => {
-            let bytes = expect_byte_array(
-                expect_single_arg(args, "bytes_sha256_hex")?,
-                "bytes_sha256_hex",
-            )?;
-            Ok(RuntimeValue::Str(host.bytes_sha256_hex(&bytes)?))
-        }
-        RuntimeIntrinsic::OptionIsSome => {
-            let value = expect_single_arg(args, "option_is_some")?;
-            match value {
-                RuntimeValue::Variant { name, payload } => {
-                    if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
-                        Ok(RuntimeValue::Bool(true))
-                    } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
-                        Ok(RuntimeValue::Bool(false))
-                    } else {
-                        Err("option_is_some expects Option".to_string())
-                    }
-                }
-                _ => Err("option_is_some expects Option".to_string()),
-            }
-        }
-        RuntimeIntrinsic::OptionIsNone => {
-            let value = expect_single_arg(args, "option_is_none")?;
-            match value {
-                RuntimeValue::Variant { name, payload } => {
-                    if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
-                        Ok(RuntimeValue::Bool(false))
-                    } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
-                        Ok(RuntimeValue::Bool(true))
-                    } else {
-                        Err("option_is_none expects Option".to_string())
-                    }
-                }
-                _ => Err("option_is_none expects Option".to_string()),
-            }
-        }
-        RuntimeIntrinsic::OptionUnwrapOr => {
-            if args.len() != 2 {
-                return Err("option_unwrap_or expects two arguments".to_string());
-            }
-            let fallback = args[1].clone();
-            match args[0].clone() {
-                RuntimeValue::Variant { name, mut payload } => {
-                    if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
-                        Ok(payload.remove(0))
-                    } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
-                        Ok(fallback)
-                    } else {
-                        Err("option_unwrap_or expects Option".to_string())
-                    }
-                }
-                _ => Err("option_unwrap_or expects Option".to_string()),
-            }
-        }
-        RuntimeIntrinsic::ResultOk => match args.len() {
-            0 => Ok(ok_variant(RuntimeValue::Unit)),
-            1 => Ok(ok_variant(
-                args.into_iter().next().unwrap_or(RuntimeValue::Unit),
-            )),
-            _ => Err("Result.Ok expects zero or one argument".to_string()),
-        },
-        RuntimeIntrinsic::ResultErr => {
-            let value = expect_str(expect_single_arg(args, "Result.Err")?, "Result.Err")?;
-            Ok(err_variant(value))
-        }
-        RuntimeIntrinsic::ResultIsOk => {
-            let value = expect_single_arg(args, "result_is_ok")?;
-            match value {
-                RuntimeValue::Variant { name, payload } if payload.len() == 1 => {
-                    if variant_name_matches(&name, "Result.Ok") {
-                        Ok(RuntimeValue::Bool(true))
-                    } else if variant_name_matches(&name, "Result.Err") {
-                        Ok(RuntimeValue::Bool(false))
-                    } else {
-                        Err("result_is_ok expects Result".to_string())
-                    }
-                }
-                _ => Err("result_is_ok expects Result".to_string()),
-            }
-        }
-        RuntimeIntrinsic::ResultIsErr => {
-            let value = expect_single_arg(args, "result_is_err")?;
-            match value {
-                RuntimeValue::Variant { name, payload } if payload.len() == 1 => {
-                    if variant_name_matches(&name, "Result.Ok") {
-                        Ok(RuntimeValue::Bool(false))
-                    } else if variant_name_matches(&name, "Result.Err") {
-                        Ok(RuntimeValue::Bool(true))
-                    } else {
-                        Err("result_is_err expects Result".to_string())
-                    }
-                }
-                _ => Err("result_is_err expects Result".to_string()),
-            }
-        }
-        RuntimeIntrinsic::ResultUnwrapOr => {
-            if args.len() != 2 {
-                return Err("result_unwrap_or expects two arguments".to_string());
-            }
-            let fallback = args[1].clone();
-            match args[0].clone() {
-                RuntimeValue::Variant { name, mut payload } if payload.len() == 1 => {
-                    if variant_name_matches(&name, "Result.Ok") {
-                        Ok(payload.remove(0))
-                    } else if variant_name_matches(&name, "Result.Err") {
-                        Ok(fallback)
-                    } else {
-                        Err("result_unwrap_or expects Result".to_string())
-                    }
-                }
-                _ => Err("result_unwrap_or expects Result".to_string()),
-            }
-        }
-        RuntimeIntrinsic::ListNew => {
-            if !args.is_empty() {
-                return Err("list_new expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::List(Vec::new()))
-        }
-        RuntimeIntrinsic::ListLen => {
-            let value = expect_single_arg(args, "list_len")?;
-            let RuntimeValue::List(values) = value else {
-                return Err("list_len expects List".to_string());
-            };
-            Ok(RuntimeValue::Int(i64::try_from(values.len()).map_err(
-                |_| "list length does not fit in i64".to_string(),
-            )?))
-        }
-        RuntimeIntrinsic::ListIsEmpty => {
-            let value = expect_single_arg(args, "list_is_empty")?;
-            let RuntimeValue::List(values) = value else {
-                return Err("list_is_empty expects List".to_string());
-            };
-            Ok(RuntimeValue::Bool(values.is_empty()))
-        }
-        RuntimeIntrinsic::ListPush => {
-            if args.len() != 2 {
-                return Err("list_push expects two arguments".to_string());
-            }
-            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
-                let scopes = scopes
-                    .as_deref_mut()
-                    .ok_or_else(|| "list_push on refs requires runtime scopes".to_string())?;
-                let current_package_id = current_package_id
-                    .ok_or_else(|| "list_push on refs requires package context".to_string())?;
-                let current_module_id = current_module_id
-                    .ok_or_else(|| "list_push on refs requires module context".to_string())?;
-                let empty_aliases = BTreeMap::new();
-                let aliases = aliases.unwrap_or(&empty_aliases);
-                let empty_type_bindings = BTreeMap::new();
-                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
-                let RuntimeValue::List(mut values) = read_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    host,
-                )?
-                else {
-                    return Err("list_push expects List".to_string());
-                };
-                values.push(args[1].clone());
-                write_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    RuntimeValue::List(values),
-                    host,
-                )?;
-                return Ok(RuntimeValue::Unit);
-            }
-            let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
-                return Err("list_push expects List".to_string());
-            };
-            values.push(args[1].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::ListPop => {
-            if args.len() != 1 {
-                return Err("list_pop expects one argument".to_string());
-            }
-            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
-                let scopes = scopes
-                    .as_deref_mut()
-                    .ok_or_else(|| "list_pop on refs requires runtime scopes".to_string())?;
-                let current_package_id = current_package_id
-                    .ok_or_else(|| "list_pop on refs requires package context".to_string())?;
-                let current_module_id = current_module_id
-                    .ok_or_else(|| "list_pop on refs requires module context".to_string())?;
-                let empty_aliases = BTreeMap::new();
-                let aliases = aliases.unwrap_or(&empty_aliases);
-                let empty_type_bindings = BTreeMap::new();
-                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
-                let RuntimeValue::List(mut values) = read_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    host,
-                )?
-                else {
-                    return Err("list_pop expects List".to_string());
-                };
-                let value = values
-                    .pop()
-                    .ok_or_else(|| "list_pop called on empty list".to_string())?;
-                write_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    RuntimeValue::List(values),
-                    host,
-                )?;
-                return Ok(value);
-            }
-            let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
-                return Err("list_pop expects List".to_string());
-            };
-            values
-                .pop()
-                .ok_or_else(|| "list_pop called on empty list".to_string())
-        }
-        RuntimeIntrinsic::ListTryPopOr => {
-            if args.len() != 2 {
-                return Err("list_try_pop_or expects two arguments".to_string());
-            }
-            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
-                let scopes = scopes
-                    .ok_or_else(|| "list_try_pop_or on refs requires runtime scopes".to_string())?;
-                let current_package_id = current_package_id.ok_or_else(|| {
-                    "list_try_pop_or on refs requires package context".to_string()
-                })?;
-                let current_module_id = current_module_id
-                    .ok_or_else(|| "list_try_pop_or on refs requires module context".to_string())?;
-                let empty_aliases = BTreeMap::new();
-                let aliases = aliases.unwrap_or(&empty_aliases);
-                let empty_type_bindings = BTreeMap::new();
-                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
-                let RuntimeValue::List(mut values) = read_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    host,
-                )?
-                else {
-                    return Err("list_try_pop_or expects List".to_string());
-                };
-                let result = match values.pop() {
-                    Some(value) => make_pair(RuntimeValue::Bool(true), value),
-                    None => make_pair(RuntimeValue::Bool(false), args[1].clone()),
-                };
-                write_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    RuntimeValue::List(values),
-                    host,
-                )?;
-                return Ok(result);
-            }
-            let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
-                return Err("list_try_pop_or expects List".to_string());
-            };
-            Ok(match values.pop() {
-                Some(value) => make_pair(RuntimeValue::Bool(true), value),
-                None => make_pair(RuntimeValue::Bool(false), args[1].clone()),
-            })
-        }
-        RuntimeIntrinsic::ArrayNew => {
-            if args.len() != 2 {
-                return Err("array_new expects two arguments".to_string());
-            }
-            let len = expect_int(args[0].clone(), "array_new")?;
-            if len < 0 {
-                return Err("array_new length must be non-negative".to_string());
-            }
-            Ok(RuntimeValue::Array(vec![args[1].clone(); len as usize]))
-        }
-        RuntimeIntrinsic::ArrayLen => {
-            let value = expect_single_arg(args, "array_len")?;
-            let RuntimeValue::Array(values) = value else {
-                return Err("array_len expects Array".to_string());
-            };
-            Ok(RuntimeValue::Int(i64::try_from(values.len()).map_err(
-                |_| "array length does not fit in i64".to_string(),
-            )?))
-        }
-        RuntimeIntrinsic::ArrayFromList => {
-            let value = expect_single_arg(args, "array_from_list")?;
-            let RuntimeValue::List(values) = value else {
-                return Err("array_from_list expects List".to_string());
-            };
-            Ok(RuntimeValue::Array(values))
-        }
-        RuntimeIntrinsic::ArrayToList => {
-            let value = expect_single_arg(args, "array_to_list")?;
-            let RuntimeValue::Array(values) = value else {
-                return Err("array_to_list expects Array".to_string());
-            };
-            Ok(RuntimeValue::List(values))
-        }
-        RuntimeIntrinsic::MapNew => {
-            if !args.is_empty() {
-                return Err("map_new expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Map(Vec::new()))
-        }
-        RuntimeIntrinsic::MapLen => {
-            let value = expect_single_arg(args, "map_len")?;
-            let RuntimeValue::Map(entries) = value else {
-                return Err("map_len expects Map".to_string());
-            };
-            Ok(RuntimeValue::Int(i64::try_from(entries.len()).map_err(
-                |_| "map length does not fit in i64".to_string(),
-            )?))
-        }
-        RuntimeIntrinsic::MapHas => {
-            if args.len() != 2 {
-                return Err("map_has expects two arguments".to_string());
-            }
-            let RuntimeValue::Map(entries) = args[0].clone() else {
-                return Err("map_has expects Map".to_string());
-            };
-            Ok(RuntimeValue::Bool(
-                entries.iter().any(|(entry_key, _)| *entry_key == args[1]),
-            ))
-        }
-        RuntimeIntrinsic::MapGet => {
-            if args.len() != 2 {
-                return Err("map_get expects two arguments".to_string());
-            }
-            let RuntimeValue::Map(entries) = args[0].clone() else {
-                return Err("map_get expects Map".to_string());
-            };
-            entries
-                .into_iter()
-                .find_map(|(entry_key, entry_value)| (entry_key == args[1]).then_some(entry_value))
-                .ok_or_else(|| "map_get key was not present".to_string())
-        }
-        RuntimeIntrinsic::MapSet => {
-            if args.len() != 3 {
-                return Err("map_set expects three arguments".to_string());
-            }
-            let Some(RuntimeValue::Map(entries)) = final_args.get_mut(0) else {
-                return Err("map_set expects Map".to_string());
-            };
-            if let Some((_, entry_value)) = entries
-                .iter_mut()
-                .find(|(entry_key, _)| *entry_key == args[1])
-            {
-                *entry_value = args[2].clone();
-            } else {
-                entries.push((args[1].clone(), args[2].clone()));
-            }
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::MapRemove => {
-            if args.len() != 2 {
-                return Err("map_remove expects two arguments".to_string());
-            }
-            let Some(RuntimeValue::Map(entries)) = final_args.get_mut(0) else {
-                return Err("map_remove expects Map".to_string());
-            };
-            let original_len = entries.len();
-            entries.retain(|(entry_key, _)| *entry_key != args[1]);
-            Ok(RuntimeValue::Bool(entries.len() != original_len))
-        }
-        RuntimeIntrinsic::MapTryGetOr => {
-            if args.len() != 3 {
-                return Err("map_try_get_or expects three arguments".to_string());
-            }
-            let RuntimeValue::Map(entries) = args[0].clone() else {
-                return Err("map_try_get_or expects Map".to_string());
-            };
-            Ok(
-                match entries.into_iter().find_map(|(entry_key, entry_value)| {
-                    (entry_key == args[1]).then_some(entry_value)
-                }) {
-                    Some(value) => make_pair(RuntimeValue::Bool(true), value),
-                    None => make_pair(RuntimeValue::Bool(false), args[2].clone()),
-                },
-            )
-        }
-        RuntimeIntrinsic::EcsSetSingleton => {
-            let key = require_runtime_type_key(type_args, "ecs_set_singleton")?;
-            let value = expect_single_arg(args, "ecs_set_singleton")?;
-            ecs_slot_mut(state, &key).insert(0, value);
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EcsHasSingleton => {
-            let key = require_runtime_type_key(type_args, "ecs_has_singleton")?;
-            if !args.is_empty() {
-                return Err("ecs_has_singleton expects zero arguments".to_string());
-            }
-            Ok(RuntimeValue::Bool(ecs_slot(state, &key, 0).is_some()))
-        }
-        RuntimeIntrinsic::EcsGetSingleton => {
-            let key = require_runtime_type_key(type_args, "ecs_get_singleton")?;
-            if !args.is_empty() {
-                return Err("ecs_get_singleton expects zero arguments".to_string());
-            }
-            ecs_slot(state, &key, 0)
-                .cloned()
-                .ok_or_else(|| format!("missing singleton component for `{}`", key.join(", ")))
-        }
-        RuntimeIntrinsic::EcsSpawn => {
-            if !args.is_empty() {
-                return Err("ecs_spawn expects zero arguments".to_string());
-            }
-            let entity = if state.next_entity_id <= 0 {
-                1
-            } else {
-                state.next_entity_id
-            };
-            state.next_entity_id = entity + 1;
-            state.live_entities.insert(entity);
-            Ok(RuntimeValue::Int(entity))
-        }
-        RuntimeIntrinsic::EcsDespawn => {
-            let entity = expect_entity_id(expect_single_arg(args, "ecs_despawn")?, "ecs_despawn")?;
-            if entity == 0 {
-                return Err("ecs_despawn cannot target singleton entity 0".to_string());
-            }
-            if !state.live_entities.remove(&entity) {
-                return Err(format!("ecs_despawn unknown entity `{entity}`"));
-            }
-            for slots in state.component_slots.values_mut() {
-                slots.remove(&entity);
-            }
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EcsSetComponentAt => {
-            let key = require_runtime_type_key(type_args, "ecs_set_component_at")?;
-            if args.len() != 2 {
-                return Err("ecs_set_component_at expects two arguments".to_string());
-            }
-            let entity = expect_entity_id(args[0].clone(), "ecs_set_component_at")?;
-            if !ecs_entity_exists(state, entity) {
-                return Err(format!("ecs_set_component_at unknown entity `{entity}`"));
-            }
-            ecs_slot_mut(state, &key).insert(entity, args[1].clone());
-            Ok(RuntimeValue::Unit)
-        }
-        RuntimeIntrinsic::EcsHasComponentAt => {
-            let key = require_runtime_type_key(type_args, "ecs_has_component_at")?;
-            let entity = expect_entity_id(
-                expect_single_arg(args, "ecs_has_component_at")?,
-                "ecs_has_component_at",
-            )?;
-            if !ecs_entity_exists(state, entity) {
-                return Ok(RuntimeValue::Bool(false));
-            }
-            Ok(RuntimeValue::Bool(ecs_slot(state, &key, entity).is_some()))
-        }
-        RuntimeIntrinsic::EcsGetComponentAt => {
-            let key = require_runtime_type_key(type_args, "ecs_get_component_at")?;
-            let entity = expect_entity_id(
-                expect_single_arg(args, "ecs_get_component_at")?,
-                "ecs_get_component_at",
-            )?;
-            if !ecs_entity_exists(state, entity) {
-                return Err(format!("ecs_get_component_at unknown entity `{entity}`"));
-            }
-            ecs_slot(state, &key, entity).cloned().ok_or_else(|| {
-                format!(
-                    "missing component `{}` at entity `{entity}`",
-                    key.join(", ")
-                )
-            })
-        }
-        RuntimeIntrinsic::EcsRemoveComponentAt => {
-            let key = require_runtime_type_key(type_args, "ecs_remove_component_at")?;
-            let entity = expect_entity_id(
-                expect_single_arg(args, "ecs_remove_component_at")?,
-                "ecs_remove_component_at",
-            )?;
-            if !ecs_entity_exists(state, entity) {
-                return Err(format!("ecs_remove_component_at unknown entity `{entity}`"));
-            }
-            ecs_slot_mut(state, &key).remove(&entity);
-            Ok(RuntimeValue::Unit)
-        }
-    }
 }
 
 fn match_pattern(
@@ -26191,7 +11157,7 @@ fn build_runtime_call_args_from_chain_stage(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<(Vec<String>, Vec<String>, Vec<RuntimeCallArg>)> {
     let callable = resolve_callable_path(&stage.stage, aliases)
         .ok_or_else(|| format!("unsupported runtime chain stage `{}`", stage.text))?;
@@ -26254,7 +11220,7 @@ fn call_uses_linear_mutation_modes(
     }
     let intrinsic = resolve_runtime_intrinsic_path(callable)
         .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
-    Ok(!intrinsic_edit_arg_indices(intrinsic).is_empty())
+    Ok(!edit_arg_indices(intrinsic).is_empty())
 }
 
 fn validate_spawned_call_capabilities(
@@ -26295,7 +11261,7 @@ fn execute_runtime_chain_stage(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let (callable, type_args, call_args) = build_runtime_call_args_from_chain_stage(
         stage,
@@ -26337,7 +11303,7 @@ fn spawn_runtime_chain_stage(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let (callable, type_args, mut call_args) = build_runtime_call_args_from_chain_stage(
         stage,
@@ -26381,7 +11347,7 @@ fn spawn_runtime_chain_stage(
         let intrinsic = resolve_runtime_intrinsic_path(&callable)
             .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
         call_args = bind_call_args_for_intrinsic(&callable, call_args)?;
-        consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
+        consume_take_call_args(scopes, take_arg_indices(intrinsic), &call_args)?;
     }
     let thread_id = match op {
         ParsedUnaryOp::Weave => state.current_thread_id,
@@ -26422,7 +11388,7 @@ fn auto_await_runtime_value(
     value: RuntimeValue,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     match value {
         RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
@@ -26474,7 +11440,7 @@ fn choose_parallel_chain_stage_op(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> ParsedUnaryOp {
     let Ok((callable, _, call_args)) = build_runtime_call_args_from_chain_stage(
         stage,
@@ -26532,7 +11498,7 @@ fn eval_forward_runtime_chain(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let mut current = seed;
     for stage in ordered.iter().skip(1) {
@@ -26563,7 +11529,7 @@ fn eval_async_runtime_chain(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let mut current = auto_await_runtime_value(seed, plan, state, host)?;
     for stage in ordered.iter().skip(1) {
@@ -26595,7 +11561,7 @@ fn eval_broadcast_runtime_chain(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let mut values = Vec::new();
     for stage in ordered.iter().skip(1) {
@@ -26626,7 +11592,7 @@ fn eval_collect_runtime_chain(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let mut current = seed;
     let mut values = Vec::new();
@@ -26659,7 +11625,7 @@ fn eval_parallel_runtime_chain(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let mut spawned = Vec::new();
     for stage in ordered.iter().skip(1) {
@@ -26707,7 +11673,7 @@ fn eval_runtime_chain_expr(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     if steps.is_empty() {
         return Err("runtime chain expression must contain at least one stage"
@@ -26834,7 +11800,7 @@ fn execute_deferred_work(
     pending: RuntimeDeferredWork,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     match pending {
         RuntimeDeferredWork::Call(pending) => {
@@ -26910,7 +11876,7 @@ fn drive_runtime_task(
     handle: RuntimeTaskHandle,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     let pending = {
         let task = state
@@ -26948,7 +11914,7 @@ fn drive_runtime_thread(
     handle: RuntimeThreadHandle,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     let pending = {
         let thread = state
@@ -26986,7 +11952,7 @@ fn drive_runtime_lazy(
     handle: RuntimeLazyHandle,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     let pending = {
         let lazy = state
@@ -27024,7 +11990,7 @@ fn force_runtime_value(
     value: RuntimeValue,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     match value {
         RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(handle)) => {
@@ -27057,7 +12023,7 @@ fn capture_spawned_phrase_call(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     let (callable, type_args, mut call_args, call_routine, call_dynamic_dispatch) =
         match qualifier_kind {
@@ -27240,7 +12206,7 @@ fn capture_spawned_phrase_call(
             plan,
             "spawned runtime intrinsic call",
         )?;
-        consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
+        consume_take_call_args(scopes, take_arg_indices(intrinsic), &call_args)?;
     }
 
     let thread_id = match op {
@@ -27322,7 +12288,7 @@ fn await_runtime_value(
     value: RuntimeValue,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
     match value {
         RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) => {
@@ -27436,7 +12402,7 @@ fn eval_spawn_expr(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     if let ParsedExpr::Phrase {
         subject,
@@ -27530,7 +12496,7 @@ fn eval_headed_modifier_payload(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     payload
         .map(|expr| {
@@ -27582,7 +12548,7 @@ fn build_runtime_memory_spec_materialization(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeMemorySpecMaterialization> {
     let family = memory_family_from_text(&spec.family).map_err(RuntimeEvalSignal::from)?;
     let descriptor = memory_family_descriptor(family);
@@ -28037,7 +13003,7 @@ fn materialize_runtime_memory_spec(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<(RuntimeValue, RuntimeMemoryHandlePolicy)> {
     let materialization = build_runtime_memory_spec_materialization(
         spec,
@@ -28065,7 +13031,7 @@ fn resolve_runtime_memory_phrase_instance(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let Some(path) = runtime_expr_path_name(arena)
         .map(|text| text.split('.').map(ToString::to_string).collect::<Vec<_>>())
@@ -28255,7 +13221,7 @@ fn eval_construct_contribution_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     let value = eval_expr(
         &line.value,
@@ -28368,7 +13334,7 @@ fn eval_record_region_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let target_name = runtime_expr_path_name(&region.target)
         .ok_or_else(|| "record target must be a path-like record reference".to_string())?;
@@ -28436,7 +13402,7 @@ fn eval_array_region_value(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
     let mut values = if let Some(base_expr) = &region.base {
         let base_value = eval_expr(
@@ -28479,3384 +13445,6 @@ fn eval_array_region_value(
         values[line.index] = value;
     }
     Ok(RuntimeValue::Array(values))
-}
-
-fn eval_expr(
-    expr: &ParsedExpr,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<RuntimeValue> {
-    match expr {
-        ParsedExpr::Int(value) => Ok(RuntimeValue::Int(*value)),
-        ParsedExpr::Float { text, kind } => Ok(RuntimeValue::Float {
-            text: text.clone(),
-            kind: *kind,
-        }),
-        ParsedExpr::Bool(value) => Ok(RuntimeValue::Bool(*value)),
-        ParsedExpr::Str(value) => Ok(RuntimeValue::Str(value.clone())),
-        ParsedExpr::Pair { left, right } => Ok(RuntimeValue::Pair(
-            Box::new(eval_expr(
-                left,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?),
-            Box::new(eval_expr(
-                right,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?),
-        )),
-        ParsedExpr::Collection { items } => Ok(RuntimeValue::List(
-            items
-                .iter()
-                .map(|item| {
-                    eval_expr(
-                        item,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )
-                })
-                .collect::<RuntimeEvalResult<Vec<_>>>()?,
-        )),
-        ParsedExpr::Match { subject, arms } => eval_match_expr(
-            subject,
-            arms,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        ),
-        ParsedExpr::ConstructRegion(region) => {
-            let target_name = runtime_expr_path_name(&region.target).ok_or_else(|| {
-                "construct target must be a path-like constructor reference".to_string()
-            })?;
-            let mut fields = BTreeMap::new();
-            let mut payload = Vec::new();
-            for line in &region.lines {
-                if let Some(value) = eval_construct_contribution_value(
-                    line,
-                    region.default_modifier.as_ref(),
-                    "construct",
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )? {
-                    if line.name == "payload" {
-                        payload.push(value);
-                    } else {
-                        fields.insert(line.name.clone(), value);
-                    }
-                }
-            }
-            if !payload.is_empty() && fields.is_empty() {
-                Ok(RuntimeValue::Variant {
-                    name: target_name,
-                    payload,
-                })
-            } else {
-                Ok(RuntimeValue::Record {
-                    name: target_name,
-                    fields,
-                })
-            }
-        }
-        ParsedExpr::RecordRegion(region) => eval_record_region_value(
-            region,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        ),
-        ParsedExpr::ArrayRegion(region) => eval_array_region_value(
-            region,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        ),
-        ParsedExpr::Chain {
-            style,
-            introducer,
-            steps,
-        } => eval_runtime_chain_expr(
-            style,
-            *introducer,
-            steps,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        ),
-        ParsedExpr::Path(segments) => {
-            if segments.len() == 1 && lookup_local(scopes, &segments[0]).is_some() {
-                return force_runtime_value(
-                    read_runtime_local_value(scopes, state, &segments[0])?,
-                    plan,
-                    state,
-                    host,
-                )
-                .map_err(Into::into);
-            }
-            if let Some(value) = try_eval_runtime_const_value_expr(
-                expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                state,
-                host,
-            )? {
-                return Ok(value);
-            }
-            Err(format!("unsupported runtime value path `{}`", segments.join(".")).into())
-        }
-        ParsedExpr::Member { expr, member } => {
-            let full_expr = ParsedExpr::Member {
-                expr: expr.clone(),
-                member: member.clone(),
-            };
-            if let Some(value) = try_eval_runtime_const_value_expr(
-                &full_expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                state,
-                host,
-            )? {
-                return Ok(value);
-            }
-            if let ParsedExpr::Unary {
-                op: ParsedUnaryOp::Deref,
-                expr: capability_expr,
-            } = expr.as_ref()
-            {
-                let token_expr = capability_expr.as_ref().clone();
-                let reference = expect_reference(
-                    eval_expr(
-                        capability_expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    "deref",
-                )?;
-                return match reference.mode {
-                    RuntimeReferenceMode::Take => {
-                        let value = read_runtime_reference(
-                            scopes,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            aliases,
-                            type_bindings,
-                            state,
-                            &reference,
-                            host,
-                        )?;
-                        redeem_take_reference(scopes, &reference)
-                            .map_err(RuntimeEvalSignal::from)?;
-                        reclaim_hold_capability_root_local(scopes, &token_expr)
-                            .map_err(RuntimeEvalSignal::from)?;
-                        Ok(eval_member_value(value, member)?)
-                    }
-                    RuntimeReferenceMode::Read
-                    | RuntimeReferenceMode::Edit
-                    | RuntimeReferenceMode::Hold => read_runtime_reference(
-                        scopes,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        &RuntimeReferenceValue {
-                            mode: reference.mode,
-                            target: runtime_reference_with_member(
-                                &reference.target,
-                                member.clone(),
-                            ),
-                        },
-                        host,
-                    )
-                    .map_err(Into::into),
-                };
-            }
-            let base = eval_expr(
-                expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            Ok(eval_runtime_member_value(base, member)?)
-        }
-        ParsedExpr::Index { expr, index } => Ok(eval_runtime_index_value(
-            eval_expr(
-                expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?,
-            eval_expr(
-                index,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?,
-            scopes,
-            plan,
-            current_package_id,
-            current_module_id,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?),
-        ParsedExpr::Slice {
-            expr,
-            start,
-            end,
-            inclusive_end,
-        } => Ok(eval_runtime_slice_value(
-            eval_expr(
-                expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?,
-            start
-                .as_deref()
-                .map(|expr| {
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )
-                })
-                .transpose()?,
-            end.as_deref()
-                .map(|expr| {
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )
-                })
-                .transpose()?,
-            *inclusive_end,
-            scopes,
-            plan,
-            current_package_id,
-            current_module_id,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?),
-        ParsedExpr::Range {
-            start,
-            end,
-            inclusive_end,
-        } => Ok(RuntimeValue::Range {
-            start: eval_optional_runtime_int_expr(
-                start.as_deref(),
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-                "range start",
-            )?,
-            end: eval_optional_runtime_int_expr(
-                end.as_deref(),
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-                "range end",
-            )?,
-            inclusive_end: *inclusive_end,
-        }),
-        ParsedExpr::Generic { expr, .. } => eval_expr(
-            expr,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        ),
-        ParsedExpr::Await { expr } => Ok(await_runtime_value(
-            eval_expr(
-                expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?,
-            plan,
-            state,
-            host,
-        )?),
-        ParsedExpr::Unary { op, expr } => match op {
-            ParsedUnaryOp::Weave | ParsedUnaryOp::Split => eval_spawn_expr(
-                *op,
-                expr,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            ),
-            ParsedUnaryOp::CapabilityRead
-            | ParsedUnaryOp::CapabilityEdit
-            | ParsedUnaryOp::CapabilityTake
-            | ParsedUnaryOp::CapabilityHold => {
-                let mode = runtime_reference_mode_from_unary(*op)
-                    .ok_or_else(|| format!("unsupported capability op `{op:?}`"))?;
-                if let ParsedExpr::Slice {
-                    expr,
-                    start,
-                    end,
-                    inclusive_end,
-                } = expr.as_ref()
-                {
-                    if !matches!(
-                        mode,
-                        RuntimeReferenceMode::Read | RuntimeReferenceMode::Edit
-                    ) {
-                        return Err(format!(
-                            "runtime capability `{}` does not support slice views",
-                            mode.as_str()
-                        )
-                        .into());
-                    }
-                    return eval_runtime_borrowed_slice_view(
-                        expr,
-                        start.as_deref(),
-                        end.as_deref(),
-                        *inclusive_end,
-                        matches!(mode, RuntimeReferenceMode::Edit),
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )
-                    .map_err(RuntimeEvalSignal::from);
-                }
-                let target = expr_to_assign_target(expr).ok_or_else(|| {
-                    format!(
-                        "runtime capability operand `{:?}` is not a writable place",
-                        expr
-                    )
-                })?;
-                let place = resolve_assign_target_place(scopes, &target)?;
-                if mode.allows_write() && !place.mode.allows_write() {
-                    return Err(format!(
-                        "runtime capability `{}` operand `{:?}` is not mutable",
-                        mode.as_str(),
-                        expr
-                    )
-                    .into());
-                }
-                match mode {
-                    RuntimeReferenceMode::Take => reserve_take_capability_root_local(scopes, expr)
-                        .map_err(RuntimeEvalSignal::from)?,
-                    RuntimeReferenceMode::Hold => reserve_hold_capability_root_local(scopes, expr)
-                        .map_err(RuntimeEvalSignal::from)?,
-                    RuntimeReferenceMode::Read | RuntimeReferenceMode::Edit => {}
-                }
-                Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                    mode,
-                    target: place.target,
-                }))
-            }
-            ParsedUnaryOp::Deref => {
-                let token_expr = expr.as_ref().clone();
-                let reference = expect_reference(
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    "deref",
-                )?;
-                let value = read_runtime_reference(
-                    scopes,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    &reference,
-                    host,
-                )?;
-                if reference.mode == RuntimeReferenceMode::Take {
-                    redeem_take_reference(scopes, &reference).map_err(RuntimeEvalSignal::from)?;
-                    reclaim_hold_capability_root_local(scopes, &token_expr)
-                        .map_err(RuntimeEvalSignal::from)?;
-                }
-                Ok(value)
-            }
-            ParsedUnaryOp::Neg => {
-                let value = force_runtime_value(
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?;
-                match value {
-                    RuntimeValue::Float { text, kind } => Ok(make_runtime_float(
-                        kind,
-                        -parse_runtime_float_text(&text, kind)?,
-                    )),
-                    other => Ok(RuntimeValue::Int(-expect_int(other, "unary -")?)),
-                }
-            }
-            ParsedUnaryOp::Not => Ok(RuntimeValue::Bool(!expect_bool(
-                force_runtime_value(
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?,
-                "not",
-            )?)),
-            ParsedUnaryOp::BitNot => Ok(RuntimeValue::Int(!expect_int(
-                force_runtime_value(
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?,
-                "~",
-            )?)),
-        },
-        ParsedExpr::Binary { left, op, right } => match op {
-            ParsedBinaryOp::Or => {
-                let left = expect_bool(
-                    force_runtime_value(
-                        eval_expr(
-                            left,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?,
-                        plan,
-                        state,
-                        host,
-                    )?,
-                    "or",
-                )?;
-                if left {
-                    Ok(RuntimeValue::Bool(true))
-                } else {
-                    Ok(RuntimeValue::Bool(expect_bool(
-                        force_runtime_value(
-                            eval_expr(
-                                right,
-                                plan,
-                                current_package_id,
-                                current_module_id,
-                                scopes,
-                                aliases,
-                                type_bindings,
-                                state,
-                                host,
-                            )?,
-                            plan,
-                            state,
-                            host,
-                        )?,
-                        "or",
-                    )?))
-                }
-            }
-            ParsedBinaryOp::And => {
-                let left = expect_bool(
-                    force_runtime_value(
-                        eval_expr(
-                            left,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?,
-                        plan,
-                        state,
-                        host,
-                    )?,
-                    "and",
-                )?;
-                if !left {
-                    Ok(RuntimeValue::Bool(false))
-                } else {
-                    Ok(RuntimeValue::Bool(expect_bool(
-                        force_runtime_value(
-                            eval_expr(
-                                right,
-                                plan,
-                                current_package_id,
-                                current_module_id,
-                                scopes,
-                                aliases,
-                                type_bindings,
-                                state,
-                                host,
-                            )?,
-                            plan,
-                            state,
-                            host,
-                        )?,
-                        "and",
-                    )?))
-                }
-            }
-            other => {
-                let left = force_runtime_value(
-                    eval_expr(
-                        left,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?;
-                let right = force_runtime_value(
-                    eval_expr(
-                        right,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?;
-                Ok(apply_binary_op(*other, left, right)?)
-            }
-        },
-        ParsedExpr::Phrase {
-            subject,
-            args,
-            qualifier_kind,
-            qualifier,
-            qualifier_type_args,
-            resolved_callable,
-            resolved_routine,
-            dynamic_dispatch,
-            attached,
-        } => match qualifier_kind {
-            ParsedPhraseQualifierKind::Call => execute_runtime_apply_phrase(
-                subject,
-                args,
-                attached,
-                qualifier_type_args,
-                resolved_callable.as_deref(),
-                resolved_routine.as_deref(),
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-                runtime_async_calls_allowed(state),
-            ),
-            ParsedPhraseQualifierKind::NamedPath => execute_runtime_named_qualifier_call(
-                subject,
-                args,
-                attached,
-                qualifier,
-                qualifier_type_args,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            ),
-            ParsedPhraseQualifierKind::BareMethod => eval_qualifier(
-                subject,
-                args,
-                attached,
-                qualifier,
-                qualifier_type_args,
-                resolved_callable.as_deref(),
-                resolved_routine.as_deref(),
-                dynamic_dispatch.as_ref(),
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            ),
-            ParsedPhraseQualifierKind::Try => eval_try_qualifier(
-                subject,
-                args,
-                attached,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            ),
-            ParsedPhraseQualifierKind::Apply => execute_runtime_apply_phrase(
-                subject,
-                args,
-                attached,
-                &[],
-                resolved_callable.as_deref(),
-                None,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-                runtime_async_calls_allowed(state),
-            ),
-            ParsedPhraseQualifierKind::AwaitApply => {
-                if args.is_empty() && attached.is_empty() {
-                    return Ok(await_runtime_value(
-                        eval_expr(
-                            subject,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?,
-                        plan,
-                        state,
-                        host,
-                    )?);
-                }
-                let value = execute_runtime_apply_phrase(
-                    subject,
-                    args,
-                    attached,
-                    &[],
-                    None,
-                    None,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                    true,
-                )?;
-                match value {
-                    RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
-                    | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
-                        Ok(await_runtime_value(value, plan, state, host)?)
-                    }
-                    other => Ok(other),
-                }
-            }
-            ParsedPhraseQualifierKind::Await => {
-                if !args.is_empty() {
-                    return Err("`:: await` does not accept arguments".to_string().into());
-                }
-                if !attached.is_empty() {
-                    return Err("`:: await` does not support an attached block"
-                        .to_string()
-                        .into());
-                }
-                Ok(await_runtime_value(
-                    eval_expr(
-                        subject,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?)
-            }
-            ParsedPhraseQualifierKind::Weave => {
-                if let Some(spawned) = capture_spawned_phrase_call(
-                    ParsedUnaryOp::Weave,
-                    subject,
-                    args,
-                    attached,
-                    ParsedPhraseQualifierKind::Weave,
-                    qualifier,
-                    qualifier_type_args,
-                    resolved_callable.as_deref(),
-                    resolved_routine.as_deref(),
-                    dynamic_dispatch.as_ref(),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )? {
-                    Ok(spawned)
-                } else {
-                    Err("`:: weave` expects a callable phrase target"
-                        .to_string()
-                        .into())
-                }
-            }
-            ParsedPhraseQualifierKind::Split => {
-                if let Some(spawned) = capture_spawned_phrase_call(
-                    ParsedUnaryOp::Split,
-                    subject,
-                    args,
-                    attached,
-                    ParsedPhraseQualifierKind::Split,
-                    qualifier,
-                    qualifier_type_args,
-                    resolved_callable.as_deref(),
-                    resolved_routine.as_deref(),
-                    dynamic_dispatch.as_ref(),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )? {
-                    Ok(spawned)
-                } else {
-                    Err("`:: split` expects a callable phrase target"
-                        .to_string()
-                        .into())
-                }
-            }
-            ParsedPhraseQualifierKind::Must => {
-                if !args.is_empty() {
-                    return Err("`:: must` does not accept arguments".to_string().into());
-                }
-                if !attached.is_empty() {
-                    return Err("`:: must` does not support an attached block"
-                        .to_string()
-                        .into());
-                }
-                must_unwrap_runtime_value(eval_expr(
-                    subject,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?)
-            }
-            ParsedPhraseQualifierKind::Fallback => {
-                if !attached.is_empty() {
-                    return Err("`:: fallback` does not support an attached block"
-                        .to_string()
-                        .into());
-                }
-                let [fallback_arg] = args.as_slice() else {
-                    return Err(
-                        "`:: fallback` expects exactly one positional fallback argument"
-                            .to_string()
-                            .into(),
-                    );
-                };
-                let Some(fallback_expr) =
-                    (fallback_arg.name.is_none()).then_some(&fallback_arg.value)
-                else {
-                    return Err(
-                        "`:: fallback` expects exactly one positional fallback argument"
-                            .to_string()
-                            .into(),
-                    );
-                };
-                let subject_value = eval_expr(
-                    subject,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                let fallback_value = eval_expr(
-                    fallback_expr,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                fallback_runtime_value(subject_value, fallback_value)
-            }
-        },
-        ParsedExpr::MemoryPhrase {
-            family,
-            arena,
-            init_args,
-            constructor,
-            attached,
-        } => {
-            let arena_value = resolve_runtime_memory_phrase_instance(
-                family,
-                arena,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let constructed = execute_runtime_apply_phrase(
-                constructor,
-                init_args,
-                attached,
-                &[],
-                None,
-                None,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-                false,
-            )?;
-            let intrinsic = match family.as_str() {
-                "arena" => RuntimeIntrinsic::MemoryArenaAlloc,
-                "frame" => RuntimeIntrinsic::MemoryFrameAlloc,
-                "pool" => RuntimeIntrinsic::MemoryPoolAlloc,
-                "temp" => RuntimeIntrinsic::MemoryTempAlloc,
-                "session" => RuntimeIntrinsic::MemorySessionAlloc,
-                "ring" => RuntimeIntrinsic::MemoryRingPush,
-                "slab" => RuntimeIntrinsic::MemorySlabAlloc,
-                other => return Err(format!("unsupported runtime memory family `{other}`").into()),
-            };
-            let type_args = runtime_receiver_type_args(&arena_value, state);
-            let mut values = vec![arena_value, constructed];
-            Ok(execute_runtime_intrinsic(
-                intrinsic,
-                &type_args,
-                &mut values,
-                plan,
-                None,
-                None,
-                None,
-                None,
-                None,
-                state,
-                host,
-            )?)
-        }
-    }
-}
-
-fn try_eval_runtime_const_value_expr(
-    expr: &ParsedExpr,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    aliases: &BTreeMap<String, Vec<String>>,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<Option<RuntimeValue>> {
-    let Some(callable) = resolve_named_qualifier_callable_path(expr, aliases) else {
-        return Ok(None);
-    };
-    let Some(routine_index) =
-        resolve_routine_index(plan, current_package_id, current_module_id, &callable)
-    else {
-        return Ok(None);
-    };
-    let Some(routine) = plan.routines.get(routine_index) else {
-        return Err(format!("invalid routine index `{routine_index}`").into());
-    };
-    if routine.symbol_kind != "const" {
-        return Ok(None);
-    }
-    let label = runtime_expr_path_name(expr).unwrap_or_else(|| callable.join("."));
-    if routine.is_async {
-        return Err(format!(
-            "runtime const path `{}` cannot target async routine `{}`",
-            label, routine.symbol_name
-        )
-        .into());
-    }
-    if !routine.params.is_empty() {
-        return Err(format!(
-            "runtime const path `{}` cannot target non-zero-arg const `{}`",
-            label, routine.symbol_name
-        )
-        .into());
-    }
-    execute_call_by_path(
-        &callable,
-        Some(&routine.routine_key),
-        None,
-        current_package_id,
-        current_module_id,
-        Vec::new(),
-        Vec::new(),
-        false,
-        plan,
-        scopes,
-        state,
-        host,
-        false,
-    )
-    .map(Some)
-}
-
-fn apply_assign(
-    target: &ParsedAssignTarget,
-    op: ParsedAssignOp,
-    value: RuntimeValue,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<()> {
-    let updated = if matches!(op, ParsedAssignOp::Assign) {
-        value
-    } else {
-        let current = read_assign_target_value_runtime(
-            target,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?;
-        apply_assignment_op(current, op, value)?
-    };
-    Ok(write_assign_target_value_runtime(
-        target,
-        updated,
-        plan,
-        current_package_id,
-        current_module_id,
-        scopes,
-        aliases,
-        type_bindings,
-        state,
-        host,
-    )?)
-}
-
-fn execute_reclaim_statement_expr(
-    expr: &ParsedExpr,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<()> {
-    let token_expr = expr.clone();
-    let reference = expect_reference(
-        eval_expr(
-            expr,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?,
-        "reclaim",
-    )?;
-    if reference.mode != RuntimeReferenceMode::Hold {
-        return Err("`reclaim` expects an `&hold[...]` capability"
-            .to_string()
-            .into());
-    }
-    reclaim_held_target_local(scopes, &reference.target).map_err(RuntimeEvalSignal::from)?;
-    reclaim_hold_capability_root_local(scopes, &token_expr).map_err(RuntimeEvalSignal::from)?;
-    Ok(())
-}
-
-fn run_scope_defers(
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<()> {
-    let deferred = scopes
-        .last_mut()
-        .ok_or_else(|| "runtime scope stack is empty".to_string())?
-        .deferred
-        .drain(..)
-        .rev()
-        .collect::<Vec<_>>();
-    for deferred_action in deferred {
-        match deferred_action {
-            ParsedDeferAction::Expr(expr) => {
-                let _ = eval_expr(
-                    &expr,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-            }
-            ParsedDeferAction::Reclaim(expr) => {
-                execute_reclaim_statement_expr(
-                    &expr,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn execute_cleanup_footers(
-    frame: RuntimeCleanupFooterFrame,
-    plan: &RuntimePackagePlan,
-    scopes: &mut Vec<RuntimeScope>,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<()> {
-    let current_package_id = frame.current_package_id.clone();
-    let current_module_id = frame.current_module_id.clone();
-    let cleanup_footers_by_binding_id = frame
-        .cleanup_footers
-        .iter()
-        .filter(|cleanup_footer| cleanup_footer.binding_id != 0)
-        .map(|cleanup_footer| (cleanup_footer.binding_id, cleanup_footer))
-        .collect::<BTreeMap<_, _>>();
-    let cleanup_footers_by_subject = frame
-        .cleanup_footers
-        .iter()
-        .filter(|cleanup_footer| cleanup_footer.binding_id == 0)
-        .map(|cleanup_footer| (cleanup_footer.subject.clone(), cleanup_footer))
-        .collect::<BTreeMap<_, _>>();
-    for subject in frame.activations.into_iter().rev() {
-        let cleanup_footer = cleanup_footers_by_binding_id
-            .get(&subject.binding_id)
-            .copied()
-            .or_else(|| cleanup_footers_by_subject.get(&subject.subject).copied());
-        let Some(cleanup_footer) = cleanup_footer else {
-            continue;
-        };
-        if cleanup_footer.kind != "cleanup" {
-            return Err(
-                format!("unsupported cleanup footer kind `{}`", cleanup_footer.kind).into(),
-            );
-        }
-        let callable = if cleanup_footer.handler_path.is_empty() {
-            vec!["cleanup".to_string()]
-        } else {
-            resolve_cleanup_footer_handler_callable_path(
-                plan,
-                &current_package_id,
-                &current_module_id,
-                &cleanup_footer.handler_path,
-            )
-        };
-        let outcome = execute_call_by_path(
-            &callable,
-            cleanup_footer.resolved_routine.as_deref(),
-            None,
-            &current_package_id,
-            &current_module_id,
-            Vec::new(),
-            vec![RuntimeCallArg {
-                name: None,
-                value: subject.value,
-                source_expr: ParsedExpr::Path(vec![cleanup_footer.subject.clone()]),
-            }],
-            cleanup_footer.handler_path.is_empty(),
-            plan,
-            scopes,
-            state,
-            host,
-            false,
-        )?;
-        expect_cleanup_outcome(outcome).map_err(RuntimeEvalSignal::Message)?;
-    }
-    Ok(())
-}
-
-fn finish_runtime_cleanup_footers<T>(
-    result: RuntimeEvalResult<T>,
-    frame: Option<RuntimeCleanupFooterFrame>,
-    plan: &RuntimePackagePlan,
-    scopes: &mut Vec<RuntimeScope>,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<T> {
-    if let Some(frame) = frame
-        && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
-    {
-        execute_cleanup_footers(frame, plan, scopes, state, host)?;
-    }
-    result
-}
-
-fn execute_scoped_block(
-    statements: &[ParsedStmt],
-    cleanup_footers: &[ParsedCleanupFooter],
-    scopes: &mut Vec<RuntimeScope>,
-    scope: RuntimeScope,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<FlowSignal> {
-    push_runtime_cleanup_footer_frame(
-        state,
-        cleanup_footers,
-        scopes,
-        current_package_id,
-        current_module_id,
-    );
-    scopes.push(scope);
-    activate_attached_runtime_owners_for_current_scope(
-        scopes,
-        &[],
-        plan,
-        current_package_id,
-        state,
-    )?;
-    activate_attached_runtime_objects_for_current_scope(
-        scopes,
-        &[],
-        plan,
-        current_package_id,
-        state,
-    )?;
-    let result = execute_statements(
-        statements,
-        scopes,
-        plan,
-        current_package_id,
-        current_module_id,
-        aliases,
-        type_bindings,
-        state,
-        host,
-    );
-    let defer_result = run_scope_defers(
-        plan,
-        current_package_id,
-        current_module_id,
-        scopes,
-        aliases,
-        type_bindings,
-        state,
-        host,
-    );
-    let exited_scope = scopes
-        .pop()
-        .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-    validate_scope_hold_tokens(&exited_scope).map_err(RuntimeEvalSignal::from)?;
-    let result = match defer_result {
-        Ok(()) => result,
-        Err(RuntimeEvalSignal::OwnerExit {
-            owner_key,
-            exit_name,
-        }) => Ok(FlowSignal::OwnerExit {
-            owner_key,
-            exit_name,
-        }),
-        Err(other) => return Err(other),
-    };
-    let frame = if cleanup_footers.is_empty() {
-        None
-    } else {
-        pop_runtime_cleanup_footer_frame(state)
-    };
-    let result = match finish_runtime_cleanup_footers(result, frame, plan, scopes, state, host) {
-        Ok(signal) => signal,
-        Err(RuntimeEvalSignal::OwnerExit {
-            owner_key,
-            exit_name,
-        }) => FlowSignal::OwnerExit {
-            owner_key,
-            exit_name,
-        },
-        Err(other) => return Err(other),
-    };
-    let result = match result {
-        FlowSignal::OwnerExit {
-            owner_key,
-            exit_name,
-        } if exited_scope
-            .activated_owner_keys
-            .iter()
-            .any(|active| active == &owner_key) =>
-        {
-            apply_explicit_owner_exit(plan, state, &owner_key, &exit_name, Some(scopes))
-                .map_err(RuntimeEvalSignal::from)?;
-            FlowSignal::Next
-        }
-        other => {
-            if let Err(err) = evaluate_owner_exit_checkpoints(
-                &exited_scope.activated_owner_keys,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                host,
-                Some(scopes),
-            ) {
-                return Err(err.into());
-            }
-            other
-        }
-    };
-    release_scope_owner_activations(state, &exited_scope.activated_owner_keys);
-    Ok(result)
-}
-
-fn execute_statements(
-    statements: &[ParsedStmt],
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> RuntimeEvalResult<FlowSignal> {
-    for statement in statements {
-        let signal = match statement {
-            ParsedStmt::Let {
-                binding_id,
-                mutable,
-                name,
-                value,
-            } => {
-                let value = eval_expr(
-                    value,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                let current_scope_depth = scopes.len().saturating_sub(1);
-                let current_scope = scopes
-                    .last_mut()
-                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                insert_runtime_local(
-                    state,
-                    current_scope_depth,
-                    current_scope,
-                    *binding_id,
-                    name.clone(),
-                    *mutable,
-                    value,
-                );
-                FlowSignal::Next
-            }
-            ParsedStmt::Expr {
-                expr,
-                cleanup_footers,
-            } => {
-                push_runtime_cleanup_footer_frame(
-                    state,
-                    cleanup_footers,
-                    scopes,
-                    current_package_id,
-                    current_module_id,
-                );
-                finish_runtime_cleanup_footers(
-                    eval_expr(
-                        expr,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )
-                    .map(|_| FlowSignal::Next),
-                    if cleanup_footers.is_empty() {
-                        None
-                    } else {
-                        pop_runtime_cleanup_footer_frame(state)
-                    },
-                    plan,
-                    scopes,
-                    state,
-                    host,
-                )?;
-                FlowSignal::Next
-            }
-            ParsedStmt::Reclaim(expr) => {
-                execute_reclaim_statement_expr(
-                    expr,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                FlowSignal::Next
-            }
-            ParsedStmt::ReturnVoid => FlowSignal::Return(RuntimeValue::Unit),
-            ParsedStmt::ReturnValue { value } => FlowSignal::Return(eval_expr(
-                value,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?),
-            ParsedStmt::If {
-                condition,
-                then_branch,
-                else_branch,
-                cleanup_footers,
-                availability,
-            } => {
-                if expect_bool(
-                    force_runtime_value(
-                        eval_expr(
-                            condition,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?,
-                        plan,
-                        state,
-                        host,
-                    )?,
-                    "if condition",
-                )? {
-                    let mut scope = RuntimeScope::default();
-                    apply_runtime_availability_attachments(&mut scope, availability);
-                    execute_scoped_block(
-                        then_branch,
-                        cleanup_footers,
-                        scopes,
-                        scope,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?
-                } else if else_branch.is_empty() {
-                    FlowSignal::Next
-                } else {
-                    let mut scope = RuntimeScope::default();
-                    apply_runtime_availability_attachments(&mut scope, availability);
-                    execute_scoped_block(
-                        else_branch,
-                        cleanup_footers,
-                        scopes,
-                        scope,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?
-                }
-            }
-            ParsedStmt::While {
-                condition,
-                body,
-                cleanup_footers,
-                availability,
-            } => loop {
-                if !expect_bool(
-                    force_runtime_value(
-                        eval_expr(
-                            condition,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?,
-                        plan,
-                        state,
-                        host,
-                    )?,
-                    "while condition",
-                )? {
-                    break FlowSignal::Next;
-                }
-                let mut scope = RuntimeScope::default();
-                apply_runtime_availability_attachments(&mut scope, availability);
-                match execute_scoped_block(
-                    body,
-                    cleanup_footers,
-                    scopes,
-                    scope,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )? {
-                    FlowSignal::Next | FlowSignal::Continue => {}
-                    FlowSignal::Break => break FlowSignal::Next,
-                    FlowSignal::Return(value) => break FlowSignal::Return(value),
-                    FlowSignal::OwnerExit {
-                        owner_key,
-                        exit_name,
-                    } => {
-                        break FlowSignal::OwnerExit {
-                            owner_key,
-                            exit_name,
-                        };
-                    }
-                }
-            },
-            ParsedStmt::For {
-                binding_id,
-                binding,
-                iterable,
-                body,
-                cleanup_footers,
-                availability,
-            } => {
-                let values = into_iterable_values(force_runtime_value(
-                    eval_expr(
-                        iterable,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    plan,
-                    state,
-                    host,
-                )?)?;
-                let mut loop_signal = FlowSignal::Next;
-                for value in values {
-                    let mut scope = RuntimeScope::default();
-                    apply_runtime_availability_attachments(&mut scope, availability);
-                    insert_runtime_local(
-                        state,
-                        scopes.len(),
-                        &mut scope,
-                        *binding_id,
-                        binding.clone(),
-                        false,
-                        value,
-                    );
-                    match execute_scoped_block(
-                        body,
-                        cleanup_footers,
-                        scopes,
-                        scope,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )? {
-                        FlowSignal::Next | FlowSignal::Continue => {}
-                        FlowSignal::Break => {
-                            loop_signal = FlowSignal::Next;
-                            break;
-                        }
-                        FlowSignal::Return(value) => {
-                            loop_signal = FlowSignal::Return(value);
-                            break;
-                        }
-                        FlowSignal::OwnerExit {
-                            owner_key,
-                            exit_name,
-                        } => {
-                            loop_signal = FlowSignal::OwnerExit {
-                                owner_key,
-                                exit_name,
-                            };
-                            break;
-                        }
-                    }
-                }
-                loop_signal
-            }
-            ParsedStmt::Defer(action) => {
-                scopes
-                    .last_mut()
-                    .ok_or_else(|| "runtime scope stack is empty".to_string())?
-                    .deferred
-                    .push(action.clone());
-                FlowSignal::Next
-            }
-            ParsedStmt::ActivateOwner { .. } => {
-                let ParsedStmt::ActivateOwner {
-                    owner_path,
-                    owner_local_name: _,
-                    binding,
-                    object_binding_ids,
-                    context,
-                } = statement
-                else {
-                    unreachable!();
-                };
-                let owner_package_id =
-                    resolve_visible_package_id_for_path(plan, current_package_id, owner_path)
-                        .ok_or_else(|| {
-                            format!(
-                                "runtime owner activation `{}` resolves to an unknown owner",
-                                owner_path.join(".")
-                            )
-                        })?;
-                let owner = lookup_runtime_owner_plan(plan, owner_package_id, owner_path)
-                    .ok_or_else(|| {
-                        format!(
-                            "runtime owner activation `{}` resolves to an unknown owner",
-                            owner_path.join(".")
-                        )
-                    })?;
-                let owner_key = owner_state_key(owner_package_id, owner_path);
-                let had_prior_active_state = state
-                    .owners
-                    .get(&owner_key)
-                    .map(|owner_state| owner_state.active_bindings > 0)
-                    .unwrap_or(false);
-                let context_value = context
-                    .as_ref()
-                    .map(|expr| {
-                        eval_expr(
-                            expr,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )
-                    })
-                    .transpose()?;
-                if had_prior_active_state {
-                    evaluate_owner_exit_checkpoints(
-                        std::slice::from_ref(&owner_key),
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                        Some(scopes),
-                    )
-                    .map_err(RuntimeEvalSignal::from)?;
-                }
-                let owner_state = state.owners.entry(owner_key.clone()).or_default();
-                if owner_state.active_bindings == 0 {
-                    owner_state.activation_context = context_value;
-                    owner_state.pending_init.clear();
-                    owner_state.pending_resume = owner_state.objects.keys().cloned().collect();
-                }
-                activate_owner_scope_binding(
-                    scopes,
-                    state,
-                    owner,
-                    &owner_key,
-                    binding.as_deref(),
-                    object_binding_ids,
-                )
-                .map_err(RuntimeEvalSignal::from)?;
-                FlowSignal::Next
-            }
-            ParsedStmt::Recycle {
-                default_modifier,
-                lines,
-            } => {
-                let mut signal = FlowSignal::Next;
-                for line in lines {
-                    let gate = match &line.kind {
-                        ParsedRecycleLineKind::Expr { gate }
-                        | ParsedRecycleLineKind::Let { gate, .. }
-                        | ParsedRecycleLineKind::Assign { gate, .. } => gate,
-                    };
-                    let value = eval_expr(
-                        gate,
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?;
-                    match runtime_gate_outcome(value, "recycle gate")? {
-                        Ok(success_payload) => match (&line.kind, success_payload) {
-                            (ParsedRecycleLineKind::Let { mutable, name, .. }, Some(payload)) => {
-                                let current_scope_depth = scopes.len().saturating_sub(1);
-                                let current_scope = scopes
-                                    .last_mut()
-                                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                                insert_runtime_local(
-                                    state,
-                                    current_scope_depth,
-                                    current_scope,
-                                    0,
-                                    name.clone(),
-                                    *mutable,
-                                    payload,
-                                );
-                            }
-                            (ParsedRecycleLineKind::Assign { name, .. }, Some(payload)) => {
-                                apply_assign(
-                                    &ParsedAssignTarget::Name(name.clone()),
-                                    ParsedAssignOp::Assign,
-                                    payload,
-                                    plan,
-                                    current_package_id,
-                                    current_module_id,
-                                    scopes,
-                                    aliases,
-                                    type_bindings,
-                                    state,
-                                    host,
-                                )?;
-                            }
-                            (ParsedRecycleLineKind::Expr { .. }, _) => {}
-                            _ => {
-                                return Err(
-                                    "payload-bearing recycle line requires Option/Result gate"
-                                        .to_string()
-                                        .into(),
-                                );
-                            }
-                        },
-                        Err(failure) => {
-                            let modifier = line
-                                .modifier
-                                .as_ref()
-                                .or(default_modifier.as_ref())
-                                .ok_or_else(|| {
-                                    "recycle failure requires an explicit exit modifier".to_string()
-                                })?;
-                            signal = match modifier.kind.as_str() {
-                                "return" => {
-                                    if let Some(payload) = &modifier.payload {
-                                        FlowSignal::Return(eval_expr(
-                                            payload,
-                                            plan,
-                                            current_package_id,
-                                            current_module_id,
-                                            scopes,
-                                            aliases,
-                                            type_bindings,
-                                            state,
-                                            host,
-                                        )?)
-                                    } else if let RuntimeValue::Variant { name, .. } = &failure {
-                                        if variant_name_matches(name, "Result.Err") {
-                                            FlowSignal::Return(failure)
-                                        } else {
-                                            return Err(
-                                                "bare `-return` in recycle requires Result failure"
-                                                    .to_string()
-                                                    .into(),
-                                            );
-                                        }
-                                    } else {
-                                        return Err(
-                                            "bare `-return` in recycle requires Result failure"
-                                                .to_string()
-                                                .into(),
-                                        );
-                                    }
-                                }
-                                "break" => FlowSignal::Break,
-                                "continue" => FlowSignal::Continue,
-                                other => {
-                                    let owner_key =
-                                        resolve_named_owner_exit_target(plan, scopes, other)
-                                            .map_err(RuntimeEvalSignal::from)?;
-                                    FlowSignal::OwnerExit {
-                                        owner_key,
-                                        exit_name: other.to_string(),
-                                    }
-                                }
-                            };
-                            break;
-                        }
-                    }
-                }
-                signal
-            }
-            ParsedStmt::Bind {
-                default_modifier,
-                lines,
-            } => {
-                let mut signal = FlowSignal::Next;
-                for line in lines {
-                    let modifier = line.modifier.as_ref().or(default_modifier.as_ref());
-                    match &line.kind {
-                        ParsedBindLineKind::Require { expr } => {
-                            let value = eval_expr(
-                                expr,
-                                plan,
-                                current_package_id,
-                                current_module_id,
-                                scopes,
-                                aliases,
-                                type_bindings,
-                                state,
-                                host,
-                            )?;
-                            if !expect_bool(value, "bind require")? {
-                                let modifier = modifier.ok_or_else(|| {
-                                    "bind require failure requires an explicit modifier".to_string()
-                                })?;
-                                signal = match modifier.kind.as_str() {
-                                    "return" => {
-                                        let value = eval_headed_modifier_payload(
-                                            modifier.payload.as_ref(),
-                                            plan,
-                                            current_package_id,
-                                            current_module_id,
-                                            scopes,
-                                            aliases,
-                                            type_bindings,
-                                            state,
-                                            host,
-                                        )?
-                                        .unwrap_or(RuntimeValue::Unit);
-                                        FlowSignal::Return(value)
-                                    }
-                                    "break" => FlowSignal::Break,
-                                    "continue" => FlowSignal::Continue,
-                                    other => {
-                                        return Err(format!(
-                                            "unsupported bind require modifier `{other}`"
-                                        )
-                                        .into());
-                                    }
-                                };
-                                break;
-                            }
-                        }
-                        ParsedBindLineKind::Let {
-                            mutable,
-                            name,
-                            gate,
-                        } => {
-                            let gate_value = eval_expr(
-                                gate,
-                                plan,
-                                current_package_id,
-                                current_module_id,
-                                scopes,
-                                aliases,
-                                type_bindings,
-                                state,
-                                host,
-                            )?;
-                            match runtime_gate_outcome(gate_value, "bind gate")? {
-                                Ok(Some(payload)) => {
-                                    let current_scope_depth = scopes.len().saturating_sub(1);
-                                    let current_scope = scopes.last_mut().ok_or_else(|| {
-                                        "runtime scope stack is empty".to_string()
-                                    })?;
-                                    insert_runtime_local(
-                                        state,
-                                        current_scope_depth,
-                                        current_scope,
-                                        0,
-                                        name.clone(),
-                                        *mutable,
-                                        payload,
-                                    );
-                                }
-                                Ok(None) => {
-                                    return Err("bind payload lines require Option/Result gates"
-                                        .to_string()
-                                        .into());
-                                }
-                                Err(failure) => {
-                                    let modifier = modifier.ok_or_else(|| {
-                                        "bind failure requires an explicit modifier".to_string()
-                                    })?;
-                                    match modifier.kind.as_str() {
-                                        "return" => {
-                                            signal = if let Some(payload) = &modifier.payload {
-                                                FlowSignal::Return(eval_expr(
-                                                    payload,
-                                                    plan,
-                                                    current_package_id,
-                                                    current_module_id,
-                                                    scopes,
-                                                    aliases,
-                                                    type_bindings,
-                                                    state,
-                                                    host,
-                                                )?)
-                                            } else if let RuntimeValue::Variant { name, .. } =
-                                                &failure
-                                            {
-                                                if variant_name_matches(name, "Result.Err") {
-                                                    FlowSignal::Return(failure)
-                                                } else {
-                                                    return Err("bare `-return` in bind requires Result failure".to_string().into());
-                                                }
-                                            } else {
-                                                return Err("bare `-return` in bind requires Result failure".to_string().into());
-                                            };
-                                            break;
-                                        }
-                                        "default" => {
-                                            let fallback = eval_headed_modifier_payload(
-                                                modifier.payload.as_ref(),
-                                                plan,
-                                                current_package_id,
-                                                current_module_id,
-                                                scopes,
-                                                aliases,
-                                                type_bindings,
-                                                state,
-                                                host,
-                                            )?
-                                            .ok_or_else(|| {
-                                                "bind `default` requires a payload".to_string()
-                                            })?;
-                                            let current_scope_depth =
-                                                scopes.len().saturating_sub(1);
-                                            let current_scope =
-                                                scopes.last_mut().ok_or_else(|| {
-                                                    "runtime scope stack is empty".to_string()
-                                                })?;
-                                            insert_runtime_local(
-                                                state,
-                                                current_scope_depth,
-                                                current_scope,
-                                                0,
-                                                name.clone(),
-                                                *mutable,
-                                                fallback,
-                                            );
-                                        }
-                                        other => {
-                                            return Err(format!(
-                                                "unsupported bind let modifier `{other}`"
-                                            )
-                                            .into());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        ParsedBindLineKind::Assign { name, gate } => {
-                            let gate_value = eval_expr(
-                                gate,
-                                plan,
-                                current_package_id,
-                                current_module_id,
-                                scopes,
-                                aliases,
-                                type_bindings,
-                                state,
-                                host,
-                            )?;
-                            match runtime_gate_outcome(gate_value, "bind gate")? {
-                                Ok(Some(payload)) => {
-                                    apply_assign(
-                                        &ParsedAssignTarget::Name(name.clone()),
-                                        ParsedAssignOp::Assign,
-                                        payload,
-                                        plan,
-                                        current_package_id,
-                                        current_module_id,
-                                        scopes,
-                                        aliases,
-                                        type_bindings,
-                                        state,
-                                        host,
-                                    )?;
-                                }
-                                Ok(None) => {
-                                    return Err("bind payload lines require Option/Result gates"
-                                        .to_string()
-                                        .into());
-                                }
-                                Err(failure) => {
-                                    let modifier = modifier.ok_or_else(|| {
-                                        "bind failure requires an explicit modifier".to_string()
-                                    })?;
-                                    match modifier.kind.as_str() {
-                                        "return" => {
-                                            signal = if let Some(payload) = &modifier.payload {
-                                                FlowSignal::Return(eval_expr(
-                                                    payload,
-                                                    plan,
-                                                    current_package_id,
-                                                    current_module_id,
-                                                    scopes,
-                                                    aliases,
-                                                    type_bindings,
-                                                    state,
-                                                    host,
-                                                )?)
-                                            } else if let RuntimeValue::Variant { name, .. } =
-                                                &failure
-                                            {
-                                                if variant_name_matches(name, "Result.Err") {
-                                                    FlowSignal::Return(failure)
-                                                } else {
-                                                    return Err("bare `-return` in bind requires Result failure".to_string().into());
-                                                }
-                                            } else {
-                                                return Err("bare `-return` in bind requires Result failure".to_string().into());
-                                            };
-                                            break;
-                                        }
-                                        "preserve" => {}
-                                        "replace" => {
-                                            let fallback = eval_headed_modifier_payload(
-                                                modifier.payload.as_ref(),
-                                                plan,
-                                                current_package_id,
-                                                current_module_id,
-                                                scopes,
-                                                aliases,
-                                                type_bindings,
-                                                state,
-                                                host,
-                                            )?
-                                            .ok_or_else(|| {
-                                                "bind `replace` requires a payload".to_string()
-                                            })?;
-                                            apply_assign(
-                                                &ParsedAssignTarget::Name(name.clone()),
-                                                ParsedAssignOp::Assign,
-                                                fallback,
-                                                plan,
-                                                current_package_id,
-                                                current_module_id,
-                                                scopes,
-                                                aliases,
-                                                type_bindings,
-                                                state,
-                                                host,
-                                            )?;
-                                        }
-                                        other => {
-                                            return Err(format!(
-                                                "unsupported bind assign modifier `{other}`"
-                                            )
-                                            .into());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                signal
-            }
-            ParsedStmt::Construct(region) => {
-                let value = eval_expr(
-                    &ParsedExpr::ConstructRegion(Box::new(region.clone())),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                match &region.destination {
-                    Some(ParsedConstructDestination::Deliver { name }) => {
-                        let current_scope_depth = scopes.len().saturating_sub(1);
-                        let current_scope = scopes
-                            .last_mut()
-                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                        insert_runtime_local(
-                            state,
-                            current_scope_depth,
-                            current_scope,
-                            0,
-                            name.clone(),
-                            false,
-                            value,
-                        );
-                    }
-                    Some(ParsedConstructDestination::Place { target }) => {
-                        apply_assign(
-                            target,
-                            ParsedAssignOp::Assign,
-                            value,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?;
-                    }
-                    None => {}
-                }
-                FlowSignal::Next
-            }
-            ParsedStmt::Record(region) => {
-                let value = eval_expr(
-                    &ParsedExpr::RecordRegion(Box::new(region.clone())),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                match &region.destination {
-                    Some(ParsedConstructDestination::Deliver { name }) => {
-                        let current_scope_depth = scopes.len().saturating_sub(1);
-                        let current_scope = scopes
-                            .last_mut()
-                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                        insert_runtime_local(
-                            state,
-                            current_scope_depth,
-                            current_scope,
-                            0,
-                            name.clone(),
-                            false,
-                            value,
-                        );
-                    }
-                    Some(ParsedConstructDestination::Place { target }) => {
-                        apply_assign(
-                            target,
-                            ParsedAssignOp::Assign,
-                            value,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?;
-                    }
-                    None => {}
-                }
-                FlowSignal::Next
-            }
-            ParsedStmt::Array(region) => {
-                let value = eval_expr(
-                    &ParsedExpr::ArrayRegion(Box::new(region.clone())),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                match &region.destination {
-                    Some(ParsedConstructDestination::Deliver { name }) => {
-                        let current_scope_depth = scopes.len().saturating_sub(1);
-                        let current_scope = scopes
-                            .last_mut()
-                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                        insert_runtime_local(
-                            state,
-                            current_scope_depth,
-                            current_scope,
-                            0,
-                            name.clone(),
-                            false,
-                            value,
-                        );
-                    }
-                    Some(ParsedConstructDestination::Place { target }) => {
-                        apply_assign(
-                            target,
-                            ParsedAssignOp::Assign,
-                            value,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?;
-                    }
-                    None => {}
-                }
-                FlowSignal::Next
-            }
-            ParsedStmt::MemorySpec(spec) => {
-                let owner_keys = collect_active_owner_keys_from_scopes(scopes);
-                let current_scope = scopes
-                    .last_mut()
-                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                current_scope.memory_specs.insert(
-                    spec.name.clone(),
-                    RuntimeMemorySpecState {
-                        spec: spec.clone(),
-                        handle: None,
-                        handle_policy: None,
-                        owner_keys,
-                    },
-                );
-                FlowSignal::Next
-            }
-            ParsedStmt::Break => FlowSignal::Break,
-            ParsedStmt::Continue => FlowSignal::Continue,
-            ParsedStmt::Assign { target, op, value } => {
-                let value = eval_expr(
-                    value,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                apply_assign(
-                    target,
-                    *op,
-                    value,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                FlowSignal::Next
-            }
-        };
-        if signal != FlowSignal::Next {
-            return Ok(signal);
-        }
-    }
-    Ok(FlowSignal::Next)
-}
-
-fn execute_routine_call_with_state(
-    plan: &RuntimePackagePlan,
-    routine_index: usize,
-    type_args: Vec<String>,
-    mut args: Vec<RuntimeValue>,
-    inherited_active_owner_keys: &[String],
-    caller_scopes: Option<&mut Vec<RuntimeScope>>,
-    current_package_id: Option<&str>,
-    current_module_id: Option<&str>,
-    aliases: Option<&BTreeMap<String, Vec<String>>>,
-    type_bindings: Option<&RuntimeTypeBindings>,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-    allow_async: bool,
-) -> RuntimeEvalResult<RoutineExecutionOutcome> {
-    let routine = plan
-        .routines
-        .get(routine_index)
-        .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
-    push_runtime_call_frame(state, &routine.module_id, &routine.symbol_name)?;
-    let execution_result = grow(16 * 1024 * 1024, || {
-        (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
-            if let Some(intrinsic_impl) = &routine.intrinsic_impl {
-                let intrinsic =
-                    resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
-                        format!(
-                            "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
-                            routine.symbol_name
-                        )
-                    })?;
-                let value = execute_runtime_intrinsic(
-                    intrinsic,
-                    &type_args,
-                    &mut args,
-                    plan,
-                    caller_scopes,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                return Ok(RoutineExecutionOutcome {
-                    value,
-                    final_args: args,
-                    control: None,
-                });
-            }
-            if let Some(native_impl) = &routine.native_impl {
-                return execute_runtime_native_binding_import(
-                    plan,
-                    routine,
-                    native_impl,
-                    &args,
-                    host,
-                )
-                .map_err(RuntimeEvalSignal::from);
-            }
-            if routine.is_async && !allow_async {
-                return Err(format!(
-                    "async routine `{}` is not executable in the current runtime lane",
-                    routine.symbol_name
-                )
-                .into());
-            }
-            if args.len() != routine.params.len() {
-                return Err(format!(
-                    "routine `{}` expected {} arguments, got {}",
-                    routine.symbol_name,
-                    routine.params.len(),
-                    args.len()
-                )
-                .into());
-            }
-            if !routine.type_params.is_empty()
-                && !type_args.is_empty()
-                && type_args.len() != routine.type_params.len()
-            {
-                return Err(format!(
-                    "routine `{}` expected {} type arguments, got {}",
-                    routine.symbol_name,
-                    routine.type_params.len(),
-                    type_args.len()
-                )
-                .into());
-            }
-            let aliases = plan
-                .module_aliases
-                .get(&module_alias_scope_key(
-                    &routine.package_id,
-                    &routine.module_id,
-                ))
-                .cloned()
-                .unwrap_or_default();
-            let resolved_type_args = if type_args.is_empty() {
-                routine.type_params.clone()
-            } else {
-                type_args
-            };
-            let type_bindings = routine
-                .type_params
-                .iter()
-                .cloned()
-                .zip(resolved_type_args)
-                .collect::<RuntimeTypeBindings>();
-            let entered_async_context = routine.is_async;
-            if entered_async_context {
-                state.async_context_depth += 1;
-            }
-            let outcome = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
-                let mut initial_scope = RuntimeScope {
-                    inherited_active_owner_keys: inherited_active_owner_keys.to_vec(),
-                    ..Default::default()
-                };
-                apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
-                push_runtime_cleanup_footer_frame(
-                    state,
-                    &routine.cleanup_footers,
-                    &[],
-                    &routine.package_id,
-                    &routine.module_id,
-                );
-                for (param, value) in routine.params.iter().zip(args) {
-                    insert_runtime_local(
-                        state,
-                        0,
-                        &mut initial_scope,
-                        param.binding_id,
-                        param.name.clone(),
-                        param.mode.as_deref() == Some("edit"),
-                        value,
-                    );
-                }
-                let mut scopes = Vec::new();
-                scopes.push(initial_scope);
-                activate_attached_runtime_owners_for_current_scope(
-                    &mut scopes,
-                    inherited_active_owner_keys,
-                    plan,
-                    &routine.package_id,
-                    state,
-                )?;
-                activate_attached_runtime_objects_for_current_scope(
-                    &mut scopes,
-                    inherited_active_owner_keys,
-                    plan,
-                    &routine.package_id,
-                    state,
-                )?;
-                let result = execute_statements(
-                    &routine.statements,
-                    &mut scopes,
-                    plan,
-                    &routine.package_id,
-                    &routine.module_id,
-                    &aliases,
-                    &type_bindings,
-                    state,
-                    host,
-                );
-                let defer_result = run_scope_defers(
-                    plan,
-                    &routine.package_id,
-                    &routine.module_id,
-                    &mut scopes,
-                    &aliases,
-                    &type_bindings,
-                    state,
-                    host,
-                );
-                let routine_cleanup_footer_frame = pop_runtime_cleanup_footer_frame(state);
-                let final_scope = scopes
-                    .pop()
-                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                validate_scope_hold_tokens(&final_scope).map_err(RuntimeEvalSignal::from)?;
-                match defer_result {
-                    Ok(()) => {}
-                    Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
-                    Err(RuntimeEvalSignal::Return(value)) => {
-                        if let Some(frame) = routine_cleanup_footer_frame.clone() {
-                            execute_cleanup_footers(frame, plan, &mut scopes, state, host)
-                                .map_err(runtime_eval_message)?;
-                        }
-                        evaluate_owner_exit_checkpoints(
-                            &final_scope.activated_owner_keys,
-                            plan,
-                            &routine.package_id,
-                            &routine.module_id,
-                            &aliases,
-                            &type_bindings,
-                            state,
-                            host,
-                            None,
-                        )?;
-                        release_scope_owner_activations(state, &final_scope.activated_owner_keys);
-                        let final_args = routine
-                            .params
-                            .iter()
-                            .map(|param| {
-                                final_scope
-                                    .locals
-                                    .get(&param.name)
-                                    .map(|local| local.value.clone())
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "runtime routine `{}` lost bound parameter `{}`",
-                                            routine.symbol_name, param.name
-                                        )
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, String>>()
-                            .map_err(RuntimeEvalSignal::from)?;
-                        return Ok(RoutineExecutionOutcome {
-                            value,
-                            final_args,
-                            control: None,
-                        });
-                    }
-                    Err(RuntimeEvalSignal::OwnerExit {
-                        owner_key,
-                        exit_name,
-                    }) => {
-                        if let Some(frame) = routine_cleanup_footer_frame.clone() {
-                            execute_cleanup_footers(frame, plan, &mut scopes, state, host)
-                                .map_err(runtime_eval_message)?;
-                        }
-                        evaluate_owner_exit_checkpoints(
-                            &final_scope.activated_owner_keys,
-                            plan,
-                            &routine.package_id,
-                            &routine.module_id,
-                            &aliases,
-                            &type_bindings,
-                            state,
-                            host,
-                            None,
-                        )
-                        .map_err(RuntimeEvalSignal::from)?;
-                        release_scope_owner_activations(state, &final_scope.activated_owner_keys);
-                        let final_args = routine
-                            .params
-                            .iter()
-                            .map(|param| {
-                                final_scope
-                                    .locals
-                                    .get(&param.name)
-                                    .map(|local| local.value.clone())
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "runtime routine `{}` lost bound parameter `{}`",
-                                            routine.symbol_name, param.name
-                                        )
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, String>>()
-                            .map_err(RuntimeEvalSignal::from)?;
-                        return Ok(RoutineExecutionOutcome {
-                            value: RuntimeValue::Unit,
-                            final_args,
-                            control: Some(FlowSignal::OwnerExit {
-                                owner_key,
-                                exit_name,
-                            }),
-                        });
-                    }
-                }
-                if let Some(frame) = routine_cleanup_footer_frame.clone()
-                    && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
-                {
-                    execute_cleanup_footers(frame, plan, &mut scopes, state, host)
-                        .map_err(runtime_eval_message)?;
-                }
-                evaluate_owner_exit_checkpoints(
-                    &final_scope.activated_owner_keys,
-                    plan,
-                    &routine.package_id,
-                    &routine.module_id,
-                    &aliases,
-                    &type_bindings,
-                    state,
-                    host,
-                    None,
-                )?;
-                release_scope_owner_activations(state, &final_scope.activated_owner_keys);
-                let result = match result {
-                    Ok(signal) => signal,
-                    Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
-                    Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
-                    Err(RuntimeEvalSignal::OwnerExit {
-                        owner_key,
-                        exit_name,
-                    }) => FlowSignal::OwnerExit {
-                        owner_key,
-                        exit_name,
-                    },
-                };
-                let result = match result {
-                    FlowSignal::OwnerExit {
-                        owner_key,
-                        exit_name,
-                    } if final_scope
-                        .activated_owner_keys
-                        .iter()
-                        .any(|active| active == &owner_key) =>
-                    {
-                        apply_explicit_owner_exit(plan, state, &owner_key, &exit_name, None)?;
-                        FlowSignal::Next
-                    }
-                    other => other,
-                };
-                let value = match result {
-                    FlowSignal::Next => RuntimeValue::Unit,
-                    FlowSignal::Return(value) => value,
-                    FlowSignal::Break => {
-                        return Err("break escaped the top-level routine".to_string().into());
-                    }
-                    FlowSignal::Continue => {
-                        return Err("continue escaped the top-level routine".to_string().into());
-                    }
-                    FlowSignal::OwnerExit {
-                        owner_key,
-                        exit_name,
-                    } => {
-                        let final_args = routine
-                            .params
-                            .iter()
-                            .map(|param| {
-                                final_scope
-                                    .locals
-                                    .get(&param.name)
-                                    .map(|local| local.value.clone())
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "runtime routine `{}` lost bound parameter `{}`",
-                                            routine.symbol_name, param.name
-                                        )
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, String>>()
-                            .map_err(RuntimeEvalSignal::from)?;
-                        return Ok(RoutineExecutionOutcome {
-                            value: RuntimeValue::Unit,
-                            final_args,
-                            control: Some(FlowSignal::OwnerExit {
-                                owner_key,
-                                exit_name,
-                            }),
-                        });
-                    }
-                };
-                let final_args = routine
-                    .params
-                    .iter()
-                    .map(|param| {
-                        final_scope
-                            .locals
-                            .get(&param.name)
-                            .map(|local| local.value.clone())
-                            .ok_or_else(|| {
-                                format!(
-                                    "runtime routine `{}` lost bound parameter `{}`",
-                                    routine.symbol_name, param.name
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, String>>()
-                    .map_err(RuntimeEvalSignal::from)?;
-                Ok(RoutineExecutionOutcome {
-                    value,
-                    final_args,
-                    control: None,
-                })
-            })();
-            if entered_async_context {
-                state.async_context_depth = state.async_context_depth.saturating_sub(1);
-            }
-            outcome
-        })()
-    });
-    pop_runtime_call_frame(state);
-    execution_result
-}
-
-fn execute_routine_with_state(
-    plan: &RuntimePackagePlan,
-    routine_index: usize,
-    type_args: Vec<String>,
-    args: Vec<RuntimeValue>,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let outcome = execute_routine_call_with_state(
-        plan,
-        routine_index,
-        type_args,
-        args,
-        &collect_active_owner_keys_from_state(state),
-        None,
-        None,
-        None,
-        None,
-        None,
-        state,
-        host,
-        false,
-    )
-    .map_err(runtime_eval_message)?;
-    if let Some(FlowSignal::OwnerExit {
-        owner_key,
-        exit_name,
-    }) = outcome.control
-    {
-        return Err(format!(
-            "owner exit `{exit_name}` for `{owner_key}` escaped the top-level runtime"
-        ));
-    }
-    Ok(outcome.value)
-}
-
-pub fn validate_runtime_requirements_supported(
-    plan: &RuntimePackagePlan,
-    host: &mut dyn RuntimeHost,
-) -> Result<(), String> {
-    for requirement in &plan.runtime_requirements {
-        if !host.supports_runtime_requirement(requirement) {
-            return Err(format!(
-                "runtime host does not support required capability `{requirement}`"
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn execute_routine(
-    plan: &RuntimePackagePlan,
-    routine_index: usize,
-    args: Vec<RuntimeValue>,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    validate_runtime_requirements_supported(plan, host)?;
-    reset_runtime_native_products_cache();
-    let mut state = RuntimeExecutionState::default();
-    let result =
-        execute_routine_with_state(plan, routine_index, Vec::new(), args, &mut state, host);
-    reset_runtime_native_products_cache();
-    result
-}
-
-pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Result<i32, String> {
-    validate_runtime_requirements_supported(plan, host)?;
-    let entry = plan
-        .main_entrypoint()
-        .ok_or_else(|| format!("package `{}` has no main entrypoint", plan.package_name))?;
-    let routine_key = plan
-        .routines
-        .get(entry.routine_index)
-        .map(|routine| routine.routine_key.clone())
-        .ok_or_else(|| format!("invalid routine index `{}`", entry.routine_index))?;
-    execute_entrypoint_routine(plan, &routine_key, host)
-}
-
-pub fn execute_entrypoint_routine(
-    plan: &RuntimePackagePlan,
-    routine_key: &str,
-    host: &mut dyn RuntimeHost,
-) -> Result<i32, String> {
-    validate_runtime_requirements_supported(plan, host)?;
-    reset_runtime_native_products_cache();
-    let entry = plan
-        .entrypoints
-        .iter()
-        .find(|entry| {
-            plan.routines
-                .get(entry.routine_index)
-                .is_some_and(|routine| routine.routine_key == routine_key)
-        })
-        .ok_or_else(|| {
-            format!(
-                "entrypoint routine `{routine_key}` is not present in package `{}`",
-                plan.package_name
-            )
-        })?;
-    let routine = plan
-        .routines
-        .get(entry.routine_index)
-        .ok_or_else(|| format!("invalid routine index `{}`", entry.routine_index))?;
-    validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_ref())?;
-    let mut state = RuntimeExecutionState::default();
-    if state.next_scheduler_thread_id <= 0 {
-        state.next_scheduler_thread_id = 1;
-    }
-    state.current_thread_id = 0;
-    let value = execute_routine_call_with_state(
-        plan,
-        entry.routine_index,
-        Vec::new(),
-        Vec::new(),
-        &[],
-        None,
-        None,
-        None,
-        None,
-        None,
-        &mut state,
-        host,
-        true,
-    );
-    let value = match value {
-        Ok(value) => value,
-        Err(err) => {
-            reset_runtime_native_products_cache();
-            return Err(runtime_eval_message(err));
-        }
-    };
-    reset_runtime_native_products_cache();
-    if let Some(FlowSignal::OwnerExit {
-        owner_key,
-        exit_name,
-    }) = value.control.clone()
-    {
-        return Err(format!(
-            "owner exit `{exit_name}` for `{owner_key}` escaped entrypoint `{routine_key}`"
-        ));
-    }
-    let value = value.value;
-    match value {
-        RuntimeValue::Int(value) => i32::try_from(value)
-            .map_err(|_| format!("main return value `{value}` does not fit in i32")),
-        RuntimeValue::Unit => Ok(0),
-        RuntimeValue::Float { .. }
-        | RuntimeValue::Bool(_)
-        | RuntimeValue::Str(_)
-        | RuntimeValue::Pair(_, _)
-        | RuntimeValue::Array(_)
-        | RuntimeValue::List(_)
-        | RuntimeValue::Map(_)
-        | RuntimeValue::Range { .. }
-        | RuntimeValue::OwnerHandle(_)
-        | RuntimeValue::Ref(_)
-        | RuntimeValue::Opaque(_)
-        | RuntimeValue::Record { .. }
-        | RuntimeValue::Variant { .. } => {
-            Err("main must return Int or Unit in the current runtime lane".to_string())
-        }
-    }
-}
-
-pub fn execute_current_bundle_entrypoint(
-    package_image_text: &str,
-    routine_key: &str,
-) -> Result<i32, String> {
-    let mut native_products = activate_current_bundle_native_products()?;
-    if let Some(code) = native_products.run_child_entrypoint(package_image_text, routine_key)? {
-        return Ok(code);
-    }
-    let plan = parse_runtime_package_image(package_image_text)?;
-    let mut host = current_process_runtime_host()?;
-    execute_entrypoint_routine(&plan, routine_key, host.as_mut())
-}
-
-pub fn current_process_runtime_host() -> Result<Box<dyn RuntimeHost>, String> {
-    #[cfg(windows)]
-    {
-        Ok(Box::new(NativeProcessHost::current()?))
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut host = BufferedHost::default();
-        host.args = std::env::args().skip(1).collect();
-        host.env = std::env::vars().collect();
-        host.allow_process = true;
-        host.cwd = std::env::current_dir()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Ok(Box::new(host))
-    }
-}
-
-pub(crate) fn ensure_audio_buffer_matches_device(
-    device_sample_rate_hz: i64,
-    device_channels: i64,
-    buffer_sample_rate_hz: i64,
-    buffer_channels: i64,
-) -> Result<(), String> {
-    if device_sample_rate_hz == buffer_sample_rate_hz && device_channels == buffer_channels {
-        return Ok(());
-    }
-    Err(format!(
-        "AudioBuffer format {buffer_sample_rate_hz} Hz / {buffer_channels} channel(s) does not match AudioDevice format {device_sample_rate_hz} Hz / {device_channels} channel(s)"
-    ))
-}
-
-#[cfg(all(test, windows))]
-mod raw_binding_tests {
-    use super::*;
-    use crate::native_product_loader::RuntimeBindingImportOutcome;
-    use std::collections::BTreeMap;
-
-    unsafe extern "system" fn test_free_owned_bytes(ptr: *mut u8, len: usize) {
-        unsafe {
-            arcana_cabi::free_owned_bytes(ptr, len);
-        }
-    }
-
-    unsafe extern "system" fn test_free_owned_str(ptr: *mut u8, len: usize) {
-        unsafe {
-            arcana_cabi::free_owned_str(ptr, len);
-        }
-    }
-
-    fn sample_binding_layouts() -> Vec<ArcanaCabiBindingLayout> {
-        vec![
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.Rect".to_string(),
-                size: 12,
-                align: 4,
-                kind: ArcanaCabiBindingLayoutKind::Struct {
-                    fields: vec![
-                        arcana_cabi::ArcanaCabiBindingLayoutField {
-                            name: "left".to_string(),
-                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
-                            offset: 0,
-                            bit_width: None,
-                            bit_offset: None,
-                        },
-                        arcana_cabi::ArcanaCabiBindingLayoutField {
-                            name: "top".to_string(),
-                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
-                            offset: 4,
-                            bit_width: None,
-                            bit_offset: None,
-                        },
-                        arcana_cabi::ArcanaCabiBindingLayoutField {
-                            name: "flags".to_string(),
-                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::U32),
-                            offset: 8,
-                            bit_width: Some(3),
-                            bit_offset: Some(0),
-                        },
-                    ],
-                },
-            },
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.Words".to_string(),
-                size: 8,
-                align: 2,
-                kind: ArcanaCabiBindingLayoutKind::Array {
-                    element_type: ArcanaCabiBindingRawType::Scalar(
-                        ArcanaCabiBindingScalarType::U16,
-                    ),
-                    len: 4,
-                },
-            },
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.Mode".to_string(),
-                size: 4,
-                align: 4,
-                kind: ArcanaCabiBindingLayoutKind::Enum {
-                    repr: ArcanaCabiBindingScalarType::U32,
-                    variants: vec![
-                        arcana_cabi::ArcanaCabiBindingLayoutEnumVariant {
-                            name: "Idle".to_string(),
-                            value: 0,
-                        },
-                        arcana_cabi::ArcanaCabiBindingLayoutEnumVariant {
-                            name: "Busy".to_string(),
-                            value: 1,
-                        },
-                    ],
-                },
-            },
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.ValueUnion".to_string(),
-                size: 4,
-                align: 4,
-                kind: ArcanaCabiBindingLayoutKind::Union {
-                    fields: vec![
-                        arcana_cabi::ArcanaCabiBindingLayoutField {
-                            name: "as_int".to_string(),
-                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
-                            offset: 0,
-                            bit_width: None,
-                            bit_offset: None,
-                        },
-                        arcana_cabi::ArcanaCabiBindingLayoutField {
-                            name: "as_word".to_string(),
-                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::U16),
-                            offset: 0,
-                            bit_width: None,
-                            bit_offset: None,
-                        },
-                    ],
-                },
-            },
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.WindowProc".to_string(),
-                size: std::mem::size_of::<usize>(),
-                align: std::mem::size_of::<usize>(),
-                kind: ArcanaCabiBindingLayoutKind::Callback {
-                    abi: "system".to_string(),
-                    params: vec![ArcanaCabiBindingRawType::Scalar(
-                        ArcanaCabiBindingScalarType::I32,
-                    )],
-                    return_type: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
-                },
-            },
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.IUnknownVTable".to_string(),
-                size: std::mem::size_of::<usize>() * 3,
-                align: std::mem::size_of::<usize>(),
-                kind: ArcanaCabiBindingLayoutKind::Struct {
-                    fields: vec![arcana_cabi::ArcanaCabiBindingLayoutField {
-                        name: "query_interface".to_string(),
-                        ty: ArcanaCabiBindingRawType::FunctionPointer {
-                            abi: "system".to_string(),
-                            nullable: false,
-                            params: vec![ArcanaCabiBindingRawType::Pointer {
-                                mutable: false,
-                                inner: Box::new(ArcanaCabiBindingRawType::Void),
-                            }],
-                            return_type: Box::new(ArcanaCabiBindingRawType::Scalar(
-                                ArcanaCabiBindingScalarType::I32,
-                            )),
-                        },
-                        offset: 0,
-                        bit_width: None,
-                        bit_offset: None,
-                    }],
-                },
-            },
-            ArcanaCabiBindingLayout {
-                layout_id: "hostapi.raw.IUnknown".to_string(),
-                size: std::mem::size_of::<usize>(),
-                align: std::mem::size_of::<usize>(),
-                kind: ArcanaCabiBindingLayoutKind::Interface {
-                    iid: Some("00000000-0000-0000-C000-000000000046".to_string()),
-                    vtable_layout_id: Some("hostapi.raw.IUnknownVTable".to_string()),
-                },
-            },
-        ]
-    }
-
-    fn rect_value(left: i64, top: i64, flags: i64) -> RuntimeValue {
-        RuntimeValue::Record {
-            name: "hostapi.raw.Rect".to_string(),
-            fields: BTreeMap::from([
-                ("left".to_string(), RuntimeValue::Int(left)),
-                ("top".to_string(), RuntimeValue::Int(top)),
-                ("flags".to_string(), RuntimeValue::Int(flags)),
-            ]),
-        }
-    }
-
-    #[test]
-    fn raw_binding_runtime_round_trips_layout_values() {
-        let layouts = sample_binding_layouts();
-
-        let rect = rect_value(12, -8, 5);
-        let encoded = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Rect",
-            rect.clone(),
-        )
-        .expect("struct output should encode");
-        assert_eq!(
-            encoded.tag().expect("tag should parse"),
-            ArcanaCabiBindingValueTag::Layout
-        );
-        let decoded = runtime_value_from_binding_cabi_output(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Rect",
-            &encoded,
-            test_free_owned_bytes,
-            test_free_owned_str,
-            "struct result",
-        )
-        .expect("struct output should decode");
-        assert_eq!(decoded, rect);
-
-        let words = RuntimeValue::Array(vec![
-            RuntimeValue::Int(1),
-            RuntimeValue::Int(2),
-            RuntimeValue::Int(3),
-            RuntimeValue::Int(4),
-        ]);
-        let encoded = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Words",
-            words.clone(),
-        )
-        .expect("array output should encode");
-        let decoded = runtime_value_from_binding_cabi_output(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Words",
-            &encoded,
-            test_free_owned_bytes,
-            test_free_owned_str,
-            "array result",
-        )
-        .expect("array output should decode");
-        assert_eq!(decoded, words);
-
-        let union = RuntimeValue::Record {
-            name: "hostapi.raw.ValueUnion".to_string(),
-            fields: BTreeMap::from([("as_word".to_string(), RuntimeValue::Int(7))]),
-        };
-        let encoded = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.ValueUnion",
-            union.clone(),
-        )
-        .expect("union output should encode");
-        let decoded = runtime_value_from_binding_cabi_output(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.ValueUnion",
-            &encoded,
-            test_free_owned_bytes,
-            test_free_owned_str,
-            "union result",
-        )
-        .expect("union output should decode");
-        let RuntimeValue::Record { fields, .. } = decoded else {
-            panic!("decoded union should remain a record");
-        };
-        assert_eq!(fields.get("as_word"), Some(&RuntimeValue::Int(7)));
-
-        let callback_value = RuntimeValue::Int(0x1234);
-        let encoded = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.WindowProc",
-            callback_value.clone(),
-        )
-        .expect("callback pointer should encode");
-        let decoded = runtime_value_from_binding_cabi_output(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.WindowProc",
-            &encoded,
-            test_free_owned_bytes,
-            test_free_owned_str,
-            "callback result",
-        )
-        .expect("callback pointer should decode");
-        assert_eq!(decoded, callback_value);
-
-        let enum_value = RuntimeValue::Int(1);
-        let encoded = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Mode",
-            enum_value.clone(),
-        )
-        .expect("enum value should encode");
-        let decoded = runtime_value_from_binding_cabi_output(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Mode",
-            &encoded,
-            test_free_owned_bytes,
-            test_free_owned_str,
-            "enum result",
-        )
-        .expect("enum value should decode");
-        assert_eq!(decoded, enum_value);
-
-        let interface_value = RuntimeValue::Int(0x2468);
-        let encoded = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.IUnknown",
-            interface_value.clone(),
-        )
-        .expect("interface pointer should encode");
-        let decoded = runtime_value_from_binding_cabi_output(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.IUnknown",
-            &encoded,
-            test_free_owned_bytes,
-            test_free_owned_str,
-            "interface result",
-        )
-        .expect("interface pointer should decode");
-        assert_eq!(decoded, interface_value);
-    }
-
-    #[test]
-    fn raw_binding_runtime_rejects_multi_field_union_values() {
-        let layouts = sample_binding_layouts();
-        let err = match runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.ValueUnion",
-            RuntimeValue::Record {
-                name: "hostapi.raw.ValueUnion".to_string(),
-                fields: BTreeMap::from([
-                    ("as_int".to_string(), RuntimeValue::Int(1)),
-                    ("as_word".to_string(), RuntimeValue::Int(2)),
-                ]),
-            },
-        ) {
-            Ok(_) => panic!("union output should require exactly one active field"),
-            Err(err) => err,
-        };
-        assert!(err.contains("exactly one field"), "{err}");
-    }
-
-    #[test]
-    fn raw_binding_runtime_applies_named_layout_write_backs() {
-        let layouts = sample_binding_layouts();
-        let updated = rect_value(32, 48, 3);
-        let write_back = runtime_binding_output_from_runtime_value(
-            &layouts,
-            "hostapi",
-            "hostapi.raw.Rect",
-            updated.clone(),
-        )
-        .expect("write-back value should encode");
-        let outcome = RuntimeBindingImportOutcome {
-            result: ArcanaCabiBindingValueV1::default(),
-            write_backs: vec![write_back],
-            owned_bytes_free: test_free_owned_bytes,
-            owned_str_free: test_free_owned_str,
-        };
-        let params = vec![arcana_ir::IrRoutineParam {
-            binding_id: 0,
-            mode: Some("edit".to_string()),
-            name: "rect".to_string(),
-            ty: parse_routine_type_text("hostapi.raw.Rect").expect("type should parse"),
-        }];
-        let final_args = runtime_final_args_from_binding_import(
-            &layouts,
-            "hostapi",
-            &params,
-            &[rect_value(1, 2, 0)],
-            &outcome,
-        )
-        .expect("named layout write-back should decode");
-        assert_eq!(final_args, vec![updated]);
-    }
 }
 
 #[cfg(test)]

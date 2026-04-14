@@ -1,6 +1,9 @@
 name = "arcana_winapi"
 kind = "lib"
 
+[deps]
+std = { path = "../../../std" }
+
 [native.products.default]
 kind = "dll"
 role = "binding"

@@ -210,13 +210,17 @@ These guarantees are public contract because compiler caches, diagnostics, and s
 
 ## Views and Borrowed Slices
 
-- Approved first-class view types:
-  - `ReadView[T]`
-  - `EditView[T]`
-  - `ByteView`
-  - `ByteEditView`
-  - `StrView`
-- Views are contiguous-only in this window.
+- Approved first-class view surface:
+  - builtin `View[Elem, Family]`
+  - first-wave family markers:
+    - `Contiguous`
+    - `Strided`
+    - `Mapped`
+- Approved owned payload/buffer companions tied to the view surface:
+  - `Bytes`
+  - `ByteBuffer`
+  - `Utf16`
+  - `Utf16Buffer`
 - View aliasing is shared-read / exclusive-edit.
 - Invalidating mutations must reject conflicting live views:
   - `reset`
@@ -224,22 +228,21 @@ These guarantees are public contract because compiler caches, diagnostics, and s
   - overwrite
   - compaction
   - `unseal`
-- Current owned slice behavior remains unchanged:
-  - `x[a..b]` is an owned slice/copy
-- Borrowed-slice creation is explicit:
+- Current contiguous range sugar remains:
+  - `x[a..b]`
+- Borrowed-slice creation is explicit and routes through the `View[...]` surface:
   - `&read x[a..b]`
   - `&edit x[a..b]`
-- Borrowed-slice syntax is intentionally narrow:
+- Explicit projection syntax is approved around the same family model:
+  - `x[contiguous start: a, end: b]`
+  - `x[strided start: a, len: n, stride: s]`
+- Borrowed/projection syntax is intentionally narrow:
   - built-in/indexable std surfaces
-  - view types
-  - generic trait users use explicit methods
-- `StrView` is UTF-8-valid and read-only.
-- No mutable string view is approved in this window.
-- Approved explicit trait layer over the concrete memory/view surface:
-  - `ViewSource[S]`
-  - `EditViewSource[S]`
-  - `ContiguousBytes[S]`
-  - `ContiguousBytesEdit[S]`
+  - `View[...]` values
+  - generic users use explicit methods rather than implicit coercion
+- Text-backed projections are UTF-8-valid and read-only.
+- No mutable string/UTF-8 text view is approved in this window.
+- Approved explicit trait layer over the allocator/publication surface:
   - `Resettable[S]`
   - `IdAllocating[S]`
   - `LiveIterable[S]`
@@ -281,6 +284,6 @@ These guarantees are public contract because compiler caches, diagnostics, and s
 
 - No public `stack` or `heap` family names are approved.
 - No implicit coercion or autoderef growth is implied by view support.
-- Views are contiguous-only in this window.
+- Approved first-wave view families in this window are `Contiguous`, `Strided`, and `Mapped`.
 - Descriptor views at the native boundary must stay typed and explicit; no raw refs or erased value carriers are approved.
 - `docs/specs/memory/memory/generic-memory-spec.md` remains historical reference context, not rewrite authority.

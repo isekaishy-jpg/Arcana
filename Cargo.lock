@@ -43,7 +43,6 @@ dependencies = [
  "libloading",
  "serde_json",
  "toml",
- "windows-sys",
 ]
 
 [[package]]
@@ -113,6 +112,7 @@ dependencies = [
  "arcana-ir",
  "arcana-language-law",
  "arcana-package",
+ "libloading",
  "pathdiff",
  "serde",
  "serde_json",
@@ -120,7 +120,6 @@ dependencies = [
  "sha2",
  "stacker",
  "toml",
- "windows-sys",
 ]
 
 [[package]]

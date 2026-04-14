@@ -1,0 +1,8 @@
+name = "arcsb_app"
+kind = "app"
+
+[deps]
+arcana_desktop = { path = "../../../grimoires/libs/arcana-desktop", native_child = "default" }
+arcana_graphics = { path = "../../../grimoires/libs/arcana-graphics" }
+arcana_process = { path = "../../../grimoires/arcana/process" }
+arcana_winapi = { path = "../../../grimoires/arcana/winapi" }

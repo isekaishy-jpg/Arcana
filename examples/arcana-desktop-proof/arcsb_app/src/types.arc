@@ -1,0 +1,1 @@
+// arcsb proof types placeholder

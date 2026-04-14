@@ -4690,7 +4690,7 @@ mod tests {
         );
         write_file(
             &dir.join("src").join("shelf.arc"),
-            "use std.io.print\nfn main() -> Int:\n    return 0\n",
+            "use arcana_process.io.print\nfn main() -> Int:\n    return 0\n",
         );
         write_file(&dir.join("src").join("types.arc"), "// types\n");
         write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
@@ -5172,7 +5172,7 @@ mod tests {
         write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
         write_file(
             &dir.join("src").join("shelf.arc"),
-            "import std.io\nfn main() -> Int:\n    std.io.print :: 1 :: call\n    return 0\n",
+            "import arcana_process.io\nfn main() -> Int:\n    arcana_process.io.print :: 1 :: call\n    return 0\n",
         );
         write_file(&dir.join("src").join("types.arc"), "// types\n");
         write_std_io_grimoire(&dir);
@@ -5186,7 +5186,7 @@ mod tests {
         let status = status(&first_statuses, "app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
-        let malformed = stale.replace("module=app:import:std.io:", "module=app:import::");
+        let malformed = stale.replace("module=app:import:arcana_process.io:", "module=app:import::");
         fs::write(&artifact_path, malformed).expect("artifact should be rewritten");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
@@ -5543,9 +5543,9 @@ toolchain = \"future-toolchain\"\n"
         write_file(
             &dir.join("src/book.arc"),
             concat!(
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "export fn announce() -> Int:\n",
-                "    std.io.print[Int] :: 7 :: call\n",
+                "    arcana_process.io.print[Int] :: 7 :: call\n",
                 "    return 7\n",
             ),
         );
@@ -5562,20 +5562,8 @@ toolchain = \"future-toolchain\"\n"
             ),
         );
         write_file(
-            &dir.join("std/src/audio.arc"),
-            concat!(
-                "import std.kernel.audio\n",
-                "export fn default_output() -> Int:\n",
-                "    return std.kernel.audio.default_output :: :: call\n",
-            ),
-        );
-        write_file(
             &dir.join("std/src/kernel/io.arc"),
             "intrinsic fn print[T](read value: T) = IoPrint\n",
-        );
-        write_file(
-            &dir.join("std/src/kernel/audio.arc"),
-            "intrinsic fn default_output() -> Int = AudioDefaultOutputTry\n",
         );
 
         let graph = load_workspace_graph(&dir).expect("load graph");
@@ -5603,12 +5591,12 @@ toolchain = \"future-toolchain\"\n"
         write_file(
             &dir.join("src/types.arc"),
             concat!(
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "export record Counter:\n",
                 "    value: Int\n",
                 "impl Counter:\n",
                 "    fn announce(read self: Counter) -> Int:\n",
-                "        std.io.print[Int] :: self.value :: call\n",
+                "        arcana_process.io.print[Int] :: self.value :: call\n",
                 "        return self.value\n",
             ),
         );
@@ -5645,9 +5633,9 @@ toolchain = \"future-toolchain\"\n"
         write_file(
             &dir.join("src/book.arc"),
             concat!(
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "export fn announce() -> Int:\n",
-                "    std.io.print[Int] :: 7 :: call\n",
+                "    arcana_process.io.print[Int] :: 7 :: call\n",
                 "    return 7\n",
             ),
         );
@@ -5668,7 +5656,7 @@ toolchain = \"future-toolchain\"\n"
             parsed
                 .modules
                 .iter()
-                .any(|module| module.module_id == "std.io"),
+                .any(|module| module.module_id == "arcana_process.io"),
             "expected linked dependency modules to remain in artifact: {artifact}"
         );
         assert!(

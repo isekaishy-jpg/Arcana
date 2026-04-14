@@ -1,0 +1,4 @@
+# Explicit temporary exceptions for protected language-contract files.
+# One normalized repo-relative path per line.
+
+docs/arcana-v0.md

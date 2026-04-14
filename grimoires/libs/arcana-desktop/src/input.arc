@@ -1,38 +1,38 @@
 import arcana_desktop.types
-import std.kernel.gfx
+import arcana_winapi.helpers.input
 
 export fn key_code(name: Str) -> Int:
-    return std.kernel.gfx.input_key_code :: name :: call
+    return arcana_winapi.helpers.input.input_key_code :: name :: call
 
-export fn key_down(read frame: arcana_desktop.types.FrameInput, key: Int) -> Bool:
-    return std.kernel.gfx.input_key_down :: frame, key :: call
+export fn key_down(read frame: arcana_winapi.desktop_handles.FrameInput, key: Int) -> Bool:
+    return arcana_winapi.helpers.input.input_key_down :: frame, key :: call
 
-export fn key_pressed(read frame: arcana_desktop.types.FrameInput, key: Int) -> Bool:
-    return std.kernel.gfx.input_key_pressed :: frame, key :: call
+export fn key_pressed(read frame: arcana_winapi.desktop_handles.FrameInput, key: Int) -> Bool:
+    return arcana_winapi.helpers.input.input_key_pressed :: frame, key :: call
 
-export fn key_released(read frame: arcana_desktop.types.FrameInput, key: Int) -> Bool:
-    return std.kernel.gfx.input_key_released :: frame, key :: call
+export fn key_released(read frame: arcana_winapi.desktop_handles.FrameInput, key: Int) -> Bool:
+    return arcana_winapi.helpers.input.input_key_released :: frame, key :: call
 
 export fn mouse_button_code(name: Str) -> Int:
-    return std.kernel.gfx.input_mouse_button_code :: name :: call
+    return arcana_winapi.helpers.input.input_mouse_button_code :: name :: call
 
-export fn mouse_pos(read frame: arcana_desktop.types.FrameInput) -> (Int, Int):
-    return std.kernel.gfx.input_mouse_pos :: frame :: call
+export fn mouse_pos(read frame: arcana_winapi.desktop_handles.FrameInput) -> (Int, Int):
+    return arcana_winapi.helpers.input.input_mouse_pos :: frame :: call
 
-export fn mouse_down(read frame: arcana_desktop.types.FrameInput, button: Int) -> Bool:
-    return std.kernel.gfx.input_mouse_down :: frame, button :: call
+export fn mouse_down(read frame: arcana_winapi.desktop_handles.FrameInput, button: Int) -> Bool:
+    return arcana_winapi.helpers.input.input_mouse_down :: frame, button :: call
 
-export fn mouse_pressed(read frame: arcana_desktop.types.FrameInput, button: Int) -> Bool:
-    return std.kernel.gfx.input_mouse_pressed :: frame, button :: call
+export fn mouse_pressed(read frame: arcana_winapi.desktop_handles.FrameInput, button: Int) -> Bool:
+    return arcana_winapi.helpers.input.input_mouse_pressed :: frame, button :: call
 
-export fn mouse_released(read frame: arcana_desktop.types.FrameInput, button: Int) -> Bool:
-    return std.kernel.gfx.input_mouse_released :: frame, button :: call
+export fn mouse_released(read frame: arcana_winapi.desktop_handles.FrameInput, button: Int) -> Bool:
+    return arcana_winapi.helpers.input.input_mouse_released :: frame, button :: call
 
-export fn mouse_in_window(read frame: arcana_desktop.types.FrameInput) -> Bool:
-    return std.kernel.gfx.input_mouse_in_window :: frame :: call
+export fn mouse_in_window(read frame: arcana_winapi.desktop_handles.FrameInput) -> Bool:
+    return arcana_winapi.helpers.input.input_mouse_in_window :: frame :: call
 
-export fn mouse_wheel_y(read frame: arcana_desktop.types.FrameInput) -> Int:
-    return std.kernel.gfx.input_mouse_wheel_y :: frame :: call
+export fn mouse_wheel_y(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int:
+    return arcana_winapi.helpers.input.input_mouse_wheel_y :: frame :: call
 
 export fn modifier_shift(flags: Int) -> Bool:
     return (flags & 1) != 0
@@ -88,5 +88,6 @@ export fn meta_text(read meta: arcana_desktop.types.KeyMeta) -> Str:
 export fn meta_repeated(read meta: arcana_desktop.types.KeyMeta) -> Bool:
     return meta.repeated
 
-export fn snapshot(read frame: arcana_desktop.types.FrameInput) -> arcana_desktop.types.InputSnapshot:
+export fn snapshot(read frame: arcana_winapi.desktop_handles.FrameInput) -> arcana_desktop.types.InputSnapshot:
     return arcana_desktop.types.InputSnapshot :: mouse_pos = (arcana_desktop.input.mouse_pos :: frame :: call), mouse_in_window = (arcana_desktop.input.mouse_in_window :: frame :: call), mouse_wheel_y = (arcana_desktop.input.mouse_wheel_y :: frame :: call) :: call
+

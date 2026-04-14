@@ -235,7 +235,7 @@ shackle fn com_property_key_pid_impl(read key: arcana_winapi.raw.types.PROPERTYK
     Ok(binding_layout(key.pid))
 
 shackle fn windowing_hidden_window_roundtrip_impl(read code: Int) -> Int = helpers.windowing.hidden_window_roundtrip:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let result = (|| -> Result<i64, String> {
         let ok = unsafe {
             crate::raw::user32::PostMessageW(
@@ -260,7 +260,7 @@ shackle fn windowing_hidden_window_roundtrip_impl(read code: Int) -> Int = helpe
     Ok(binding_int(result?))
 
 shackle fn windowing_hidden_window_dpi_impl() -> arcana_winapi.raw.types.UINT = helpers.windowing.hidden_window_dpi:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let dpi = unsafe { crate::raw::user32::GetDpiForWindow(hwnd) };
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
     if dpi == 0 {
@@ -272,7 +272,7 @@ shackle fn windowing_hidden_window_dpi_impl() -> arcana_winapi.raw.types.UINT = 
     Ok(binding_layout(dpi))
 
 shackle fn windowing_hidden_window_monitor_dpi_impl() -> arcana_winapi.raw.types.UINT = helpers.windowing.hidden_window_monitor_dpi:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let result = (|| -> Result<crate::raw::types::UINT, String> {
         let monitor = unsafe {
             crate::raw::user32::MonitorFromWindow(hwnd, crate::raw::constants::MONITOR_DEFAULTTONEAREST)
@@ -299,7 +299,7 @@ shackle fn windowing_hidden_window_monitor_dpi_impl() -> arcana_winapi.raw.types
     Ok(binding_layout(result?))
 
 shackle fn windowing_hidden_window_dark_mode_roundtrip_impl() -> Bool = helpers.windowing.hidden_window_dark_mode_roundtrip:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let enabled = (|| -> bool {
         let request = 1i32;
         let set_hr = unsafe {
@@ -328,7 +328,7 @@ shackle fn windowing_hidden_window_dark_mode_roundtrip_impl() -> Bool = helpers.
     Ok(binding_bool(enabled))
 
 shackle fn windowing_hidden_window_client_rect_impl() -> arcana_winapi.raw.types.RECT = helpers.windowing.hidden_window_client_rect:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let mut rect = unsafe { std::mem::zeroed::<crate::raw::types::RECT>() };
     let ok = unsafe { crate::raw::user32::GetClientRect(hwnd, &mut rect) };
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
@@ -341,7 +341,7 @@ shackle fn windowing_hidden_window_client_rect_impl() -> arcana_winapi.raw.types
     Ok(binding_layout(rect))
 
 shackle fn windowing_hidden_window_frame_rect_impl() -> arcana_winapi.raw.types.RECT = helpers.windowing.hidden_window_frame_rect:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let mut rect = unsafe { std::mem::zeroed::<crate::raw::types::RECT>() };
     let hr = unsafe {
         crate::raw::dwmapi::DwmGetWindowAttribute(
@@ -358,7 +358,7 @@ shackle fn windowing_hidden_window_frame_rect_impl() -> arcana_winapi.raw.types.
     Ok(binding_layout(rect))
 
 shackle fn windowing_clipboard_open_roundtrip_impl() -> Bool = helpers.windowing.clipboard_open_roundtrip:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let opened = unsafe { crate::raw::user32::OpenClipboard(hwnd) != 0 };
     if opened {
         unsafe {
@@ -369,7 +369,7 @@ shackle fn windowing_clipboard_open_roundtrip_impl() -> Bool = helpers.windowing
     Ok(binding_bool(opened))
 
 shackle fn windowing_enable_file_drop_roundtrip_impl() -> Bool = helpers.windowing.enable_file_drop_roundtrip:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     unsafe {
         crate::raw::user32::DragAcceptFiles(hwnd, 1);
         crate::raw::user32::DragAcceptFiles(hwnd, 0);
@@ -378,7 +378,7 @@ shackle fn windowing_enable_file_drop_roundtrip_impl() -> Bool = helpers.windowi
     Ok(binding_bool(true))
 
 shackle fn windowing_ime_composition_bytes_impl() -> Int = helpers.windowing.ime_composition_bytes:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let bytes = unsafe {
         let context = crate::raw::imm32::ImmGetContext(hwnd);
         if context.is_null() {
@@ -397,14 +397,352 @@ shackle fn windowing_ime_composition_bytes_impl() -> Int = helpers.windowing.ime
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
     Ok(binding_int(bytes))
 
-shackle fn graphics_gdi_memory_surface_stride_impl(read width: Int, read height: Int) -> Int = helpers.graphics.gdi_memory_surface_stride:
-    if width <= 0 || height <= 0 {
-        return Err("surface dimensions must be > 0".to_string());
+shackle flags WinapiClipboardInternals:
+    static REGISTERED_BYTES_CLIPBOARD_FORMAT: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
+    pub(crate) const CF_UNICODETEXT_NATIVE: u32 = 13;
+    pub(crate) const GMEM_MOVEABLE_NATIVE: u32 = 0x0002;
+    pub(crate) const ARCANA_BYTES_CLIPBOARD_FORMAT_NAME: &str = "ArcanaRuntimeBytes";
+
+    pub(crate) struct ClipboardGuard;
+
+    impl ClipboardGuard {
+        pub(crate) fn open() -> Result<Self, String> {
+            if unsafe { crate::raw::user32::OpenClipboard(std::ptr::null_mut()) } == 0 {
+                return Err("failed to open Windows clipboard".to_string());
+            }
+            Ok(Self)
+        }
     }
-    Ok(binding_int(width * 4))
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = crate::raw::user32::CloseClipboard();
+            }
+        }
+    }
+
+    pub(crate) fn bytes_clipboard_format() -> Result<u32, String> {
+        REGISTERED_BYTES_CLIPBOARD_FORMAT
+            .get_or_init(|| {
+                let name = wide_nul(ARCANA_BYTES_CLIPBOARD_FORMAT_NAME);
+                let format = unsafe { crate::raw::user32::RegisterClipboardFormatW(name.as_ptr()) };
+                if format == 0 {
+                    Err("failed to register Arcana bytes clipboard format".to_string())
+                } else {
+                    Ok(format)
+                }
+            })
+            .clone()
+    }
+
+    pub(crate) fn clipboard_payload_from_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(8 + bytes.len());
+        payload.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        payload.extend_from_slice(bytes);
+        payload
+    }
+
+    pub(crate) fn decode_clipboard_bytes_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+        if bytes.len() < 8 {
+            return Err("Windows clipboard bytes payload is truncated".to_string());
+        }
+        let declared_len = u64::from_le_bytes(bytes[..8].try_into().expect("prefix should fit"));
+        let declared_len = usize::try_from(declared_len)
+            .map_err(|_| "Windows clipboard bytes payload length overflow".to_string())?;
+        if bytes.len() < 8 + declared_len {
+            return Err("Windows clipboard bytes payload is truncated".to_string());
+        }
+        Ok(bytes[8..8 + declared_len].to_vec())
+    }
+
+    pub(crate) fn clipboard_write_block(format: u32, bytes: &[u8]) -> Result<(), String> {
+        let _guard = ClipboardGuard::open()?;
+        if unsafe { crate::raw::user32::EmptyClipboard() } == 0 {
+            return Err("failed to clear Windows clipboard".to_string());
+        }
+        let handle = unsafe {
+            crate::raw::kernel32::GlobalAlloc(GMEM_MOVEABLE_NATIVE, bytes.len())
+        };
+        if handle.is_null() {
+            return Err("failed to allocate Windows clipboard block".to_string());
+        }
+        let locked = unsafe { crate::raw::kernel32::GlobalLock(handle) } as *mut u8;
+        if locked.is_null() {
+            unsafe {
+                let _ = crate::raw::kernel32::GlobalFree(handle);
+            }
+            return Err("failed to lock Windows clipboard block".to_string());
+        }
+        if !bytes.is_empty() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked, bytes.len());
+            }
+        }
+        unsafe {
+            let _ = crate::raw::kernel32::GlobalUnlock(handle);
+        }
+        let stored = unsafe { crate::raw::user32::SetClipboardData(format, handle) };
+        if stored.is_null() {
+            unsafe {
+                let _ = crate::raw::kernel32::GlobalFree(handle);
+            }
+            return Err("failed to publish Windows clipboard data".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clipboard_read_block(format: u32) -> Result<Vec<u8>, String> {
+        let _guard = ClipboardGuard::open()?;
+        if unsafe { crate::raw::user32::IsClipboardFormatAvailable(format) } == 0 {
+            return Err("requested Windows clipboard format is not available".to_string());
+        }
+        let handle = unsafe { crate::raw::user32::GetClipboardData(format) };
+        if handle.is_null() {
+            return Err("failed to access Windows clipboard data".to_string());
+        }
+        let locked = unsafe { crate::raw::kernel32::GlobalLock(handle) } as *const u8;
+        if locked.is_null() {
+            return Err("failed to lock Windows clipboard data".to_string());
+        }
+        let size = unsafe { crate::raw::kernel32::GlobalSize(handle) };
+        let bytes = unsafe { std::slice::from_raw_parts(locked, size) }.to_vec();
+        unsafe {
+            let _ = crate::raw::kernel32::GlobalUnlock(handle);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn clipboard_write_text_impl(text: &str) -> Result<(), String> {
+        let utf16 = wide_nul(text);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                utf16.as_ptr() as *const u8,
+                utf16.len() * std::mem::size_of::<u16>(),
+            )
+        };
+        clipboard_write_block(CF_UNICODETEXT_NATIVE, bytes)
+    }
+
+    pub(crate) fn clipboard_read_text_impl() -> Result<String, String> {
+        let bytes = clipboard_read_block(CF_UNICODETEXT_NATIVE)?;
+        if bytes.len() % std::mem::size_of::<u16>() != 0 {
+            return Err("Windows clipboard text payload is not valid UTF-16".to_string());
+        }
+        let units = unsafe {
+            std::slice::from_raw_parts(
+                bytes.as_ptr() as *const u16,
+                bytes.len() / std::mem::size_of::<u16>(),
+            )
+        };
+        let end = units
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(units.len());
+        String::from_utf16(&units[..end])
+            .map_err(|_| "Windows clipboard text is not valid UTF-16".to_string())
+    }
+
+    pub(crate) fn clipboard_write_bytes_impl(bytes: &[u8]) -> Result<(), String> {
+        let format = bytes_clipboard_format()?;
+        let payload = clipboard_payload_from_bytes(bytes);
+        clipboard_write_block(format, &payload)
+    }
+
+    pub(crate) fn clipboard_read_bytes_impl() -> Result<Vec<u8>, String> {
+        let format = bytes_clipboard_format()?;
+        let payload = clipboard_read_block(format)?;
+        decode_clipboard_bytes_payload(&payload)
+    }
+
+shackle fn clipboard_read_text_raw_impl() -> Str = helpers.clipboard.read_text_raw:
+    crate::shackle::clear_helper_error(instance);
+    match clipboard_read_text_impl() {
+        Ok(text) => Ok(binding_owned_str(text)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_owned_str(String::new()))
+        }
+    }
+
+shackle fn clipboard_write_text_raw_impl(read text: Str) -> Bool = helpers.clipboard.write_text_raw:
+    crate::shackle::clear_helper_error(instance);
+    match clipboard_write_text_impl(&text) {
+        Ok(()) => Ok(binding_bool(true)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_bool(false))
+        }
+    }
+
+shackle fn clipboard_read_bytes_raw_impl() -> Bytes = helpers.clipboard.read_bytes_raw:
+    crate::shackle::clear_helper_error(instance);
+    match clipboard_read_bytes_impl() {
+        Ok(bytes) => Ok(binding_owned_bytes(bytes)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_owned_bytes(Vec::new()))
+        }
+    }
+
+shackle fn clipboard_write_bytes_raw_impl(read bytes: Bytes) -> Bool = helpers.clipboard.write_bytes_raw:
+    crate::shackle::clear_helper_error(instance);
+    match clipboard_write_bytes_impl(&bytes) {
+        Ok(()) => Ok(binding_bool(true)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_bool(false))
+        }
+    }
+
+shackle fn clipboard_take_last_error_impl() -> Str = helpers.clipboard.take_last_error:
+    Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
+
+shackle flags WinapiSoftwareSurfaceInternals:
+    pub(crate) fn software_surface_pixels_len(
+        instance: &crate::BindingInstance,
+        map_handle: i64,
+    ) -> Result<i64, String> {
+        let map = crate::shackle::software_surface_map_ref(instance, map_handle)?;
+        let surface = crate::shackle::software_surface_ref(instance, map.surface)?;
+        Ok(surface.pixels.len() as i64)
+    }
+
+    pub(crate) fn software_surface_pixel_at(
+        instance: &crate::BindingInstance,
+        map_handle: i64,
+        index: i64,
+    ) -> Result<i64, String> {
+        if index < 0 {
+            return Err(format!("software surface byte index `{index}` must be >= 0"));
+        }
+        let map = crate::shackle::software_surface_map_ref(instance, map_handle)?;
+        let surface = crate::shackle::software_surface_ref(instance, map.surface)?;
+        let value = surface
+            .pixels
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| format!("software surface byte index `{index}` is out of bounds"))?;
+        Ok(i64::from(value))
+    }
+
+    pub(crate) fn software_surface_pixel_set(
+        instance: &mut crate::BindingInstance,
+        map_handle: i64,
+        index: i64,
+        value: i64,
+    ) -> Result<(), String> {
+        if index < 0 {
+            return Err(format!("software surface byte index `{index}` must be >= 0"));
+        }
+        if !(0..=255).contains(&value) {
+            return Err(format!(
+                "software surface byte value `{value}` is out of range `0..=255`"
+            ));
+        }
+        let surface_handle = crate::shackle::software_surface_map_ref(instance, map_handle)?.surface;
+        let surface = crate::shackle::software_surface_mut(instance, surface_handle)?;
+        let slot = surface
+            .pixels
+            .get_mut(index as usize)
+            .ok_or_else(|| format!("software surface byte index `{index}` is out of bounds"))?;
+        *slot = value as u8;
+        Ok(())
+    }
+
+    pub(crate) fn present_software_surface(
+        surface: &crate::shackle::SoftwareSurfaceState,
+        bounded: Option<(i64, i64, i64, i64)>,
+    ) -> Result<(), String> {
+        if surface.hwnd.is_null() {
+            return Err("software surface does not have a native HWND".to_string());
+        }
+        if surface.width <= 0 || surface.height <= 0 || surface.stride <= 0 {
+            return Err("software surface is not configured".to_string());
+        }
+        let dc = unsafe { crate::raw::user32::GetDC(surface.hwnd) };
+        if dc.is_null() {
+            return Err(format!(
+                "GetDC failed with Win32 error {}",
+                unsafe { crate::raw::kernel32::GetLastError() }
+            ));
+        }
+        let mut info = crate::raw::types::BITMAPINFO {
+            bmiHeader: crate::raw::types::BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<crate::raw::types::BITMAPINFOHEADER>() as u32,
+                biWidth: surface.width as i32,
+                biHeight: -(surface.height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: crate::raw::constants::BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [crate::raw::types::RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
+        };
+        let copied = if let Some((x, y, width, height)) = bounded {
+            unsafe {
+                crate::raw::gdi32::StretchDIBits(
+                    dc,
+                    x as i32,
+                    y as i32,
+                    width as i32,
+                    height as i32,
+                    x as i32,
+                    y as i32,
+                    width as i32,
+                    height as i32,
+                    surface.pixels.as_ptr() as *const std::ffi::c_void,
+                    &info,
+                    crate::raw::constants::DIB_RGB_COLORS,
+                    crate::raw::constants::SRCCOPY,
+                )
+            }
+        } else {
+            let mut client = unsafe { std::mem::zeroed::<crate::raw::types::RECT>() };
+            unsafe {
+                crate::raw::user32::GetClientRect(surface.hwnd, &mut client);
+            }
+            unsafe {
+                crate::raw::gdi32::StretchDIBits(
+                    dc,
+                    0,
+                    0,
+                    client.right - client.left,
+                    client.bottom - client.top,
+                    0,
+                    0,
+                    surface.width as i32,
+                    surface.height as i32,
+                    surface.pixels.as_ptr() as *const std::ffi::c_void,
+                    &info,
+                    crate::raw::constants::DIB_RGB_COLORS,
+                    crate::raw::constants::SRCCOPY,
+                )
+            }
+        };
+        unsafe {
+            crate::raw::user32::ReleaseDC(surface.hwnd, dc);
+        }
+        if copied == 0 {
+            return Err("StretchDIBits failed while presenting software surface".to_string());
+        }
+        Ok(())
+    }
+
+shackle fn graphics_gdi_memory_surface_stride_impl(read width: Int, read height: Int) -> Int = helpers.graphics.gdi_memory_surface_stride:
+    Ok(binding_int(crate::shackle::software_surface_stride(width, height)?))
 
 shackle fn graphics_gdi_hidden_window_present_impl() -> Bool = helpers.graphics.gdi_hidden_window_present:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let presented = (|| -> Result<bool, String> {
         let device = unsafe { crate::raw::user32::GetDC(hwnd) };
         if device.is_null() {
@@ -496,6 +834,278 @@ shackle fn graphics_gdi_hidden_window_present_impl() -> Bool = helpers.graphics.
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
     Ok(binding_bool(presented.unwrap_or(false)))
 
+shackle fn graphics_software_surface_open_impl(read hwnd: Int) -> Int = helpers.graphics.software_surface_open:
+    crate::shackle::clear_helper_error(instance);
+    if hwnd <= 0 {
+        crate::shackle::set_helper_error(instance, format!("software surface HWND `{hwnd}` must be > 0"));
+        return Ok(binding_int(0));
+    }
+    let state = crate::shackle::package_state_data_mut(instance)?;
+    let handle = state.next_surface_handle;
+    state.next_surface_handle += 1;
+    state.software_surfaces.insert(handle, crate::shackle::SoftwareSurfaceState {
+        hwnd: hwnd as usize as crate::raw::types::HWND,
+        width: 0,
+        height: 0,
+        stride: 0,
+        pixels: Vec::new(),
+        current_map: 0,
+        presented_once: false,
+    });
+    Ok(binding_int(handle))
+
+shackle fn graphics_software_surface_open_handle_impl(read hwnd: arcana_winapi.raw.types.HWND) -> Int = helpers.graphics.software_surface_open_handle:
+    crate::shackle::clear_helper_error(instance);
+    if hwnd.is_null() {
+        crate::shackle::set_helper_error(instance, "software surface HWND must not be null".to_string());
+        return Ok(binding_int(0));
+    }
+    let state = crate::shackle::package_state_data_mut(instance)?;
+    let handle = state.next_surface_handle;
+    state.next_surface_handle += 1;
+    state.software_surfaces.insert(handle, crate::shackle::SoftwareSurfaceState {
+        hwnd,
+        width: 0,
+        height: 0,
+        stride: 0,
+        pixels: Vec::new(),
+        current_map: 0,
+        presented_once: false,
+    });
+    Ok(binding_int(handle))
+
+shackle fn graphics_software_surface_configure_impl(read surface: Int, read width: Int, read height: Int) -> Bool = helpers.graphics.software_surface_configure:
+    crate::shackle::clear_helper_error(instance);
+    let stride = match crate::shackle::software_surface_stride(width, height) {
+        Ok(value) => value,
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            return Ok(binding_bool(false));
+        }
+    };
+    let len = match stride.checked_mul(height).and_then(|value| usize::try_from(value).ok()) {
+        Some(value) => value,
+        None => {
+            crate::shackle::set_helper_error(instance, "software surface size overflowed".to_string());
+            return Ok(binding_bool(false));
+        }
+    };
+    let previous_map = match crate::shackle::software_surface_ref(instance, surface) {
+        Ok(value) => value.current_map,
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            return Ok(binding_bool(false));
+        }
+    };
+    if previous_map > 0 {
+        crate::shackle::set_helper_error(instance, format!("software surface `{surface}` already has a live map `{previous_map}`"));
+        return Ok(binding_bool(false));
+    }
+    let surface = match crate::shackle::software_surface_mut(instance, surface) {
+        Ok(value) => value,
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            return Ok(binding_bool(false));
+        }
+    };
+    surface.width = width;
+    surface.height = height;
+    surface.stride = stride;
+    surface.pixels = vec![0; len];
+    surface.current_map = 0;
+    surface.presented_once = false;
+    Ok(binding_bool(true))
+
+shackle fn graphics_software_surface_destroy_impl(read surface: Int) = helpers.graphics.software_surface_destroy:
+    crate::shackle::clear_helper_error(instance);
+    if surface > 0 {
+        if let Some(state) = crate::shackle::package_state_data_mut(instance)?.software_surfaces.remove(&surface)
+            && state.current_map > 0
+        {
+            crate::shackle::package_state_data_mut(instance)?.software_surface_maps.remove(&state.current_map);
+        }
+    }
+    Ok(binding_unit())
+
+shackle fn graphics_software_surface_next_map_impl(read surface: Int) -> Int = helpers.graphics.software_surface_next_map:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::software_surface_ref(instance, surface) {
+        Ok(value) => {
+            if value.width <= 0 || value.height <= 0 || value.stride <= 0 {
+                crate::shackle::set_helper_error(instance, "software surface must be configured before next_map".to_string());
+                return Ok(binding_int(0));
+            }
+            if value.current_map > 0 {
+                crate::shackle::set_helper_error(instance, format!("software surface `{surface}` already has a live map `{}`", value.current_map));
+                return Ok(binding_int(0));
+            }
+        }
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            return Ok(binding_int(0));
+        }
+    };
+    let map_handle = {
+        let state = crate::shackle::package_state_data_mut(instance)?;
+        let handle = state.next_surface_map_handle;
+        state.next_surface_map_handle += 1;
+        state.software_surface_maps.insert(handle, crate::shackle::SoftwareSurfaceMapState {
+            surface,
+        });
+        handle
+    };
+    let surface = match crate::shackle::software_surface_mut(instance, surface) {
+        Ok(value) => value,
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            crate::shackle::package_state_data_mut(instance)?.software_surface_maps.remove(&map_handle);
+            return Ok(binding_int(0));
+        }
+    };
+    surface.current_map = map_handle;
+    Ok(binding_int(map_handle))
+
+shackle fn graphics_software_surface_map_len_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_len:
+    crate::shackle::clear_helper_error(instance);
+    match software_surface_pixels_len(instance, map) {
+        Ok(value) => Ok(binding_int(value)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_int(0))
+        }
+    }
+
+shackle fn graphics_software_surface_map_width_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_width:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
+        Ok(surface) => Ok(binding_int(surface.width)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_int(0))
+        }
+    }
+
+shackle fn graphics_software_surface_map_height_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_height:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
+        Ok(surface) => Ok(binding_int(surface.height)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_int(0))
+        }
+    }
+
+shackle fn graphics_software_surface_map_stride_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_stride:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
+        Ok(surface) => Ok(binding_int(surface.stride)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_int(0))
+        }
+    }
+
+shackle fn graphics_software_surface_map_age_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_age:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
+        Ok(surface) => Ok(binding_int(if surface.presented_once { 1 } else { 0 })),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_int(0))
+        }
+    }
+
+shackle fn graphics_software_surface_present_impl(read surface: Int, read map: Int) -> Bool = helpers.graphics.software_surface_present:
+    crate::shackle::clear_helper_error(instance);
+    let presented = (|| -> Result<(), String> {
+        let map_state = crate::shackle::software_surface_map_ref(instance, map)?;
+        if map_state.surface != surface {
+            return Err(format!("software surface map `{map}` does not belong to surface `{surface}`"));
+        }
+        let surface_state = crate::shackle::software_surface_ref(instance, surface)?;
+        if surface_state.current_map != map {
+            return Err(format!("software surface map `{map}` is not current for surface `{surface}`"));
+        }
+        present_software_surface(surface_state, None)
+    })();
+    match presented {
+        Ok(()) => {
+            let _ = crate::shackle::software_surface_map_remove(instance, map);
+            if let Ok(surface_state) = crate::shackle::software_surface_mut(instance, surface) {
+                surface_state.presented_once = true;
+            }
+            Ok(binding_bool(true))
+        }
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_bool(false))
+        }
+    }
+
+shackle fn graphics_software_surface_present_bounded_impl(read surface: Int, read map: Int, read rect: arcana_winapi.raw.types.RECT) -> Bool = helpers.graphics.software_surface_present_bounded:
+    crate::shackle::clear_helper_error(instance);
+    let presented = (|| -> Result<(), String> {
+        let map_state = crate::shackle::software_surface_map_ref(instance, map)?;
+        if map_state.surface != surface {
+            return Err(format!("software surface map `{map}` does not belong to surface `{surface}`"));
+        }
+        let surface_state = crate::shackle::software_surface_ref(instance, surface)?;
+        if surface_state.current_map != map {
+            return Err(format!("software surface map `{map}` is not current for surface `{surface}`"));
+        }
+        let x = i64::from(rect.left);
+        let y = i64::from(rect.top);
+        let width = i64::from(rect.right - rect.left);
+        let height = i64::from(rect.bottom - rect.top);
+        let left = x.clamp(0, surface_state.width);
+        let top = y.clamp(0, surface_state.height);
+        let right = (x + width).clamp(left, surface_state.width);
+        let bottom = (y + height).clamp(top, surface_state.height);
+        if right == left || bottom == top {
+            return present_software_surface(surface_state, None);
+        }
+        present_software_surface(
+            surface_state,
+            Some((left, top, right - left, bottom - top)),
+        )
+    })();
+    match presented {
+        Ok(()) => {
+            let _ = crate::shackle::software_surface_map_remove(instance, map);
+            if let Ok(surface_state) = crate::shackle::software_surface_mut(instance, surface) {
+                surface_state.presented_once = true;
+            }
+            Ok(binding_bool(true))
+        }
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_bool(false))
+        }
+    }
+
+shackle fn graphics_software_surface_discard_map_impl(read map: Int) -> Bool = helpers.graphics.software_surface_discard_map:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::software_surface_map_remove(instance, map) {
+        Ok(_) => Ok(binding_bool(true)),
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            Ok(binding_bool(false))
+        }
+    }
+
+shackle fn graphics_software_surface_take_last_error_impl() -> Str = helpers.graphics.software_surface_take_last_error:
+    Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
+
+shackle fn mapped_view_len_bytes_impl(read handle: Int) -> Int = __binding.mapped_view_len_bytes:
+    Ok(binding_int(software_surface_pixels_len(instance, handle)?))
+
+shackle fn mapped_view_read_byte_impl(read handle: Int, read index: Int) -> Int = __binding.mapped_view_read_byte:
+    Ok(binding_int(software_surface_pixel_at(instance, handle, index)?))
+
+shackle fn mapped_view_write_byte_impl(read handle: Int, read index: Int, read value: Int) = __binding.mapped_view_write_byte:
+    software_surface_pixel_set(instance, handle, index, value)?;
+    Ok(binding_unit())
+
 shackle fn graphics_dxgi_adapter_count_impl() -> Int = helpers.graphics.dxgi_adapter_count:
     let mut factory: crate::raw::types::LPVOID = std::ptr::null_mut();
     let hr = unsafe { crate::raw::dxgi::CreateDXGIFactory2(0, &iid_idxgi_factory4(), &mut factory) };
@@ -579,7 +1189,7 @@ shackle fn graphics_bootstrap_d3d12_warp_impl() -> Bool = helpers.graphics.boots
     Ok(binding_bool(ok))
 
 shackle fn graphics_bootstrap_dxgi_hidden_window_swapchain_impl() -> Bool = helpers.graphics.bootstrap_dxgi_hidden_window_swapchain:
-    let hwnd = unsafe { create_hidden_window_handle(instance as *mut BindingInstance)? };
+    let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
     let ok = unsafe {
         let mut factory: crate::raw::types::LPVOID = std::ptr::null_mut();
         let factory_hr = crate::raw::dxgi::CreateDXGIFactory2(0, &iid_idxgi_factory4(), &mut factory);

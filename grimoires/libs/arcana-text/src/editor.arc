@@ -350,13 +350,15 @@ impl TextEditor:
     fn record_insert_change(edit self: arcana_text.editor.TextEditor, read range: arcana_text.types.TextRange, read text: Str):
         if text == "":
             return
-        let item = arcana_text.editor.EditorChangeItem :: start = range.start, end = range.end, text = text, insert = true :: call
+        let mut item = arcana_text.editor.EditorChangeItem :: start = range.start, end = range.end, text = text :: call
+        item.insert = true
         self :: item :: record_change_item
 
     fn record_delete_change(edit self: arcana_text.editor.TextEditor, read range: arcana_text.types.TextRange, read text: Str):
         if range.start >= range.end:
             return
-        let item = arcana_text.editor.EditorChangeItem :: start = range.start, end = range.end, text = text, insert = false :: call
+        let mut item = arcana_text.editor.EditorChangeItem :: start = range.start, end = range.end, text = text :: call
+        item.insert = false
         self :: item :: record_change_item
 
     fn commit_change(edit self: arcana_text.editor.TextEditor):
@@ -718,28 +720,28 @@ impl TextEditor:
         self.cursor.preferred_x = 0
         self :: :: clear_selection
 
-    fn double_click(edit self: arcana_text.editor.TextEditor, read payload: (arcana_text.buffer.TextBuffer, arcana_text.layout.LayoutSnapshot, (Int, Int))):
+    fn double_click(edit self: arcana_text.editor.TextEditor, read payload: (arcana_text.buffer.TextBuffer, (arcana_text.layout.LayoutSnapshot, (Int, Int)))):
         let buffer = payload.0
-        let snapshot = payload.1
-        let point = payload.2
+        let snapshot = payload.1.0
+        let point = payload.1.1
         let hit = arcana_text.queries.hit_test :: snapshot, point :: call
         self.cursor.offset = hit.index
         self.cursor.preferred_x = 0
         self :: buffer, hit.index :: select_word
 
-    fn triple_click(edit self: arcana_text.editor.TextEditor, read payload: (arcana_text.buffer.TextBuffer, arcana_text.layout.LayoutSnapshot, (Int, Int))):
+    fn triple_click(edit self: arcana_text.editor.TextEditor, read payload: (arcana_text.buffer.TextBuffer, (arcana_text.layout.LayoutSnapshot, (Int, Int)))):
         let buffer = payload.0
-        let snapshot = payload.1
-        let point = payload.2
+        let snapshot = payload.1.0
+        let point = payload.1.1
         let hit = arcana_text.queries.hit_test :: snapshot, point :: call
         self.cursor.offset = hit.index
         self.cursor.preferred_x = 0
         self :: buffer, hit.index :: select_line
 
-    fn drag(edit self: arcana_text.editor.TextEditor, read payload: (arcana_text.buffer.TextBuffer, arcana_text.layout.LayoutSnapshot, (Int, Int))):
+    fn drag(edit self: arcana_text.editor.TextEditor, read payload: (arcana_text.buffer.TextBuffer, (arcana_text.layout.LayoutSnapshot, (Int, Int)))):
         let buffer = payload.0
-        let snapshot = payload.1
-        let point = payload.2
+        let snapshot = payload.1.0
+        let point = payload.1.1
         let hit = arcana_text.queries.hit_test :: snapshot, point :: call
         let anchor = self.selection.anchor
         if not (self :: :: has_selection):
@@ -853,9 +855,9 @@ impl TextEditor:
             arcana_text.editor.EditAction.Undo => self :: buffer :: undo
             arcana_text.editor.EditAction.Redo => self :: buffer :: redo
             arcana_text.editor.EditAction.Click(point) => self :: snapshot, point :: click
-            arcana_text.editor.EditAction.DoubleClick(point) => self :: (buffer, snapshot, point) :: double_click
-            arcana_text.editor.EditAction.TripleClick(point) => self :: (buffer, snapshot, point) :: triple_click
-            arcana_text.editor.EditAction.Drag(point) => self :: (buffer, snapshot, point) :: drag
+            arcana_text.editor.EditAction.DoubleClick(point) => self :: (buffer, (snapshot, point)) :: double_click
+            arcana_text.editor.EditAction.TripleClick(point) => self :: (buffer, (snapshot, point)) :: triple_click
+            arcana_text.editor.EditAction.Drag(point) => self :: (buffer, (snapshot, point)) :: drag
             arcana_text.editor.EditAction.CommitComposition(text) => self :: buffer, text :: apply_committed_text
             arcana_text.editor.EditAction.UpdateComposition(text) => self :: buffer, text :: apply_composition_text
             arcana_text.editor.EditAction.Scroll(_) => 0

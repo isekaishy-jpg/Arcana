@@ -1,7 +1,7 @@
 import arcana_text.buffer
 import arcana_text.text_units
 import arcana_text.types
-import std.bytes
+import std.text
 import std.collections.list
 import std.option
 import std.text
@@ -155,8 +155,8 @@ fn push_unseen_placeholder(edit items: List[arcana_text.shape.tokens.ShapeItem],
     emitted :: spec :: push
 
 export fn tokenize_text(read text: Str) -> List[arcana_text.shape.tokens.TextToken]:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     let mut out = empty_tokens :: :: call
     let mut index = 0
     let mut current = ""
@@ -164,21 +164,21 @@ export fn tokenize_text(read text: Str) -> List[arcana_text.shape.tokens.TextTok
     let mut current_whitespace = false
     let mut active = false
     while index < total:
-        let first = std.bytes.at :: bytes, index :: call
+        let first = std.text.bytes_at :: bytes, index :: call
         let mut count = arcana_text.shape.tokens.utf8_char_len :: first :: call
         if index + count > total:
             count = 1
-        let slice = std.bytes.slice :: bytes, index, index + count :: call
-        let ch = std.bytes.to_str_utf8 :: slice :: call
+        let slice = std.text.bytes_slice :: bytes, index, index + count :: call
+        let ch = std.text.bytes_to_str_utf8 :: slice :: call
         if arcana_text.shape.tokens.is_newline :: ch :: call:
             let codepoint = arcana_text.text_units.codepoint_at :: ch, 0 :: call
             let mut line_break_end = index + count
             if codepoint == 13 and line_break_end < total:
-                let mut next_count = arcana_text.shape.tokens.utf8_char_len :: (std.bytes.at :: bytes, line_break_end :: call) :: call
+                let mut next_count = arcana_text.shape.tokens.utf8_char_len :: (std.text.bytes_at :: bytes, line_break_end :: call) :: call
                 if line_break_end + next_count > total:
                     next_count = 1
-                let next_slice = std.bytes.slice :: bytes, line_break_end, line_break_end + next_count :: call
-                let next_text = std.bytes.to_str_utf8 :: next_slice :: call
+                let next_slice = std.text.bytes_slice :: bytes, line_break_end, line_break_end + next_count :: call
+                let next_text = std.text.bytes_to_str_utf8 :: next_slice :: call
                 if next_text == "\n":
                     line_break_end += next_count
             if active:
@@ -220,16 +220,16 @@ export fn tokenize_text(read text: Str) -> List[arcana_text.shape.tokens.TextTok
     return out
 
 export fn first_visible_char(read text: Str) -> Str:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     let mut index = 0
     while index < total:
-        let first = std.bytes.at :: bytes, index :: call
+        let first = std.text.bytes_at :: bytes, index :: call
         let mut count = arcana_text.shape.tokens.utf8_char_len :: first :: call
         if index + count > total:
             count = 1
-        let slice = std.bytes.slice :: bytes, index, index + count :: call
-        let ch = std.bytes.to_str_utf8 :: slice :: call
+        let slice = std.text.bytes_slice :: bytes, index, index + count :: call
+        let ch = std.text.bytes_to_str_utf8 :: slice :: call
         let codepoint = arcana_text.text_units.codepoint_at :: ch, 0 :: call
         if not (arcana_text.shape.tokens.is_space :: ch :: call) and not (arcana_text.shape.tokens.is_newline :: ch :: call) and not (arcana_text.text_units.is_format_control_codepoint :: codepoint :: call):
             return ch

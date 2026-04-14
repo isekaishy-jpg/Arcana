@@ -46,12 +46,14 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
   - exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` must be dependency-visible through ordinary path resolution; consumers must not need a parallel special binding lookup model
 - `opaque type`
   - binding-owning packages may export source-declared opaque handle types for native values such as module handles, font catalogs, windows, and callback tokens
+  - consumer grimoires may reference those binding-owned opaque types in their own public APIs, but they must not redeclare or re-alias owner-local handle families for the same host resource
 
 ## Rules
 
 - `intrinsic fn` remains the trusted std/kernel-only surface.
 - Generic OS binding work must not be reintroduced as runtime package-name special cases.
 - `arcana-cabi` owns the foreign-boundary semantics; runtime owns only generic loading and invocation as a consumer of that contract.
+- Binding-owned mapped byte views must ride the generic binding CABI backing-ops table; runtime must not fall back to package-name-specific hidden imports for foreign view access.
 - The binding lane now carries raw native layout/value transport for Windows-first shackle declarations:
   - fixed-width ints and floats
   - pointer/function-pointer-bearing raw layouts
@@ -74,6 +76,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 Its public package shape is:
 - `arcana_winapi.raw.*` for public raw Win32-facing surface
 - `arcana_winapi.helpers.*` for thin Win32 helper routines consumers should build on
+- `arcana_winapi.desktop_handles`, `arcana_winapi.process_handles`, and `arcana_winapi.audio_handles` for canonical binding-owned opaque handle declarations that higher-level grimoires must reference directly when they need those types
 - compatibility wrappers like `arcana_winapi.foundation`, `arcana_winapi.fonts`, and `arcana_winapi.windows` remain available during the migration
 
 Its current v1 raw surface covers:
@@ -121,8 +124,9 @@ Its current helper surface covers:
 ## Boundaries
 
 - `arcana_text` may consume `arcana_winapi` for host-installed font discovery and related metadata.
-- Future `arcana_desktop` migration may consume `arcana_winapi` for incremental Win32 ownership work.
+- `arcana_desktop` is expected to consume `arcana_winapi` for its Windows shell implementation rather than keep runtime-owned public desktop special cases alive.
+- `arcana_desktop`, `arcana_process`, and `arcana_audio` may traffic in those binding-owned handles through their routines and records, but type references must still resolve to the `arcana_winapi.*_handles` declarations.
 - Future graphics/audio grimoires such as `arcana_graphics`, `arcana_hal`, and `arcana_audio` may consume the raw/helper surface without reviving handwritten Rust bridge layers.
 - `arcana_text` and `arcana_desktop` must not regain direct runtime special cases once this seam exists.
 - No library package should talk to `windows-sys` directly in the library binding seam.
-- Existing `windows-sys` usage in rewrite runtime host code and Windows-only CLI/runtime test harnesses is transitional host debt, not part of the library binding seam.
+- Rewrite crates must not keep a parallel `windows-sys` host lane beside this binding seam; Win32 access should flow through `arcana_winapi` and consumer packages.

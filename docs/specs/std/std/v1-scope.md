@@ -20,7 +20,7 @@ Scope notes:
 - If a `std` surface is needed before selfhost, it should be approved by scope and owned by rewrite architecture.
 - If a helper is primarily for examples, showcases, bootstrap convenience, or temporary corpus carryover, it should not become default `std` contract without explicit ratification.
 - Imported-std review must preserve Arcana's explicit and unambiguous doctrine: prefer narrowly named, typed, auditable surfaces over convenience bundles, implicit policy, or backend-shaped leakage.
-- If bootstrap seams such as typed opaque app/runtime handles are later replaced, the successor model must stay explicit about resource family, ownership/validity expectations, and diagnostics; no erased generic-handle fallback is permitted.
+- If bootstrap seams such as typed opaque app/runtime handles are later replaced, the successor model must stay explicit about resource family, ownership/validity expectations, and diagnostics; no erased generic-handle fallback is permitted, and runtime must not hide duplicate cross-package handle aliases behind family matching.
 - Third-party Rust crates may sit under the implementation, but they must remain replaceable private details. Public `std` must not collapse into wrapper-shaped mirrors of crate APIs or crate-specific semantics.
 - Kernel/intrinsic bindings are implementation seams, not public-library design guidance.
 - Kernel/intrinsic bindings should stay split by runtime domain and should carry failure through operation-local `Result[...]` returns; do not reintroduce a catch-all host bucket or out-of-band global error slot for args/env/path/fs/process/resource failure state.
@@ -32,7 +32,7 @@ Scope notes:
 
 ## Approved First-Party `std` Domains Before Selfhost
 
-- Core host packages approved in `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
+- Public host-core packages approved in `docs/specs/selfhost-host/selfhost-host/v1-scope.md` are owned by `arcana_process`, not by `std`
 - First-party app/runtime substrate approved in `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
 - ECS/runtime surface:
   - `std.ecs`
@@ -44,12 +44,16 @@ Scope notes:
 - Core value/container/text support that is required by the carried compiler/tooling corpus and does not conflict with rewrite architecture:
   - `std.result`
   - `std.option`
-  - `std.bytes`
   - `std.binary`
   - `std.text`
   - `std.iter`
   - `std.collections.*`
   - `std.memory`
+  - plus the approved core owned payload families surfaced through `std.text` / `std.memory`:
+    - `Bytes`
+    - `ByteBuffer`
+    - `Utf16`
+    - `Utf16Buffer`
 - Toolchain/bootstrap support that remains required before selfhost:
   - `std.config`
     - generic, deterministic section/key config-document parser substrate
@@ -59,21 +63,12 @@ Scope notes:
   - `std.manifest`
     - Arcana-specific `book.toml` / `Arcana.lock` helpers built on `std.config`
     - not the source of truth for the Rust rewrite package parser and not a generic data-format layer
-- Source-declared runtime/resource opaque types owned by approved std domains:
-  - `std.window.Window`
-  - `std.canvas.Image`
-  - `std.fs.FileStream`
-  - `std.events.AppFrame`
-  - `std.audio.AudioDevice`
-  - `std.audio.AudioBuffer`
-  - `std.audio.AudioPlayback`
-  - these are declared in std source via `opaque type ... as <ownership>, <boundary>` rather than held as Rust-only builtin names
-  - pre-selfhost opaque declarations are approved for `std` and for owned grimoires when they need authoritative handle/resource boundaries over approved substrate; the current checker permits them generally because package-level first-party ownership is not yet encoded as a stronger gate
 - Shared low-level types needed by the app/runtime substrate:
   - `std.types.core`
-- Low-level time and audio substrate needed by future Arcana-owned grimoire layers:
+- Low-level time substrate that remains in `std`:
   - `std.time`
-  - `std.audio`
+- Public audio ownership sits outside `std` in `arcana_audio`
+- Historical desktop/window/input/events/clipboard/canvas shell APIs are no longer the intended public std boundary; the active direction is to retire that lane in favor of `arcana_desktop` plus graphics backends.
 
 ## Not Yet Ratified As Rewrite-Defining `std`
 
@@ -101,7 +96,6 @@ Scope notes:
 - Rebuild `std` around what Arcana itself needs:
   - language-adjacent runtime surface
   - deterministic toolchain support
-  - first-party host support
   - first-party app/runtime substrate for real showcases
   - ECS/runtime extras that are intentionally part of Arcana's direction
 - The pre-selfhost `std` freeze is a real reusable baseline for future Arcana libraries in the approved domains, not a temporary surface meant only for owned grimoires or bootstrap demos.
@@ -111,5 +105,6 @@ Scope notes:
 - Avoid broad root/prelude reexports of unratified convenience layers.
 - If Milestone 6 or owned-grimoire work discovers a missing substrate capability, prefer adding it inside an already approved domain rather than reopening top-level std architecture.
 - `std.binary` is approved as the narrow binary reader/writer layer over `std.memory` views; it is not a generic serialization umbrella.
-- `std.memory` is approved to expose explicit capability traits over the concrete family/view surface (`ViewSource`, `EditViewSource`, `ContiguousBytes`, `ContiguousBytesEdit`, `Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) as generic glue only; these traits do not authorize implicit coercion or autoderef growth.
+- `std.memory` is approved to expose the builtin `View[Elem, Family]` surface with `Contiguous`, `Strided`, and `Mapped` family markers plus the allocator/publication capability traits (`Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) as explicit generic glue only; the removed legacy `ReadView` / `EditView` / `ByteView` / `ByteEditView` / `StrView` names and source/view helper traits are not part of the rewrite contract.
 - `std.binary` is approved to expose narrow opt-in binary traits (`BinaryReadable`, `ByteSink`) alongside `Reader` / `Writer`; those traits are explicit codec hooks, not a generic serialization policy layer.
+- `std` no longer owns public host-core, desktop shell, graphics backend, or audio device/playback lanes; those public surfaces now belong to `arcana_process`, `arcana_desktop`, `arcana_graphics`, and `arcana_audio`.

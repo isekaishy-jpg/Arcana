@@ -1,11 +1,15 @@
-`arcana_graphics` is transitional in the current rewrite phase.
+`arcana_graphics` is still transitional, but its direction is now backend-oriented rather than canvas-wrapper-oriented.
 
-This package is only being used to support `arcana_text` smoke and performance work.
+The first active backend is `arcana_graphics.arcsb`.
 
-The long-term CPU graphics design is deferred. Nothing in the current surface should be treated as locking:
+Nothing in the current surface should be treated as locking:
 
-- the eventual Arcana-owned graphics architecture
-- the future `std` graphics/surface boundary
-- any later binding or presentation strategy
+- the final higher-level Arcana graphics API
+- the eventual `iced_graphics` port over this package
+- the later Direct2D backend shape
 
-For this phase, the only requirement is enough source-side graphics support to make `arcana_text` manually smokable and measurable.
+What is locked for this phase:
+
+- graphics backends live in this grimoire
+- `arcana_graphics.arcsb` stays usable as a dependency surface for later grimoires
+- canvas-era wrapper modules are retired rather than treated as the future graphics design

@@ -148,6 +148,10 @@ It defines:
   - `register_callback`
     - registration includes callback-owned `owned_bytes_free` and `owned_str_free` helpers for callback-produced `Str` and `Bytes` outputs/write-backs
   - `unregister_callback`
+  - optional `mapped_view_ops`
+    - explicit mapped-byte backing ops for `Mapped` byte views owned by the binding product
+    - current v1 ops are `len`, `at`, and `set`
+    - runtime must use this typed ops table rather than package-name-specific hidden imports when servicing mapped foreign byte views
   - `last_error_alloc`
   - `owned_bytes_free`
   - `owned_str_free`
@@ -200,9 +204,12 @@ It defines:
     - `I64` / `U64`
     - `ISize` / `USize`
     - `F32` / `F64`
-  - view/owned tags:
+  - view/owned payload families:
     - `Str`
     - `Bytes`
+    - `Utf16`
+    - `ByteBuffer`
+    - `Utf16Buffer`
   - handle/control tags:
     - `Opaque`
     - `Unit`
@@ -219,17 +226,19 @@ It defines:
   - callbacks / function-pointer signatures
   - COM-style interface pointers
   - named bitfields
-- `Str` and `Bytes` inputs use views.
-- `Str`, `Bytes`, and `Layout` outputs and write-backs use owned buffers released through cabi-owned free helpers.
+- `Str`, `Bytes`, `ByteBuffer`, `Utf16`, and `Utf16Buffer` inputs use explicit descriptors rather than erased pointer params.
+- `Str`, `Bytes`, `ByteBuffer`, `Utf16`, `Utf16Buffer`, and `Layout` outputs use owned buffers released through cabi-owned free helpers.
 - Opaque values may cross only as package-owned opaque handle types declared in source by a binding-owning package.
 - Pointer and function-pointer semantics live inside the raw layout model; they are not a separate ordinary Arcana pointer ABI.
+- `Mapped` byte views remain explicit runtime/kernel-created values; their backing access rides the binding role's typed `mapped_view_ops` table, not undeclared hidden imports.
 - `edit` is part of the public binding contract:
-  - import and callback write-backs are one slot per declared param row, in declaration order
-  - params without write-back semantics must return `Unit` in their slot
+  - ordinary value `edit` params use one write-back slot per declared param row, in declaration order
+  - mutable buffer/view-style `edit` params mutate backing storage in place and do not claim whole-value write-back slots
+  - params without write-back semantics must return `Unit` in their slot when a slot exists
 
 ## Value Ownership
 
-- Params use `ArcanaStrView` and `ArcanaBytesView`.
+- Params use the generic `ArcanaViewV1` descriptor.
 - Binding returns and binding/export `edit` write-backs use `ArcanaOwnedStr` and `ArcanaOwnedBytes`.
 - Strings are UTF-8 bytes with `ptr + len`.
 - Owned buffers are released only through cabi-owned helper functions.

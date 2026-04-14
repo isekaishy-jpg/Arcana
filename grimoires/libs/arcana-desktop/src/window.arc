@@ -1,7 +1,7 @@
+import arcana_desktop.events
 import arcana_desktop.text_input
 import arcana_desktop.types
-import std.kernel.events
-import std.kernel.gfx
+import arcana_winapi.helpers.window
 import std.result
 use std.result.Result
 
@@ -83,16 +83,16 @@ fn settings_for_config(read cfg: arcana_desktop.types.WindowConfig) -> arcana_de
     options.text_input_enabled = cfg.options.text_input_enabled
     return arcana_desktop.types.WindowSettings :: title = cfg.title, bounds = cfg.bounds, options = options :: call
 
-fn apply_config(take win: arcana_desktop.types.Window, read cfg: arcana_desktop.types.WindowConfig) -> arcana_desktop.types.Window:
+fn apply_config(take win: arcana_winapi.desktop_handles.Window, read cfg: arcana_desktop.types.WindowConfig) -> arcana_winapi.desktop_handles.Window:
     let mut win = win
     arcana_desktop.window.apply_settings :: win, (arcana_desktop.window.settings_for_config :: cfg :: call) :: call
     return win
 
 fn monitor_info(index: Int) -> arcana_desktop.types.MonitorInfo:
-    let mut info = arcana_desktop.types.MonitorInfo :: index = index, name = (std.kernel.gfx.window_monitor_name :: index :: call), position = (std.kernel.gfx.window_monitor_position :: index :: call) :: call
-    info.size = std.kernel.gfx.window_monitor_size :: index :: call
-    info.scale_factor_milli = std.kernel.gfx.window_monitor_scale_factor_milli :: index :: call
-    info.primary = std.kernel.gfx.window_monitor_is_primary :: index :: call
+    let mut info = arcana_desktop.types.MonitorInfo :: index = index, name = (arcana_winapi.helpers.window.window_monitor_name :: index :: call), position = (arcana_winapi.helpers.window.window_monitor_position :: index :: call) :: call
+    info.size = arcana_winapi.helpers.window.window_monitor_size :: index :: call
+    info.scale_factor_milli = arcana_winapi.helpers.window.window_monitor_scale_factor_milli :: index :: call
+    info.primary = arcana_winapi.helpers.window.window_monitor_is_primary :: index :: call
     return info
 
 export fn default_config() -> arcana_desktop.types.WindowConfig:
@@ -108,7 +108,7 @@ export fn default_config() -> arcana_desktop.types.WindowConfig:
     options.text_input_enabled = false
     return arcana_desktop.types.WindowConfig :: title = "Arcana", bounds = bounds, options = options :: call
 
-export fn open(title: Str, width: Int, height: Int) -> Result[arcana_desktop.types.Window, Str]:
+export fn open(title: Str, width: Int, height: Int) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     let mut cfg = arcana_desktop.window.default_config :: :: call
     let mut bounds = arcana_desktop.types.WindowBounds :: size = (width, height), position = cfg.bounds.position, visible = cfg.bounds.visible :: call
     bounds.min_size = cfg.bounds.min_size
@@ -117,127 +117,130 @@ export fn open(title: Str, width: Int, height: Int) -> Result[arcana_desktop.typ
     cfg.bounds = bounds
     return arcana_desktop.window.open_cfg :: cfg :: call
 
-export fn open_cfg(read cfg: arcana_desktop.types.WindowConfig) -> Result[arcana_desktop.types.Window, Str]:
-    return match (std.kernel.gfx.window_open :: cfg.title, cfg.bounds.size.0, cfg.bounds.size.1 :: call):
-        Result.Ok(value) => Result.Ok[arcana_desktop.types.Window, Str] :: (arcana_desktop.window.apply_config :: value, cfg :: call) :: call
-        Result.Err(err) => Result.Err[arcana_desktop.types.Window, Str] :: err :: call
+export fn open_cfg(read cfg: arcana_desktop.types.WindowConfig) -> Result[arcana_winapi.desktop_handles.Window, Str]:
+    return match (arcana_winapi.helpers.window.window_open :: cfg.title, cfg.bounds.size.0, cfg.bounds.size.1 :: call):
+        Result.Ok(value) => Result.Ok[arcana_winapi.desktop_handles.Window, Str] :: (arcana_desktop.window.apply_config :: value, cfg :: call) :: call
+        Result.Err(err) => Result.Err[arcana_winapi.desktop_handles.Window, Str] :: err :: call
 
-export fn open_in(edit session: arcana_desktop.types.Session, read cfg: arcana_desktop.types.WindowConfig) -> Result[arcana_desktop.types.Window, Str]:
+export fn open_in(edit session: arcana_winapi.desktop_handles.Session, read cfg: arcana_desktop.types.WindowConfig) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     return match (arcana_desktop.window.open_cfg :: cfg :: call):
         Result.Ok(value) => open_in_ready :: session, value :: call
-        Result.Err(err) => Result.Err[arcana_desktop.types.Window, Str] :: err :: call
+        Result.Err(err) => Result.Err[arcana_winapi.desktop_handles.Window, Str] :: err :: call
 
-fn open_in_ready(edit session: arcana_desktop.types.Session, take value: arcana_desktop.types.Window) -> Result[arcana_desktop.types.Window, Str]:
-    std.kernel.events.session_attach_window :: session, value :: call
-    return Result.Ok[arcana_desktop.types.Window, Str] :: value :: call
+fn open_in_ready(edit session: arcana_winapi.desktop_handles.Session, take value: arcana_winapi.desktop_handles.Window) -> Result[arcana_winapi.desktop_handles.Window, Str]:
+    arcana_desktop.events.attach_window :: session, value :: call
+    return Result.Ok[arcana_winapi.desktop_handles.Window, Str] :: value :: call
 
-export fn alive(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.canvas_alive :: win :: call
+export fn alive(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_alive :: win :: call
 
-export fn id(read win: arcana_desktop.types.Window) -> arcana_desktop.types.WindowId:
-    return arcana_desktop.types.WindowId :: value = (std.kernel.gfx.window_id :: win :: call) :: call
+export fn id(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.WindowId:
+    return arcana_desktop.types.WindowId :: value = (arcana_winapi.helpers.window.window_id :: win :: call) :: call
 
-export fn size(read win: arcana_desktop.types.Window) -> (Int, Int):
-    return std.kernel.gfx.window_size :: win :: call
+export fn native_handle(read win: arcana_winapi.desktop_handles.Window) -> Int:
+    return arcana_winapi.helpers.window.window_native_handle :: win :: call
 
-export fn position(read win: arcana_desktop.types.Window) -> (Int, Int):
-    return std.kernel.gfx.window_position :: win :: call
+export fn size(read win: arcana_winapi.desktop_handles.Window) -> (Int, Int):
+    return arcana_winapi.helpers.window.window_size :: win :: call
 
-export fn title(read win: arcana_desktop.types.Window) -> Str:
-    return std.kernel.gfx.window_title :: win :: call
+export fn position(read win: arcana_winapi.desktop_handles.Window) -> (Int, Int):
+    return arcana_winapi.helpers.window.window_position :: win :: call
 
-export fn visible(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_visible :: win :: call
+export fn title(read win: arcana_winapi.desktop_handles.Window) -> Str:
+    return arcana_winapi.helpers.window.window_title :: win :: call
 
-export fn decorated(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_decorated :: win :: call
+export fn visible(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_visible :: win :: call
 
-export fn resizable(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_resizable :: win :: call
+export fn decorated(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_decorated :: win :: call
 
-export fn topmost(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_topmost :: win :: call
+export fn resizable(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_resizable :: win :: call
 
-export fn cursor_visible(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_cursor_visible :: win :: call
+export fn topmost(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_topmost :: win :: call
 
-export fn min_size(read win: arcana_desktop.types.Window) -> (Int, Int):
-    return std.kernel.gfx.window_min_size :: win :: call
+export fn cursor_visible(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_cursor_visible :: win :: call
 
-export fn max_size(read win: arcana_desktop.types.Window) -> (Int, Int):
-    return std.kernel.gfx.window_max_size :: win :: call
+export fn min_size(read win: arcana_winapi.desktop_handles.Window) -> (Int, Int):
+    return arcana_winapi.helpers.window.window_min_size :: win :: call
 
-export fn scale_factor_milli(read win: arcana_desktop.types.Window) -> Int:
-    return std.kernel.gfx.window_scale_factor_milli :: win :: call
+export fn max_size(read win: arcana_winapi.desktop_handles.Window) -> (Int, Int):
+    return arcana_winapi.helpers.window.window_max_size :: win :: call
 
-export fn theme(read win: arcana_desktop.types.Window) -> arcana_desktop.types.WindowTheme:
-    return arcana_desktop.window.lift_theme :: (std.kernel.gfx.window_theme_code :: win :: call) :: call
+export fn scale_factor_milli(read win: arcana_winapi.desktop_handles.Window) -> Int:
+    return arcana_winapi.helpers.window.window_scale_factor_milli :: win :: call
 
-export fn transparent(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_transparent :: win :: call
+export fn theme(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.WindowTheme:
+    return arcana_desktop.window.lift_theme :: (arcana_winapi.helpers.window.window_theme_code :: win :: call) :: call
 
-export fn theme_override(read win: arcana_desktop.types.Window) -> arcana_desktop.types.WindowThemeOverride:
-    return arcana_desktop.window.lift_theme_override :: (std.kernel.gfx.window_theme_override_code :: win :: call) :: call
+export fn transparent(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_transparent :: win :: call
 
-export fn cursor_icon(read win: arcana_desktop.types.Window) -> arcana_desktop.types.CursorIcon:
-    return arcana_desktop.window.lift_cursor_icon :: (std.kernel.gfx.window_cursor_icon_code :: win :: call) :: call
+export fn theme_override(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.WindowThemeOverride:
+    return arcana_desktop.window.lift_theme_override :: (arcana_winapi.helpers.window.window_theme_override_code :: win :: call) :: call
 
-export fn cursor_grab_mode(read win: arcana_desktop.types.Window) -> arcana_desktop.types.CursorGrabMode:
-    return arcana_desktop.window.lift_cursor_grab_mode :: (std.kernel.gfx.window_cursor_grab_mode :: win :: call) :: call
+export fn cursor_icon(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.CursorIcon:
+    return arcana_desktop.window.lift_cursor_icon :: (arcana_winapi.helpers.window.window_cursor_icon_code :: win :: call) :: call
 
-export fn cursor_position(read win: arcana_desktop.types.Window) -> (Int, Int):
-    return std.kernel.gfx.window_cursor_position :: win :: call
+export fn cursor_grab_mode(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.CursorGrabMode:
+    return arcana_desktop.window.lift_cursor_grab_mode :: (arcana_winapi.helpers.window.window_cursor_grab_mode :: win :: call) :: call
 
-export fn text_input_enabled(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_text_input_enabled :: win :: call
+export fn cursor_position(read win: arcana_winapi.desktop_handles.Window) -> (Int, Int):
+    return arcana_winapi.helpers.window.window_cursor_position :: win :: call
 
-export fn current_monitor(read win: arcana_desktop.types.Window) -> arcana_desktop.types.MonitorInfo:
-    return arcana_desktop.window.monitor_info :: (std.kernel.gfx.window_current_monitor_index :: win :: call) :: call
+export fn text_input_enabled(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_desktop.text_input.enabled :: win :: call
+
+export fn current_monitor(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.MonitorInfo:
+    return arcana_desktop.window.monitor_info :: (arcana_winapi.helpers.window.window_current_monitor_index :: win :: call) :: call
 
 export fn primary_monitor() -> arcana_desktop.types.MonitorInfo:
-    return arcana_desktop.window.monitor_info :: (std.kernel.gfx.window_primary_monitor_index :: :: call) :: call
+    return arcana_desktop.window.monitor_info :: (arcana_winapi.helpers.window.window_primary_monitor_index :: :: call) :: call
 
 export fn monitor_count() -> Int:
-    return std.kernel.gfx.window_monitor_count :: :: call
+    return arcana_winapi.helpers.window.window_monitor_count :: :: call
 
 export fn monitor(index: Int) -> arcana_desktop.types.MonitorInfo:
     return arcana_desktop.window.monitor_info :: index :: call
 
-export fn focused(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_focused :: win :: call
+export fn focused(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_focused :: win :: call
 
-export fn resized(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_resized :: win :: call
+export fn resized(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_resized :: win :: call
 
-export fn fullscreen(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_fullscreen :: win :: call
+export fn fullscreen(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_fullscreen :: win :: call
 
-export fn minimized(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_minimized :: win :: call
+export fn minimized(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_minimized :: win :: call
 
-export fn maximized(read win: arcana_desktop.types.Window) -> Bool:
-    return std.kernel.gfx.window_maximized :: win :: call
+export fn maximized(read win: arcana_winapi.desktop_handles.Window) -> Bool:
+    return arcana_winapi.helpers.window.window_maximized :: win :: call
 
-export fn cursor_settings(read win: arcana_desktop.types.Window) -> arcana_desktop.types.CursorSettings:
-    let mut cursor = arcana_desktop.types.CursorSettings :: visible = (std.kernel.gfx.window_cursor_visible :: win :: call), grab_mode = (arcana_desktop.types.CursorGrabMode.Free :: :: call), icon = (arcana_desktop.types.CursorIcon.Default :: :: call) :: call
-    cursor.grab_mode = arcana_desktop.window.lift_cursor_grab_mode :: (std.kernel.gfx.window_cursor_grab_mode :: win :: call) :: call
-    cursor.icon = arcana_desktop.window.lift_cursor_icon :: (std.kernel.gfx.window_cursor_icon_code :: win :: call) :: call
-    cursor.position = std.kernel.gfx.window_cursor_position :: win :: call
+export fn cursor_settings(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.CursorSettings:
+    let mut cursor = arcana_desktop.types.CursorSettings :: visible = (arcana_winapi.helpers.window.window_cursor_visible :: win :: call), grab_mode = (arcana_desktop.types.CursorGrabMode.Free :: :: call), icon = (arcana_desktop.types.CursorIcon.Default :: :: call) :: call
+    cursor.grab_mode = arcana_desktop.window.lift_cursor_grab_mode :: (arcana_winapi.helpers.window.window_cursor_grab_mode :: win :: call) :: call
+    cursor.icon = arcana_desktop.window.lift_cursor_icon :: (arcana_winapi.helpers.window.window_cursor_icon_code :: win :: call) :: call
+    cursor.position = arcana_winapi.helpers.window.window_cursor_position :: win :: call
     return cursor
 
-export fn settings(read win: arcana_desktop.types.Window) -> arcana_desktop.types.WindowSettings:
-    let mut bounds = arcana_desktop.types.WindowBounds :: size = (std.kernel.gfx.window_size :: win :: call), position = (std.kernel.gfx.window_position :: win :: call), visible = (std.kernel.gfx.window_visible :: win :: call) :: call
-    bounds.min_size = std.kernel.gfx.window_min_size :: win :: call
-    bounds.max_size = std.kernel.gfx.window_max_size :: win :: call
-    let style = arcana_desktop.types.WindowStyle :: resizable = (std.kernel.gfx.window_resizable :: win :: call), decorated = (std.kernel.gfx.window_decorated :: win :: call), transparent = (std.kernel.gfx.window_transparent :: win :: call) :: call
+export fn settings(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.WindowSettings:
+    let mut bounds = arcana_desktop.types.WindowBounds :: size = (arcana_winapi.helpers.window.window_size :: win :: call), position = (arcana_winapi.helpers.window.window_position :: win :: call), visible = (arcana_winapi.helpers.window.window_visible :: win :: call) :: call
+    bounds.min_size = arcana_winapi.helpers.window.window_min_size :: win :: call
+    bounds.max_size = arcana_winapi.helpers.window.window_max_size :: win :: call
+    let style = arcana_desktop.types.WindowStyle :: resizable = (arcana_winapi.helpers.window.window_resizable :: win :: call), decorated = (arcana_winapi.helpers.window.window_decorated :: win :: call), transparent = (arcana_winapi.helpers.window.window_transparent :: win :: call) :: call
     let cursor = arcana_desktop.window.cursor_settings :: win :: call
-    let mut state = arcana_desktop.types.WindowState :: topmost = (std.kernel.gfx.window_topmost :: win :: call), maximized = (std.kernel.gfx.window_maximized :: win :: call), fullscreen = (std.kernel.gfx.window_fullscreen :: win :: call) :: call
-    state.theme_override = arcana_desktop.window.lift_theme_override :: (std.kernel.gfx.window_theme_override_code :: win :: call) :: call
+    let mut state = arcana_desktop.types.WindowState :: topmost = (arcana_winapi.helpers.window.window_topmost :: win :: call), maximized = (arcana_winapi.helpers.window.window_maximized :: win :: call), fullscreen = (arcana_winapi.helpers.window.window_fullscreen :: win :: call) :: call
+    state.theme_override = arcana_desktop.window.lift_theme_override :: (arcana_winapi.helpers.window.window_theme_override_code :: win :: call) :: call
     let mut options = arcana_desktop.types.WindowOptions :: style = style, state = state, cursor = cursor :: call
-    options.text_input_enabled = std.kernel.gfx.window_text_input_enabled :: win :: call
-    return arcana_desktop.types.WindowSettings :: title = (std.kernel.gfx.window_title :: win :: call), bounds = bounds, options = options :: call
+    options.text_input_enabled = arcana_desktop.text_input.enabled :: win :: call
+    return arcana_desktop.types.WindowSettings :: title = (arcana_winapi.helpers.window.window_title :: win :: call), bounds = bounds, options = options :: call
 
-export fn apply_settings(edit win: arcana_desktop.types.Window, read settings: arcana_desktop.types.WindowSettings):
+export fn apply_settings(edit win: arcana_winapi.desktop_handles.Window, read settings: arcana_desktop.types.WindowSettings):
     let current = arcana_desktop.window.settings :: win :: call
     if current.options.state.fullscreen and not settings.options.state.fullscreen:
         arcana_desktop.window.set_fullscreen :: win, false :: call
@@ -281,7 +284,7 @@ export fn apply_settings(edit win: arcana_desktop.types.Window, read settings: a
     if current.bounds.visible != settings.bounds.visible:
         arcana_desktop.window.set_visible :: win, settings.bounds.visible :: call
 
-export fn apply_cursor_settings(edit win: arcana_desktop.types.Window, read settings: arcana_desktop.types.CursorSettings):
+export fn apply_cursor_settings(edit win: arcana_winapi.desktop_handles.Window, read settings: arcana_desktop.types.CursorSettings):
     let current = arcana_desktop.window.cursor_settings :: win :: call
     if current.visible != settings.visible:
         arcana_desktop.window.set_cursor_visible :: win, settings.visible :: call
@@ -293,74 +296,77 @@ export fn apply_cursor_settings(edit win: arcana_desktop.types.Window, read sett
         if current.position != settings.position:
             arcana_desktop.window.set_cursor_position :: win, settings.position.0, settings.position.1 :: call
 
-export fn set_title(edit win: arcana_desktop.types.Window, title: Str):
-    std.kernel.gfx.window_set_title :: win, title :: call
+export fn set_title(edit win: arcana_winapi.desktop_handles.Window, title: Str):
+    arcana_winapi.helpers.window.window_set_title :: win, title :: call
 
-export fn set_position(edit win: arcana_desktop.types.Window, x: Int, y: Int):
-    std.kernel.gfx.window_set_position :: win, x, y :: call
+export fn set_position(edit win: arcana_winapi.desktop_handles.Window, x: Int, y: Int):
+    arcana_winapi.helpers.window.window_set_position :: win, x, y :: call
 
-export fn set_size(edit win: arcana_desktop.types.Window, width: Int, height: Int):
-    std.kernel.gfx.window_set_size :: win, width, height :: call
+export fn set_size(edit win: arcana_winapi.desktop_handles.Window, width: Int, height: Int):
+    arcana_winapi.helpers.window.window_set_size :: win, width, height :: call
 
-export fn set_visible(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_visible :: win, enabled :: call
+export fn set_visible(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_visible :: win, enabled :: call
 
-export fn set_decorated(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_decorated :: win, enabled :: call
+export fn set_decorated(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_decorated :: win, enabled :: call
 
-export fn set_resizable(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_resizable :: win, enabled :: call
+export fn set_resizable(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_resizable :: win, enabled :: call
 
-export fn set_min_size(edit win: arcana_desktop.types.Window, width: Int, height: Int):
-    std.kernel.gfx.window_set_min_size :: win, width, height :: call
+export fn set_min_size(edit win: arcana_winapi.desktop_handles.Window, width: Int, height: Int):
+    arcana_winapi.helpers.window.window_set_min_size :: win, width, height :: call
 
-export fn set_max_size(edit win: arcana_desktop.types.Window, width: Int, height: Int):
-    std.kernel.gfx.window_set_max_size :: win, width, height :: call
+export fn set_max_size(edit win: arcana_winapi.desktop_handles.Window, width: Int, height: Int):
+    arcana_winapi.helpers.window.window_set_max_size :: win, width, height :: call
 
-export fn set_fullscreen(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_fullscreen :: win, enabled :: call
+export fn set_fullscreen(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_fullscreen :: win, enabled :: call
 
-export fn set_minimized(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_minimized :: win, enabled :: call
+export fn set_minimized(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_minimized :: win, enabled :: call
 
-export fn set_maximized(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_maximized :: win, enabled :: call
+export fn set_maximized(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_maximized :: win, enabled :: call
 
-export fn set_topmost(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_topmost :: win, enabled :: call
+export fn set_topmost(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_topmost :: win, enabled :: call
 
-export fn set_cursor_visible(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_cursor_visible :: win, enabled :: call
+export fn set_cursor_visible(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_cursor_visible :: win, enabled :: call
 
-export fn set_transparent(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_transparent :: win, enabled :: call
+export fn set_transparent(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_set_transparent :: win, enabled :: call
 
-export fn set_theme_override(edit win: arcana_desktop.types.Window, read value: arcana_desktop.types.WindowThemeOverride):
-    std.kernel.gfx.window_set_theme_override_code :: win, (arcana_desktop.window.theme_override_code :: value :: call) :: call
+export fn set_theme_override(edit win: arcana_winapi.desktop_handles.Window, read value: arcana_desktop.types.WindowThemeOverride):
+    arcana_winapi.helpers.window.window_set_theme_override_code :: win, (arcana_desktop.window.theme_override_code :: value :: call) :: call
 
-export fn set_cursor_icon(edit win: arcana_desktop.types.Window, read icon: arcana_desktop.types.CursorIcon):
-    std.kernel.gfx.window_set_cursor_icon_code :: win, (arcana_desktop.window.cursor_icon_code :: icon :: call) :: call
+export fn set_cursor_icon(edit win: arcana_winapi.desktop_handles.Window, read icon: arcana_desktop.types.CursorIcon):
+    arcana_winapi.helpers.window.window_set_cursor_icon_code :: win, (arcana_desktop.window.cursor_icon_code :: icon :: call) :: call
 
-export fn set_cursor_grab_mode(edit win: arcana_desktop.types.Window, read mode: arcana_desktop.types.CursorGrabMode):
-    std.kernel.gfx.window_set_cursor_grab_mode :: win, (arcana_desktop.window.cursor_grab_mode_code :: mode :: call) :: call
+export fn set_cursor_grab_mode(edit win: arcana_winapi.desktop_handles.Window, read mode: arcana_desktop.types.CursorGrabMode):
+    arcana_winapi.helpers.window.window_set_cursor_grab_mode :: win, (arcana_desktop.window.cursor_grab_mode_code :: mode :: call) :: call
 
-export fn set_cursor_position(edit win: arcana_desktop.types.Window, x: Int, y: Int):
-    std.kernel.gfx.window_set_cursor_position :: win, x, y :: call
+export fn set_cursor_position(edit win: arcana_winapi.desktop_handles.Window, x: Int, y: Int):
+    arcana_winapi.helpers.window.window_set_cursor_position :: win, x, y :: call
 
-export fn set_text_input_enabled(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_set_text_input_enabled :: win, enabled :: call
+export fn set_text_input_enabled(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_desktop.text_input.set_enabled :: win, enabled :: call
 
-export fn text_input_settings(read win: arcana_desktop.types.Window) -> arcana_desktop.types.TextInputSettings:
+export fn text_input_settings(read win: arcana_winapi.desktop_handles.Window) -> arcana_desktop.types.TextInputSettings:
     return arcana_desktop.text_input.settings :: win :: call
 
-export fn apply_text_input_settings(edit win: arcana_desktop.types.Window, read settings: arcana_desktop.types.TextInputSettings):
+export fn apply_text_input_settings(edit win: arcana_winapi.desktop_handles.Window, read settings: arcana_desktop.types.TextInputSettings):
     arcana_desktop.text_input.apply_settings :: win, settings :: call
 
-export fn request_redraw(edit win: arcana_desktop.types.Window):
-    std.kernel.gfx.window_request_redraw :: win :: call
+export fn request_redraw(edit win: arcana_winapi.desktop_handles.Window):
+    arcana_winapi.helpers.window.window_request_redraw :: win :: call
 
-export fn request_attention(edit win: arcana_desktop.types.Window, enabled: Bool):
-    std.kernel.gfx.window_request_attention :: win, enabled :: call
+export fn request_attention(edit win: arcana_winapi.desktop_handles.Window, enabled: Bool):
+    arcana_winapi.helpers.window.window_request_attention :: win, enabled :: call
 
-export fn close(take win: arcana_desktop.types.Window) -> Result[Unit, Str]:
-    return std.kernel.gfx.window_close :: win :: call
+export fn close(take win: arcana_winapi.desktop_handles.Window) -> Result[Unit, Str]:
+    return arcana_winapi.helpers.window.window_close :: win :: call
+
+
+

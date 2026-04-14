@@ -1,6 +1,6 @@
 // Runtime-facing projection of the cabi export contract for generated export shims.
 use super::{
-    RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
+    RuntimeCoreHost, RuntimeExecutionState, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
     execute_routine_call_with_state, runtime_eval_message, validate_runtime_requirements_supported,
     variant_name_matches,
 };
@@ -33,7 +33,7 @@ pub fn execute_exported_abi_routine(
     plan: &RuntimePackagePlan,
     routine_key: &str,
     args: Vec<RuntimeAbiValue>,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeAbiExportOutcome, String> {
     let (routine_index, routine) = plan
         .routines
@@ -88,7 +88,7 @@ pub fn execute_cleanup_runtime_abi_routine(
     routine_key: &str,
     arg: RuntimeAbiValue,
     state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<(), String> {
     validate_runtime_requirements_supported(plan, host)?;
     let (routine_index, _) = plan
@@ -193,12 +193,7 @@ fn runtime_value_from_abi(value: RuntimeAbiValue) -> RuntimeValue {
         RuntimeAbiValue::Int(value) => RuntimeValue::Int(value),
         RuntimeAbiValue::Bool(value) => RuntimeValue::Bool(value),
         RuntimeAbiValue::Str(value) => RuntimeValue::Str(value),
-        RuntimeAbiValue::Bytes(bytes) => RuntimeValue::Array(
-            bytes
-                .into_iter()
-                .map(|byte| RuntimeValue::Int(i64::from(byte)))
-                .collect(),
-        ),
+        RuntimeAbiValue::Bytes(bytes) => RuntimeValue::Bytes(bytes),
         RuntimeAbiValue::Pair(left, right) => RuntimeValue::Pair(
             Box::new(runtime_value_from_abi(*left)),
             Box::new(runtime_value_from_abi(*right)),
@@ -241,6 +236,7 @@ fn abi_value_from_runtime(value: RuntimeValue) -> Result<RuntimeAbiValue, String
         RuntimeValue::Int(value) => Ok(RuntimeAbiValue::Int(value)),
         RuntimeValue::Bool(value) => Ok(RuntimeAbiValue::Bool(value)),
         RuntimeValue::Str(value) => Ok(RuntimeAbiValue::Str(value)),
+        RuntimeValue::Bytes(bytes) => Ok(RuntimeAbiValue::Bytes(bytes)),
         RuntimeValue::Array(values) => Ok(RuntimeAbiValue::Bytes(
             values
                 .into_iter()
@@ -252,7 +248,7 @@ fn abi_value_from_runtime(value: RuntimeValue) -> Result<RuntimeAbiValue, String
                         )
                     }),
                     other => Err(format!(
-                        "runtime abi only supports Array[Int] byte results, got `{other:?}` at index `{index}`"
+                        "runtime abi byte array fallback expects Int elements, got `{other:?}` at index `{index}`"
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -263,7 +259,7 @@ fn abi_value_from_runtime(value: RuntimeValue) -> Result<RuntimeAbiValue, String
         )),
         RuntimeValue::Unit => Ok(RuntimeAbiValue::Unit),
         other => Err(format!(
-            "runtime abi only supports Int, Bool, Str, Array[Int], Pair, or Unit results, got `{other:?}`"
+            "runtime abi only supports Int, Bool, Str, Bytes, Pair, or Unit results, got `{other:?}`"
         )),
     }
 }

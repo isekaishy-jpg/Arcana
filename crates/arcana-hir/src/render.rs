@@ -1031,17 +1031,28 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
         ),
         HirExpr::Slice {
             expr,
+            family,
             start,
             end,
+            len,
+            stride,
             inclusive_end,
         } => format!(
-            "slice(expr={}|start={}|end={}|inclusive={})",
+            "slice(expr={}|family={}|start={}|end={}|len={}|stride={}|inclusive={})",
             render_expr_fingerprint(expr),
+            family.as_str(),
             start
                 .as_ref()
                 .map(|expr| render_expr_fingerprint(expr))
                 .unwrap_or_else(|| "none".to_string()),
             end.as_ref()
+                .map(|expr| render_expr_fingerprint(expr))
+                .unwrap_or_else(|| "none".to_string()),
+            len.as_ref()
+                .map(|expr| render_expr_fingerprint(expr))
+                .unwrap_or_else(|| "none".to_string()),
+            stride
+                .as_ref()
                 .map(|expr| render_expr_fingerprint(expr))
                 .unwrap_or_else(|| "none".to_string()),
             inclusive_end

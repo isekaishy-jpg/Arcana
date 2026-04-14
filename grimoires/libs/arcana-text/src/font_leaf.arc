@@ -1,39 +1,39 @@
 import arcana_text.types
 import arcana_text.text_units
-import std.bytes
+import std.text
 import std.collections.array
 import std.collections.list
 import std.collections.map
-import std.fs
+import arcana_process.fs
 import std.memory
-import std.path
+import arcana_process.path
 import std.result
 import std.text
 use std.result.Result
 
 fn font_leaf_probe_flag_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
 
 fn font_leaf_probe_log_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "text_font_leaf_probe.log" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "text_font_leaf_probe.log" :: call
 
 fn font_leaf_probe_enabled() -> Bool:
-    return std.fs.is_file :: (font_leaf_probe_flag_path :: :: call) :: call
+    return arcana_process.fs.is_file :: (font_leaf_probe_flag_path :: :: call) :: call
 
 fn font_leaf_probe_append(line: Str):
     if not (font_leaf_probe_enabled :: :: call):
         return
-    let _ = std.fs.mkdir_all :: (std.path.parent :: (font_leaf_probe_log_path :: :: call) :: call) :: call
-    let opened = std.fs.stream_open_write :: (font_leaf_probe_log_path :: :: call), true :: call
+    let _ = arcana_process.fs.mkdir_all :: (arcana_process.path.parent :: (font_leaf_probe_log_path :: :: call) :: call) :: call
+    let opened = arcana_process.fs.stream_open_write :: (font_leaf_probe_log_path :: :: call), true :: call
     return match opened:
         Result.Ok(value) => font_leaf_probe_append_ready :: value, line :: call
         Result.Err(_) => 0
 
-fn font_leaf_probe_append_ready(take value: std.fs.FileStream, line: Str):
+fn font_leaf_probe_append_ready(take value: arcana_winapi.process_handles.FileStream, line: Str):
     let mut stream = value
-    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
-    let _ = std.fs.stream_write :: stream, bytes :: call
-    let _ = std.fs.stream_close :: stream :: call
+    let bytes = std.text.bytes_from_str_utf8 :: (line + "\n") :: call
+    let _ = arcana_process.fs.stream_write :: stream, bytes :: call
+    let _ = arcana_process.fs.stream_close :: stream :: call
 
 export record FaceTraits:
     weight: Int
@@ -176,7 +176,7 @@ export record FontFaceState:
     strike_position: Int
     strike_thickness: Int
     glyph_count: Int
-    font_view: std.memory.ByteView
+    font_view: View[Int, Contiguous]
     glyf_offset: Int
     loca_offset: Int
     loca_format: Int
@@ -266,7 +266,7 @@ record FaceLoadMeta:
     traits: arcana_text.font_leaf.FaceTraits
 
 record CoordinateDecodeSpec:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     cursor: Int
     flags: Array[Int]
     count: Int
@@ -335,7 +335,7 @@ record RasterKeyRequest:
     hinting: arcana_text.types.Hinting
 
 record AppendFeatureLookupRefsRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     feature_list_offset: Int
     feature_index: Int
     feature_value: Int
@@ -346,7 +346,7 @@ record LookupRefsForFeaturesRequest:
     features: List[arcana_text.types.FontFeature]
 
 record SubtableMatchRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     lookup_type: Int
     subtable_offset: Int
     units: List[arcana_text.font_leaf.GsubGlyphUnit]
@@ -354,19 +354,19 @@ record SubtableMatchRequest:
     feature_value: Int
 
 record AlternateSubstitutionMatchRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     subtable_offset: Int
     glyph_index: Int
     feature_value: Int
 
 record LigatureSubstitutionMatchRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     subtable_offset: Int
     units: List[arcana_text.font_leaf.GsubGlyphUnit]
     index: Int
 
 record LookupMatchRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     lookup_list_offset: Int
     lookup_index: Int
     units: List[arcana_text.font_leaf.GsubGlyphUnit]
@@ -374,13 +374,13 @@ record LookupMatchRequest:
     feature_value: Int
 
 record ApplyLookupRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     lookup_list_offset: Int
     lookup: arcana_text.font_leaf.GsubLookupRef
     units: List[arcana_text.font_leaf.GsubGlyphUnit]
 
 record LookupApplyAtRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     lookup_list_offset: Int
     lookup_index: Int
     units: List[arcana_text.font_leaf.GsubGlyphUnit]
@@ -459,18 +459,18 @@ record AnchorPoint:
     valid: Bool
 
 record PairPositionSubtableRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     subtable_offset: Int
     left_glyph: Int
     right_glyph: Int
 
 record SinglePositionSubtableRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     subtable_offset: Int
     glyph: Int
 
 record PositionLookupAdjustRequest:
-    bytes: std.memory.ByteView
+    bytes: View[Int, Contiguous]
     lookup_list_offset: Int
     lookup: arcana_text.font_leaf.GsubLookupRef
     left_glyph: Int
@@ -643,24 +643,24 @@ fn face_load_meta_from_request(read request: arcana_text.font_leaf.FaceLoadReque
     out.traits = request.traits
     return out
 
-fn request_source_view(read request: arcana_text.font_leaf.FaceLoadRequest) -> Result[std.memory.ByteView, Str]:
+fn request_source_view(read request: arcana_text.font_leaf.FaceLoadRequest) -> Result[View[Int, Contiguous], Str]:
     if (request.source_bytes :: :: len) <= 0:
-        return Result.Err[std.memory.ByteView, Str] :: "font source bytes are empty" :: call
-    return Result.Ok[std.memory.ByteView, Str] :: (std.memory.bytes_view :: request.source_bytes, 0, (request.source_bytes :: :: len) :: call) :: call
+        return Result.Err[View[Int, Contiguous], Str] :: "font source bytes are empty" :: call
+    return Result.Ok[View[Int, Contiguous], Str] :: request.source_bytes[0..(request.source_bytes :: :: len)] :: call
 
-fn request_face_view(read request: arcana_text.font_leaf.FaceLoadRequest) -> Result[std.memory.ByteView, Str]:
+fn request_face_view(read request: arcana_text.font_leaf.FaceLoadRequest) -> Result[View[Int, Contiguous], Str]:
     let source_view_result = arcana_text.font_leaf.request_source_view :: request :: call
     if source_view_result :: :: is_err:
-        return Result.Err[std.memory.ByteView, Str] :: (result_err_or :: source_view_result, "font source bytes are empty" :: call) :: call
-    let source_view = source_view_result :: (std.memory.bytes_view :: request.source_bytes, 0, (request.source_bytes :: :: len) :: call) :: unwrap_or
+        return Result.Err[View[Int, Contiguous], Str] :: (result_err_or :: source_view_result, "font source bytes are empty" :: call) :: call
+    let source_view = source_view_result :: request.source_bytes[0..(request.source_bytes :: :: len)] :: unwrap_or
     if request.face_index == 0:
-        return Result.Ok[std.memory.ByteView, Str] :: source_view :: call
+        return Result.Ok[View[Int, Contiguous], Str] :: source_view :: call
     let face_view_result = arcana_text.font_leaf.face_view_from_source :: source_view, request.face_index :: call
     if face_view_result :: :: is_err:
-        return Result.Err[std.memory.ByteView, Str] :: (result_err_or :: face_view_result, "failed to resolve face view" :: call) :: call
-    return Result.Ok[std.memory.ByteView, Str] :: (face_view_result :: source_view :: unwrap_or) :: call
+        return Result.Err[View[Int, Contiguous], Str] :: (result_err_or :: face_view_result, "failed to resolve face view" :: call) :: call
+    return Result.Ok[View[Int, Contiguous], Str] :: (face_view_result :: source_view :: unwrap_or) :: call
 
-fn face_source_offset_from_source(read bytes: std.memory.ByteView, face_index: Int) -> Result[Int, Str]:
+fn face_source_offset_from_source(read bytes: View[Int, Contiguous], face_index: Int) -> Result[Int, Str]:
     let offsets_result = arcana_text.font_leaf.face_offsets_from_view :: bytes :: call
     if offsets_result :: :: is_err:
         return Result.Err[Int, Str] :: (result_err_or :: offsets_result, "failed to resolve source faces" :: call) :: call
@@ -679,7 +679,7 @@ fn affine_matrix(xx: Int, xy: Int, axes: (Int, Int)) -> arcana_text.font_leaf.Af
     out.yy = axes.1
     return out
 
-fn coordinate_decode_spec(read bytes: std.memory.ByteView, cursor: Int, read flags: Array[Int]) -> arcana_text.font_leaf.CoordinateDecodeSpec:
+fn coordinate_decode_spec(read bytes: View[Int, Contiguous], cursor: Int, read flags: Array[Int]) -> arcana_text.font_leaf.CoordinateDecodeSpec:
     let mut out = arcana_text.font_leaf.CoordinateDecodeSpec :: bytes = bytes, cursor = cursor, flags = flags :: call
     out.count = 0
     out.short_mask = 0
@@ -826,10 +826,10 @@ fn byte_at_or_zero(read bytes: Array[Int], index: Int) -> Int:
         return 0
     return (bytes)[index]
 
-fn byte_at_or_zero_ref(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn byte_at_or_zero_ref(read bytes: View[Int, Contiguous], index: Int) -> Int:
     if index < 0 or index >= (bytes :: :: len):
         return 0
-    return bytes :: index :: at
+    return bytes :: index :: get
 
 fn int_list_at_or_zero(read values: List[Int], target: Int) -> Int:
     let mut index = 0
@@ -872,19 +872,19 @@ fn i8(value: Int) -> Int:
 fn u16_be(read bytes: Array[Int], index: Int) -> Int:
     return (byte_at_or_zero :: bytes, index :: call) * 256 + (byte_at_or_zero :: bytes, index + 1 :: call)
 
-fn u16_be_ref(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn u16_be_ref(read bytes: View[Int, Contiguous], index: Int) -> Int:
     return (byte_at_or_zero_ref :: bytes, index :: call) * 256 + (byte_at_or_zero_ref :: bytes, index + 1 :: call)
 
-fn u24_be_ref(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn u24_be_ref(read bytes: View[Int, Contiguous], index: Int) -> Int:
     return ((byte_at_or_zero_ref :: bytes, index :: call) * 65536) + ((byte_at_or_zero_ref :: bytes, index + 1 :: call) * 256) + (byte_at_or_zero_ref :: bytes, index + 2 :: call)
 
-fn u16_be_window(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn u16_be_window(read bytes: View[Int, Contiguous], index: Int) -> Int:
     let window = bytes :: index, index + 2 :: subview
     let raw = window :: :: to_array
     return u16_be :: raw, 0 :: call
 
 fn u16_be_array_window(read bytes: Array[Int], index: Int) -> Int:
-    let window = std.memory.bytes_view :: bytes, index, index + 2 :: call
+    let window = bytes[index..index + 2]
     let raw = window :: :: to_array
     return u16_be :: raw, 0 :: call
 
@@ -894,7 +894,7 @@ fn i16_be(read bytes: Array[Int], index: Int) -> Int:
         return raw - 65536
     return raw
 
-fn i16_be_ref(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn i16_be_ref(read bytes: View[Int, Contiguous], index: Int) -> Int:
     let raw = u16_be_ref :: bytes, index :: call
     if raw >= 32768:
         return raw - 65536
@@ -921,35 +921,35 @@ fn i32_le(read bytes: Array[Int], index: Int) -> Int:
         return raw - 4294967296
     return raw
 
-fn u32_be_ref(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn u32_be_ref(read bytes: View[Int, Contiguous], index: Int) -> Int:
     return ((u16_be_ref :: bytes, index :: call) * 65536) + (u16_be_ref :: bytes, index + 2 :: call)
 
-fn i32_be_ref(read bytes: std.memory.ByteView, index: Int) -> Int:
+fn i32_be_ref(read bytes: View[Int, Contiguous], index: Int) -> Int:
     let raw = u32_be_ref :: bytes, index :: call
     if raw >= 2147483648:
         return raw - 4294967296
     return raw
 
 fn tag_at(read bytes: Array[Int], index: Int) -> Str:
-    let mut out = std.bytes.new_buf :: :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero :: bytes, index :: call) :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero :: bytes, index + 1 :: call) :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero :: bytes, index + 2 :: call) :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero :: bytes, index + 3 :: call) :: call
-    return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: out :: call) :: call
+    let mut out = std.text.bytes_builder :: :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero :: bytes, index :: call) :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero :: bytes, index + 1 :: call) :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero :: bytes, index + 2 :: call) :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero :: bytes, index + 3 :: call) :: call
+    return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: out :: call) :: call
 
-fn tag_at_ref(read bytes: std.memory.ByteView, index: Int) -> Str:
-    let mut out = std.bytes.new_buf :: :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero_ref :: bytes, index :: call) :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero_ref :: bytes, index + 1 :: call) :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero_ref :: bytes, index + 2 :: call) :: call
-    std.bytes.buf_push :: out, (byte_at_or_zero_ref :: bytes, index + 3 :: call) :: call
-    return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: out :: call) :: call
+fn tag_at_ref(read bytes: View[Int, Contiguous], index: Int) -> Str:
+    let mut out = std.text.bytes_builder :: :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero_ref :: bytes, index :: call) :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero_ref :: bytes, index + 1 :: call) :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero_ref :: bytes, index + 2 :: call) :: call
+    std.text.bytes_builder_push :: out, (byte_at_or_zero_ref :: bytes, index + 3 :: call) :: call
+    return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: out :: call) :: call
 
 fn safe_file_stem(path: Str) -> Str:
-    return match (std.path.stem :: path :: call):
+    return match (arcana_process.path.stem :: path :: call):
         Result.Ok(value) => value
-        Result.Err(_) => (std.path.file_name :: path :: call)
+        Result.Err(_) => (arcana_process.path.file_name :: path :: call)
 
 fn normalize_family_name(name: Str) -> Str:
     if std.text.ends_with :: name, " Var" :: call:
@@ -957,19 +957,19 @@ fn normalize_family_name(name: Str) -> Str:
     return name
 
 fn utf8_codepoint(read text: Str) -> Int:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     if total <= 0:
         return 0
-    let first = std.bytes.at :: bytes, 0 :: call
+    let first = std.text.bytes_at :: bytes, 0 :: call
     if first < 128:
         return first
     if total >= 2 and first < 224:
-        return ((first % 32) * 64) + ((std.bytes.at :: bytes, 1 :: call) % 64)
+        return ((first % 32) * 64) + ((std.text.bytes_at :: bytes, 1 :: call) % 64)
     if total >= 3 and first < 240:
-        return ((first % 16) * 4096) + (((std.bytes.at :: bytes, 1 :: call) % 64) * 64) + ((std.bytes.at :: bytes, 2 :: call) % 64)
+        return ((first % 16) * 4096) + (((std.text.bytes_at :: bytes, 1 :: call) % 64) * 64) + ((std.text.bytes_at :: bytes, 2 :: call) % 64)
     if total >= 4 and first < 248:
-        return ((first % 8) * 262144) + (((std.bytes.at :: bytes, 1 :: call) % 64) * 4096) + (((std.bytes.at :: bytes, 2 :: call) % 64) * 64) + ((std.bytes.at :: bytes, 3 :: call) % 64)
+        return ((first % 8) * 262144) + (((std.text.bytes_at :: bytes, 1 :: call) % 64) * 4096) + (((std.text.bytes_at :: bytes, 2 :: call) % 64) * 64) + ((std.text.bytes_at :: bytes, 3 :: call) % 64)
     return first
 
 fn read_table_offset(read tables: Map[Str, (Int, Int)], read tag: Str) -> Result[(Int, Int), Str]:
@@ -1011,7 +1011,7 @@ fn parse_table_directory(read bytes: Array[Int]) -> Result[Map[Str, (Int, Int)],
     font_leaf_probe_append :: "parse_table_directory:done" :: call
     return Result.Ok[Map[Str, (Int, Int)], Str] :: tables :: call
 
-fn parse_table_directory_ref(read bytes: std.memory.ByteView) -> Result[Map[Str, (Int, Int)], Str]:
+fn parse_table_directory_ref(read bytes: View[Int, Contiguous]) -> Result[Map[Str, (Int, Int)], Str]:
     font_leaf_probe_append :: "parse_table_directory_ref:start" :: call
     let total = bytes :: :: len
     if total < 12:
@@ -1060,29 +1060,29 @@ fn width_class_milli(width_class: Int) -> Int:
 fn append_utf8_codepoint(edit buf: List[Int], codepoint: Int):
     let cp = clamp_int :: codepoint, 0, 1114111 :: call
     if cp < 128:
-        let _ = std.bytes.buf_push :: buf, cp :: call
+        let _ = std.text.bytes_builder_push :: buf, cp :: call
         return
     if cp < 2048:
-        let _ = std.bytes.buf_push :: buf, (192 + (cp / 64)) :: call
-        let _ = std.bytes.buf_push :: buf, (128 + (cp % 64)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (192 + (cp / 64)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (128 + (cp % 64)) :: call
         return
     if cp < 65536:
-        let _ = std.bytes.buf_push :: buf, (224 + (cp / 4096)) :: call
-        let _ = std.bytes.buf_push :: buf, (128 + ((cp / 64) % 64)) :: call
-        let _ = std.bytes.buf_push :: buf, (128 + (cp % 64)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (224 + (cp / 4096)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (128 + ((cp / 64) % 64)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (128 + (cp % 64)) :: call
         return
-    let _ = std.bytes.buf_push :: buf, (240 + (cp / 262144)) :: call
-    let _ = std.bytes.buf_push :: buf, (128 + ((cp / 4096) % 64)) :: call
-    let _ = std.bytes.buf_push :: buf, (128 + ((cp / 64) % 64)) :: call
-    let _ = std.bytes.buf_push :: buf, (128 + (cp % 64)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (240 + (cp / 262144)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (128 + ((cp / 4096) % 64)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (128 + ((cp / 64) % 64)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (128 + (cp % 64)) :: call
 
-fn utf16be_name_to_str(read bytes: std.memory.ByteView, start: Int, length: Int) -> Str:
+fn utf16be_name_to_str(read bytes: View[Int, Contiguous], start: Int, length: Int) -> Str:
     let total = bytes :: :: len
     let mut end = start + length
     if end > total:
         end = total
     let mut cursor = start
-    let mut out = std.bytes.new_buf :: :: call
+    let mut out = std.text.bytes_builder :: :: call
     while cursor + 1 < end:
         let first = u16_be_ref :: bytes, cursor :: call
         let mut codepoint = first
@@ -1093,25 +1093,25 @@ fn utf16be_name_to_str(read bytes: std.memory.ByteView, start: Int, length: Int)
                 codepoint = 65536 + ((first - 55296) * 1024) + (second - 56320)
                 cursor += 2
         arcana_text.font_leaf.append_utf8_codepoint :: out, codepoint :: call
-    return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: out :: call) :: call
+    return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: out :: call) :: call
 
-fn latin_name_to_str(read bytes: std.memory.ByteView, start: Int, length: Int) -> Str:
+fn latin_name_to_str(read bytes: View[Int, Contiguous], start: Int, length: Int) -> Str:
     let total = bytes :: :: len
     let mut end = start + length
     if end > total:
         end = total
     let mut cursor = start
-    let mut out = std.bytes.new_buf :: :: call
+    let mut out = std.text.bytes_builder :: :: call
     while cursor < end:
         let value = byte_at_or_zero_ref :: bytes, cursor :: call
         if value >= 0 and value <= 127:
-            let _ = std.bytes.buf_push :: out, value :: call
+            let _ = std.text.bytes_builder_push :: out, value :: call
         else:
             arcana_text.font_leaf.append_utf8_codepoint :: out, 63 :: call
         cursor += 1
-    return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: out :: call) :: call
+    return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: out :: call) :: call
 
-fn decode_name_string(read bytes: std.memory.ByteView, read request: arcana_text.font_leaf.NameDecodeRequest) -> Str:
+fn decode_name_string(read bytes: View[Int, Contiguous], read request: arcana_text.font_leaf.NameDecodeRequest) -> Str:
     if request.platform_id == 0 or request.platform_id == 3:
         return utf16be_name_to_str :: bytes, request.start, request.length :: call
     return latin_name_to_str :: bytes, request.start, request.length :: call
@@ -1129,7 +1129,7 @@ fn name_record_score(platform_id: Int, language_id: Int) -> Int:
         return 200
     return 100
 
-fn face_offsets_from_view(read bytes: std.memory.ByteView) -> Result[List[Int], Str]:
+fn face_offsets_from_view(read bytes: View[Int, Contiguous]) -> Result[List[Int], Str]:
     let total = bytes :: :: len
     if total < 4:
         return Result.Err[List[Int], Str] :: "font file is too small" :: call
@@ -1155,27 +1155,27 @@ fn face_offsets_from_view(read bytes: std.memory.ByteView) -> Result[List[Int], 
         offsets :: 0 :: push
     return Result.Ok[List[Int], Str] :: offsets :: call
 
-export fn source_face_count_from_view(read bytes: std.memory.ByteView) -> Result[Int, Str]:
+export fn source_face_count_from_view(read bytes: View[Int, Contiguous]) -> Result[Int, Str]:
     let offsets = arcana_text.font_leaf.face_offsets_from_view :: bytes :: call
     if offsets :: :: is_err:
         return Result.Err[Int, Str] :: (result_err_or :: offsets, "failed to read face count" :: call) :: call
     return Result.Ok[Int, Str] :: ((offsets :: (empty_int_list :: :: call) :: unwrap_or) :: :: len) :: call
 
-fn face_view_from_source(read bytes: std.memory.ByteView, face_index: Int) -> Result[std.memory.ByteView, Str]:
+fn face_view_from_source(read bytes: View[Int, Contiguous], face_index: Int) -> Result[View[Int, Contiguous], Str]:
     let offsets_result = arcana_text.font_leaf.face_offsets_from_view :: bytes :: call
     if offsets_result :: :: is_err:
-        return Result.Err[std.memory.ByteView, Str] :: (result_err_or :: offsets_result, "failed to resolve source faces" :: call) :: call
+        return Result.Err[View[Int, Contiguous], Str] :: (result_err_or :: offsets_result, "failed to resolve source faces" :: call) :: call
     let offsets = offsets_result :: (empty_int_list :: :: call) :: unwrap_or
     let total = offsets :: :: len
     if face_index < 0 or face_index >= total:
-        return Result.Err[std.memory.ByteView, Str] :: ("font face index `" + (std.text.from_int :: face_index :: call) + "` is out of range") :: call
+        return Result.Err[View[Int, Contiguous], Str] :: ("font face index `" + (std.text.from_int :: face_index :: call) + "` is out of range") :: call
     let offset = int_list_at_or_zero :: offsets, face_index :: call
     if total == 1 and offset == 0:
-        return Result.Ok[std.memory.ByteView, Str] :: bytes :: call
+        return Result.Ok[View[Int, Contiguous], Str] :: bytes :: call
     let face_view = bytes :: offset, (bytes :: :: len) :: subview
-    return Result.Ok[std.memory.ByteView, Str] :: face_view :: call
+    return Result.Ok[View[Int, Contiguous], Str] :: face_view :: call
 
-fn name_string_for_id(read bytes: std.memory.ByteView, name_table: (Int, Int), target_id: Int) -> Str:
+fn name_string_for_id(read bytes: View[Int, Contiguous], name_table: (Int, Int), target_id: Int) -> Str:
     font_leaf_probe_append :: ("name_string_for_id:start id=" + (std.text.from_int :: target_id :: call)) :: call
     let table_end = name_table.0 + name_table.1
     if table_end > (bytes :: :: len):
@@ -1211,17 +1211,17 @@ fn name_string_for_id(read bytes: std.memory.ByteView, name_table: (Int, Int), t
     font_leaf_probe_append :: ("name_string_for_id:done id=" + (std.text.from_int :: target_id :: call)) :: call
     return best_value
 
-fn traits_from_face_tables(read bytes: std.memory.ByteView, read request: arcana_text.font_leaf.FaceTraitsRequest) -> arcana_text.font_leaf.FaceTraits:
+fn traits_from_face_tables(read bytes: View[Int, Contiguous], read request: arcana_text.font_leaf.FaceTraitsRequest) -> arcana_text.font_leaf.FaceTraits:
     let mut traits = request.fallback_traits
     if request.tables :: "OS/2" :: has:
-        let os2 = request.tables :: "OS/2" :: get
-        if os2.1 >= 8:
-            let weight = u16_be_ref :: bytes, os2.0 + 4 :: call
+        let os2_table = request.tables :: "OS/2" :: get
+        if os2_table.1 >= 8:
+            let weight = u16_be_ref :: bytes, os2_table.0 + 4 :: call
             if weight > 0:
                 traits.weight = weight
-            traits.width_milli = arcana_text.font_leaf.width_class_milli :: (u16_be_ref :: bytes, os2.0 + 6 :: call) :: call
-        if os2.1 >= 64:
-            let fs_selection = u16_be_ref :: bytes, os2.0 + 62 :: call
+            traits.width_milli = arcana_text.font_leaf.width_class_milli :: (u16_be_ref :: bytes, os2_table.0 + 6 :: call) :: call
+        if os2_table.1 >= 64:
+            let fs_selection = u16_be_ref :: bytes, os2_table.0 + 62 :: call
             if (fs_selection % 2) == 1:
                 traits.slant_milli = -12000
     if request.head.1 >= 46:
@@ -1230,7 +1230,7 @@ fn traits_from_face_tables(read bytes: std.memory.ByteView, read request: arcana
             traits.slant_milli = -12000
     return traits
 
-export fn source_face_metadata_from_view(read bytes: std.memory.ByteView, read request: arcana_text.font_leaf.SourceFaceMetadataRequest) -> Result[arcana_text.font_leaf.SourceFaceMetadata, Str]:
+export fn source_face_metadata_from_view(read bytes: View[Int, Contiguous], read request: arcana_text.font_leaf.SourceFaceMetadataRequest) -> Result[arcana_text.font_leaf.SourceFaceMetadata, Str]:
     let face_view_result = arcana_text.font_leaf.face_view_from_source :: bytes, request.face_index :: call
     if face_view_result :: :: is_err:
         return Result.Err[arcana_text.font_leaf.SourceFaceMetadata, Str] :: (result_err_or :: face_view_result, "failed to resolve face view" :: call) :: call
@@ -1298,7 +1298,7 @@ fn axis_fixed_to_value(tag: Str, raw: Int) -> Int:
         return value * 1000
     return value
 
-fn parse_variation_axes(read bytes: std.memory.ByteView, fvar: (Int, Int)) -> List[arcana_text.font_leaf.VariationAxisDef]:
+fn parse_variation_axes(read bytes: View[Int, Contiguous], fvar: (Int, Int)) -> List[arcana_text.font_leaf.VariationAxisDef]:
     let mut axes = empty_variation_axes :: :: call
     if fvar.0 < 0 or fvar.1 < 16:
         return axes
@@ -1404,7 +1404,7 @@ fn all_point_indices(total: Int) -> List[Int]:
         index += 1
     return out
 
-fn decode_packed_points(point_count: Int, read bytes: std.memory.ByteView, offset: Int) -> (List[Int], Int):
+fn decode_packed_points(point_count: Int, read bytes: View[Int, Contiguous], offset: Int) -> (List[Int], Int):
     let mut pos = offset
     let mut count = byte_at_or_zero_ref :: bytes, pos :: call
     pos += 1
@@ -1433,7 +1433,7 @@ fn decode_packed_points(point_count: Int, read bytes: std.memory.ByteView, offse
             seen += 1
     return (out, pos)
 
-fn decode_packed_deltas(count: Int, read bytes: std.memory.ByteView, offset: Int) -> (List[Int], Int):
+fn decode_packed_deltas(count: Int, read bytes: View[Int, Contiguous], offset: Int) -> (List[Int], Int):
     let mut pos = offset
     let mut out = empty_int_list :: :: call
     while (out :: :: len) < count:
@@ -1469,7 +1469,7 @@ export fn default_gsub_units(read glyphs: List[Int]) -> List[arcana_text.font_le
         units :: (arcana_text.font_leaf.GsubGlyphUnit :: glyph_index = glyph_index, consumed = 1 :: call) :: push
     return units
 
-fn script_table_offset(read bytes: std.memory.ByteView, gsub_offset: Int, read script_tag: Str) -> Int:
+fn script_table_offset(read bytes: View[Int, Contiguous], gsub_offset: Int, read script_tag: Str) -> Int:
     if gsub_offset < 0:
         return -1
     let script_list_offset = gsub_offset + (u16_be_ref :: bytes, gsub_offset + 4 :: call)
@@ -1487,7 +1487,7 @@ fn script_table_offset(read bytes: std.memory.ByteView, gsub_offset: Int, read s
         index += 1
     return default_offset
 
-fn langsys_table_offset(read bytes: std.memory.ByteView, script_offset: Int, read language_tag: Str) -> Int:
+fn langsys_table_offset(read bytes: View[Int, Contiguous], script_offset: Int, read language_tag: Str) -> Int:
     if script_offset < 0:
         return -1
     let default_offset = u16_be_ref :: bytes, script_offset :: call
@@ -1631,7 +1631,7 @@ fn value_record_size(value_format: Int) -> Int:
         bit = bit * 2
     return size
 
-fn value_record(read bytes: std.memory.ByteView, offset: Int, value_format: Int) -> arcana_text.font_leaf.PairPlacement:
+fn value_record(read bytes: View[Int, Contiguous], offset: Int, value_format: Int) -> arcana_text.font_leaf.PairPlacement:
     let mut cursor = offset
     let mut value = arcana_text.font_leaf.empty_pair_placement :: :: call
     if (value_format % 2) == 1:
@@ -1666,7 +1666,7 @@ fn combined_pair_value(read left: arcana_text.font_leaf.PairPlacement, read righ
     out.attach_to_left_origin = left.attach_to_left_origin or right.attach_to_left_origin
     return out
 
-fn class_def_index(read bytes: std.memory.ByteView, class_def_offset: Int, glyph_index: Int) -> Int:
+fn class_def_index(read bytes: View[Int, Contiguous], class_def_offset: Int, glyph_index: Int) -> Int:
     if class_def_offset <= 0:
         return 0
     let format = u16_be_ref :: bytes, class_def_offset :: call
@@ -1769,7 +1769,7 @@ fn single_position_subtable_adjust(read request: arcana_text.font_leaf.SinglePos
         return arcana_text.font_leaf.single_position_format2_adjust :: request :: call
     return arcana_text.font_leaf.empty_pair_placement :: :: call
 
-fn anchor_point(read bytes: std.memory.ByteView, anchor_offset: Int) -> arcana_text.font_leaf.AnchorPoint:
+fn anchor_point(read bytes: View[Int, Contiguous], anchor_offset: Int) -> arcana_text.font_leaf.AnchorPoint:
     if anchor_offset <= 0 or anchor_offset + 6 > (bytes :: :: len):
         return arcana_text.font_leaf.invalid_anchor_point :: :: call
     let format = u16_be_ref :: bytes, anchor_offset :: call
@@ -1991,7 +1991,7 @@ fn position_lookup_adjust(read request: arcana_text.font_leaf.PositionLookupAdju
         subtable_index += 1
     return arcana_text.font_leaf.empty_pair_placement :: :: call
 
-fn coverage_index(read bytes: std.memory.ByteView, coverage_offset: Int, glyph_index: Int) -> Int:
+fn coverage_index(read bytes: View[Int, Contiguous], coverage_offset: Int, glyph_index: Int) -> Int:
     if coverage_offset <= 0:
         return -1
     let format = u16_be_ref :: bytes, coverage_offset :: call
@@ -2021,7 +2021,7 @@ fn unit_glyph_index(read units: List[arcana_text.font_leaf.GsubGlyphUnit], index
         return -1
     return (units)[index].glyph_index
 
-fn single_substitution_match(read bytes: std.memory.ByteView, subtable_offset: Int, glyph_index: Int) -> arcana_text.font_leaf.GsubMatch:
+fn single_substitution_match(read bytes: View[Int, Contiguous], subtable_offset: Int, glyph_index: Int) -> arcana_text.font_leaf.GsubMatch:
     let format = u16_be_ref :: bytes, subtable_offset :: call
     let coverage_offset = subtable_offset + (u16_be_ref :: bytes, subtable_offset + 2 :: call)
     let coverage_index_value = arcana_text.font_leaf.coverage_index :: bytes, coverage_offset, glyph_index :: call
@@ -2179,7 +2179,7 @@ fn replace_range_with_glyphs(read units: List[arcana_text.font_leaf.GsubGlyphUni
     let replacement = arcana_text.font_leaf.replacement_units :: glyphs, consumed :: call
     return arcana_text.font_leaf.replace_units_range :: units, span, replacement :: call
 
-fn multiple_substitution_glyphs(read bytes: std.memory.ByteView, subtable_offset: Int, glyph_index: Int) -> List[Int]:
+fn multiple_substitution_glyphs(read bytes: View[Int, Contiguous], subtable_offset: Int, glyph_index: Int) -> List[Int]:
     let coverage_offset = subtable_offset + (u16_be_ref :: bytes, subtable_offset + 2 :: call)
     let coverage_index_value = arcana_text.font_leaf.coverage_index :: bytes, coverage_offset, glyph_index :: call
     if coverage_index_value < 0:
@@ -2505,7 +2505,7 @@ fn unit_glyphs(read units: List[arcana_text.font_leaf.GsubGlyphUnit]) -> List[In
         glyphs :: unit.glyph_index :: push
     return glyphs
 
-fn any_glyph_in_coverage(read bytes: std.memory.ByteView, coverage_offset: Int, read glyphs: List[Int]) -> Bool:
+fn any_glyph_in_coverage(read bytes: View[Int, Contiguous], coverage_offset: Int, read glyphs: List[Int]) -> Bool:
     for glyph_index in glyphs:
         if glyph_index > 0 and (arcana_text.font_leaf.coverage_index :: bytes, coverage_offset, glyph_index :: call) >= 0:
             return true
@@ -2514,14 +2514,14 @@ fn any_glyph_in_coverage(read bytes: std.memory.ByteView, coverage_offset: Int, 
 fn lookup_candidate_key(lookup_index: Int, glyph_index: Int) -> Str:
     return (std.text.from_int :: lookup_index :: call) + ":" + (std.text.from_int :: glyph_index :: call)
 
-fn lookup_type_for(read bytes: std.memory.ByteView, lookup_list_offset: Int, lookup_index: Int) -> Int:
+fn lookup_type_for(read bytes: View[Int, Contiguous], lookup_list_offset: Int, lookup_index: Int) -> Int:
     let lookup_count = u16_be_ref :: bytes, lookup_list_offset :: call
     if lookup_index < 0 or lookup_index >= lookup_count:
         return 0
     let lookup_offset = lookup_list_offset + (u16_be_ref :: bytes, lookup_list_offset + 2 + (lookup_index * 2) :: call)
     return u16_be_ref :: bytes, lookup_offset :: call
 
-fn subtable_can_match_any(read bytes: std.memory.ByteView, payload: (Int, Int), read glyphs: List[Int]) -> Bool:
+fn subtable_can_match_any(read bytes: View[Int, Contiguous], payload: (Int, Int), read glyphs: List[Int]) -> Bool:
     let lookup_type = payload.0
     let subtable_offset = payload.1
     if lookup_type == 7:
@@ -2561,7 +2561,7 @@ fn subtable_can_match_any(read bytes: std.memory.ByteView, payload: (Int, Int), 
         return true
     return true
 
-fn lookup_can_match_any_glyph(read bytes: std.memory.ByteView, payload: (Int, Int), read glyphs: List[Int]) -> Bool:
+fn lookup_can_match_any_glyph(read bytes: View[Int, Contiguous], payload: (Int, Int), read glyphs: List[Int]) -> Bool:
     let lookup_list_offset = payload.0
     let lookup_index = payload.1
     let lookup_count = u16_be_ref :: bytes, lookup_list_offset :: call
@@ -2871,7 +2871,7 @@ fn parse_h_metrics(read bytes: Array[Int], tables: ((Int, Int), (Int, Int)), gly
         index += 1
     return Result.Ok[(Array[Int], Array[Int]), Str] :: ((std.collections.array.from_list[Int] :: widths :: call), (std.collections.array.from_list[Int] :: bearings :: call)) :: call
 
-fn parse_h_metrics_ref(read bytes: std.memory.ByteView, tables: ((Int, Int), (Int, Int)), glyph_count: Int) -> Result[(Array[Int], Array[Int]), Str]:
+fn parse_h_metrics_ref(read bytes: View[Int, Contiguous], tables: ((Int, Int), (Int, Int)), glyph_count: Int) -> Result[(Array[Int], Array[Int]), Str]:
     let hhea = tables.0
     let hmtx = tables.1
     let metric_count = u16_be_ref :: bytes, hhea.0 + 34 :: call
@@ -2912,7 +2912,7 @@ fn parse_loca_offsets(read bytes: Array[Int], tables: ((Int, Int), (Int, Int)), 
         index += 1
     return Result.Ok[Array[Int], Str] :: (std.collections.array.from_list[Int] :: out :: call) :: call
 
-fn parse_loca_offsets_ref(read bytes: std.memory.ByteView, tables: ((Int, Int), (Int, Int)), glyph_count: Int) -> Result[Array[Int], Str]:
+fn parse_loca_offsets_ref(read bytes: View[Int, Contiguous], tables: ((Int, Int), (Int, Int)), glyph_count: Int) -> Result[Array[Int], Str]:
     let head = tables.0
     let loca = tables.1
     let format = i16_be_ref :: bytes, head.0 + 50 :: call
@@ -2939,7 +2939,7 @@ fn parse_cmap_format12(read bytes: Array[Int], table_offset: Int) -> List[arcana
         index += 1
     return out
 
-fn parse_cmap_format12_ref(read bytes: std.memory.ByteView, table_offset: Int) -> List[arcana_text.font_leaf.Cmap12Group]:
+fn parse_cmap_format12_ref(read bytes: View[Int, Contiguous], table_offset: Int) -> List[arcana_text.font_leaf.Cmap12Group]:
     let groups = u32_be_ref :: bytes, table_offset + 12 :: call
     let mut out = empty_cmap12_groups :: :: call
     let mut cursor = table_offset + 16
@@ -2973,7 +2973,7 @@ fn parse_cmap_format4(read bytes: Array[Int], table_offset: Int) -> (List[arcana
         index += 1
     return (segments, (empty_alpha :: :: call))
 
-fn parse_cmap_format4_ref(read bytes: std.memory.ByteView, table_offset: Int) -> (List[arcana_text.font_leaf.Cmap4Segment], Array[Int]):
+fn parse_cmap_format4_ref(read bytes: View[Int, Contiguous], table_offset: Int) -> (List[arcana_text.font_leaf.Cmap4Segment], Array[Int]):
     let seg_count = (u16_be_ref :: bytes, table_offset + 6 :: call) / 2
     let end_codes = table_offset + 14
     let start_codes = end_codes + (seg_count * 2) + 2
@@ -3023,7 +3023,7 @@ fn parse_cmap(read bytes: Array[Int], cmap: (Int, Int)) -> arcana_text.font_leaf
         groups = parse_cmap_format12 :: bytes, format12_offset :: call
     return cmap_state :: segments, glyphs, groups :: call
 
-fn parse_cmap_ref(read bytes: std.memory.ByteView, cmap: (Int, Int)) -> arcana_text.font_leaf.CmapState:
+fn parse_cmap_ref(read bytes: View[Int, Contiguous], cmap: (Int, Int)) -> arcana_text.font_leaf.CmapState:
     let record_count = u16_be_ref :: bytes, cmap.0 + 2 :: call
     let mut format4_offset = -1
     let mut format12_offset = -1
@@ -3070,7 +3070,7 @@ fn detect_cmap_offsets(read bytes: Array[Int], cmap: (Int, Int)) -> (Int, Int):
         index += 1
     return (format4_offset, format12_offset)
 
-fn detect_cmap_offsets_ref(read bytes: std.memory.ByteView, cmap: (Int, Int)) -> (Int, Int):
+fn detect_cmap_offsets_ref(read bytes: View[Int, Contiguous], cmap: (Int, Int)) -> (Int, Int):
     let record_count = u16_be_ref :: bytes, cmap.0 + 2 :: call
     let mut format4_offset = -1
     let mut format12_offset = -1
@@ -3104,7 +3104,7 @@ fn glyph_index_from_cmap12_offset(read bytes: Array[Int], cmap12_offset: Int, co
         index += 1
     return 0
 
-fn glyph_index_from_cmap12_offset_ref(read bytes: std.memory.ByteView, cmap12_offset: Int, codepoint: Int) -> Int:
+fn glyph_index_from_cmap12_offset_ref(read bytes: View[Int, Contiguous], cmap12_offset: Int, codepoint: Int) -> Int:
     if cmap12_offset < 0:
         return 0
     let groups = u32_be_ref :: bytes, cmap12_offset + 12 :: call
@@ -3150,7 +3150,7 @@ fn glyph_index_from_cmap4_offset(read bytes: Array[Int], cmap4_offset: Int, code
         index += 1
     return 0
 
-fn glyph_index_from_cmap4_offset_ref(read bytes: std.memory.ByteView, cmap4_offset: Int, codepoint: Int) -> Int:
+fn glyph_index_from_cmap4_offset_ref(read bytes: View[Int, Contiguous], cmap4_offset: Int, codepoint: Int) -> Int:
     if cmap4_offset < 0:
         return 0
     let seg_count = (u16_be_ref :: bytes, cmap4_offset + 6 :: call) / 2
@@ -3377,7 +3377,7 @@ fn top_side_bearing_for(read face: arcana_text.font_leaf.FontFaceState, glyph_in
     let extra_index = glyph_index - face.vmetric_count
     return i16_be_ref :: face.font_view, face.vmtx_offset + (face.vmetric_count * 4) + (extra_index * 2) :: call
 
-fn decode_flags(read bytes: std.memory.ByteView, start: Int, count: Int) -> (Array[Int], Int):
+fn decode_flags(read bytes: View[Int, Contiguous], start: Int, count: Int) -> (Array[Int], Int):
     let mut flags = empty_int_list :: :: call
     let mut cursor = start
     while (flags :: :: len) < count:
@@ -3416,7 +3416,7 @@ fn decode_coordinates(read spec: arcana_text.font_leaf.CoordinateDecodeSpec) -> 
         current += delta
         out :: current :: push
         index += 1
-    font_leaf_probe_append :: ("decode_coordinates:done at=" + (std.text.from_int :: at :: call)) :: call
+    font_leaf_probe_append :: ("decode_coordinates:done at=" + (std.text.from_int :: get :: call)) :: call
     return ((std.collections.array.from_list[Int] :: out :: call), at)
 
 fn parse_simple_outline(read face: arcana_text.font_leaf.FontFaceState, glyph_index: Int, glyph_offset: Int) -> arcana_text.font_leaf.GlyphOutline:
@@ -3767,7 +3767,7 @@ fn apply_scaled_deltas(read coords: List[arcana_text.font_leaf.CoordPoint], read
         index += 1
     return out
 
-fn tuple_coord_values(read bytes: std.memory.ByteView, offset: Int, count: Int) -> (List[Int], Int):
+fn tuple_coord_values(read bytes: View[Int, Contiguous], offset: Int, count: Int) -> (List[Int], Int):
     let mut out = empty_int_list :: :: call
     let mut pos = offset
     let mut index = 0
@@ -5665,10 +5665,10 @@ fn decode_png_color_image(read bytes: Array[Int]) -> Result[arcana_text.font_lea
                 return Result.Err[arcana_text.font_leaf.DecodedColorImage, Str] :: "PNG interlacing is unsupported" :: call
         else:
             if chunk_type == "PLTE":
-                palette = std.bytes.slice :: bytes, data_start, data_end :: call
+                palette = std.text.bytes_slice :: bytes, data_start, data_end :: call
             else:
                 if chunk_type == "tRNS":
-                    transparency = std.bytes.slice :: bytes, data_start, data_end :: call
+                    transparency = std.text.bytes_slice :: bytes, data_start, data_end :: call
                 else:
                     if chunk_type == "IDAT":
                         arcana_text.font_leaf.append_byte_range :: compressed, bytes, data_start, data_end :: call
@@ -5847,7 +5847,7 @@ fn decode_ico_color_image(read bytes: Array[Int]) -> Result[arcana_text.font_lea
         let image_length = u32_le :: bytes, record + 8 :: call
         let image_offset = u32_le :: bytes, record + 12 :: call
         if image_length > 0 and image_offset >= 0 and image_offset + image_length <= (bytes :: :: len):
-            let image_bytes = std.bytes.slice :: bytes, image_offset, image_offset + image_length :: call
+            let image_bytes = std.text.bytes_slice :: bytes, image_offset, image_offset + image_length :: call
             if (arcana_text.font_leaf.bitmap_signature_kind :: image_bytes :: call) == "png ":
                 let area = width * height
                 if best_offset < 0 or area > best_area or (area == best_area and bit_count > best_depth):
@@ -5876,7 +5876,7 @@ fn decode_ico_color_image(read bytes: Array[Int]) -> Result[arcana_text.font_lea
             let image_length = u32_le :: bytes, record + 8 :: call
             let image_offset = u32_le :: bytes, record + 12 :: call
             if image_length > 0 and image_offset >= 0 and image_offset + image_length <= (bytes :: :: len):
-                let image_bytes = std.bytes.slice :: bytes, image_offset, image_offset + image_length :: call
+                let image_bytes = std.text.bytes_slice :: bytes, image_offset, image_offset + image_length :: call
                 let header_size = u32_le :: image_bytes, 0 :: call
                 if header_size >= 40:
                     let area = width * height
@@ -5888,8 +5888,8 @@ fn decode_ico_color_image(read bytes: Array[Int]) -> Result[arcana_text.font_lea
             index += 1
         if dib_offset < 0 or dib_length <= 0:
             return Result.Err[arcana_text.font_leaf.DecodedColorImage, Str] :: "ICO image has no supported bitmap payload" :: call
-        return arcana_text.font_leaf.decode_ico_dib_color_image :: (std.bytes.slice :: bytes, dib_offset, dib_offset + dib_length :: call) :: call
-    return arcana_text.font_leaf.decode_png_color_image :: (std.bytes.slice :: bytes, best_offset, best_offset + best_length :: call) :: call
+        return arcana_text.font_leaf.decode_ico_dib_color_image :: (std.text.bytes_slice :: bytes, dib_offset, dib_offset + dib_length :: call) :: call
+    return arcana_text.font_leaf.decode_png_color_image :: (std.text.bytes_slice :: bytes, best_offset, best_offset + best_length :: call) :: call
 
 fn gif_read_code(read bytes: Array[Int], bit_offset: Int, code_size: Int) -> Result[(Int, Int), Str]:
     if code_size <= 0 or code_size > 12:
@@ -6062,7 +6062,7 @@ fn decode_gif_color_image(read bytes: Array[Int]) -> Result[arcana_text.font_lea
     if global_palette_flag:
         if cursor + global_size > total:
             return Result.Err[arcana_text.font_leaf.DecodedColorImage, Str] :: "GIF global palette is truncated" :: call
-        global_palette = std.bytes.slice :: bytes, cursor, cursor + global_size :: call
+        global_palette = std.text.bytes_slice :: bytes, cursor, cursor + global_size :: call
         cursor += global_size
     let mut transparency_index = -1
     while cursor < total:
@@ -6108,7 +6108,7 @@ fn decode_gif_color_image(read bytes: Array[Int]) -> Result[arcana_text.font_lea
             if local_palette_flag:
                 if cursor + local_size > total:
                     return Result.Err[arcana_text.font_leaf.DecodedColorImage, Str] :: "GIF local palette is truncated" :: call
-                palette = std.bytes.slice :: bytes, cursor, cursor + local_size :: call
+                palette = std.text.bytes_slice :: bytes, cursor, cursor + local_size :: call
                 cursor += local_size
             if cursor >= total:
                 return Result.Err[arcana_text.font_leaf.DecodedColorImage, Str] :: "GIF image data is truncated" :: call
@@ -6447,8 +6447,8 @@ fn svg_document_text(read svg_bytes: Array[Int]) -> Result[Str, Str]:
         let expanded = arcana_text.font_leaf.inflate_gzip_payload :: svg_bytes :: call
         if expanded :: :: is_err:
             return Result.Err[Str, Str] :: (result_err_or :: expanded, "failed to expand gzipped SVG glyph document" :: call) :: call
-        return Result.Ok[Str, Str] :: (std.bytes.to_str_utf8 :: (expanded :: (empty_alpha :: :: call) :: unwrap_or) :: call) :: call
-    return Result.Ok[Str, Str] :: (std.bytes.to_str_utf8 :: svg_bytes :: call) :: call
+        return Result.Ok[Str, Str] :: (std.text.bytes_to_str_utf8 :: (expanded :: (empty_alpha :: :: call) :: unwrap_or) :: call) :: call
+    return Result.Ok[Str, Str] :: (std.text.bytes_to_str_utf8 :: svg_bytes :: call) :: call
 
 fn svg_parse_hex_color(read text: Str) -> (Int, Int, Int, Int):
     let raw = std.text.trim :: text :: call
@@ -7140,7 +7140,7 @@ fn render_svg_bitmap(read face: arcana_text.font_leaf.FontFaceState, read payloa
     let image = arcana_text.font_leaf.EmbeddedBitmapImage :: format_tag = "svg ", bytes = svg_bytes, metrics = metrics, draw_outline = false, bottom_origin = false :: call
     return arcana_text.font_leaf.embedded_bitmap_to_glyph_bitmap :: (image, decoded, advance, baseline, line_height) :: call
 
-fn big_bitmap_metrics(read bytes: std.memory.ByteView, offset: Int, vertical: Bool) -> arcana_text.font_leaf.EmbeddedBitmapMetrics:
+fn big_bitmap_metrics(read bytes: View[Int, Contiguous], offset: Int, vertical: Bool) -> arcana_text.font_leaf.EmbeddedBitmapMetrics:
     let width = byte_at_or_zero_ref :: bytes, offset + 1 :: call
     let hori_bearing_x = i8 :: (byte_at_or_zero_ref :: bytes, offset + 2 :: call) :: call
     let hori_bearing_y = i8 :: (byte_at_or_zero_ref :: bytes, offset + 3 :: call) :: call
@@ -7156,7 +7156,7 @@ fn big_bitmap_metrics(read bytes: std.memory.ByteView, offset: Int, vertical: Bo
         metrics.advance = width
     return metrics
 
-fn small_bitmap_metrics(read bytes: std.memory.ByteView, offset: Int, vertical: Bool) -> arcana_text.font_leaf.EmbeddedBitmapMetrics:
+fn small_bitmap_metrics(read bytes: View[Int, Contiguous], offset: Int, vertical: Bool) -> arcana_text.font_leaf.EmbeddedBitmapMetrics:
     let width = byte_at_or_zero_ref :: bytes, offset + 1 :: call
     let bearing_x = i8 :: (byte_at_or_zero_ref :: bytes, offset + 2 :: call) :: call
     let bearing_y = i8 :: (byte_at_or_zero_ref :: bytes, offset + 3 :: call) :: call
@@ -8289,7 +8289,7 @@ export fn overline_metrics_for_face(read face: arcana_text.font_leaf.FontFaceSta
     let offset = scale_y :: face.ascender, font_size, face.units_per_em :: call
     return (offset, thickness)
 
-fn load_face_from_parts(family_name: Str, read meta: arcana_text.font_leaf.FaceLoadMeta, read bytes_view: std.memory.ByteView) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
+fn load_face_from_parts(family_name: Str, read meta: arcana_text.font_leaf.FaceLoadMeta, read bytes_view: View[Int, Contiguous]) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
     font_leaf_probe_append :: "load_face_from_parts:start" :: call
     let source_label = meta.source_label
     let source_path = meta.source_path
@@ -8364,9 +8364,9 @@ fn load_face_from_parts(family_name: Str, read meta: arcana_text.font_leaf.FaceL
     let mut vmtx = (-1, 0)
     if tables :: "vmtx" :: has:
         vmtx = tables :: "vmtx" :: get
-    let mut os2 = (-1, 0)
+    let mut os2_table = (-1, 0)
     if tables :: "OS/2" :: has:
-        os2 = tables :: "OS/2" :: get
+        os2_table = tables :: "OS/2" :: get
     let mut post = (-1, 0)
     if tables :: "post" :: has:
         post = tables :: "post" :: get
@@ -8472,9 +8472,9 @@ fn load_face_from_parts(family_name: Str, read meta: arcana_text.font_leaf.FaceL
     if post.0 >= 0 and post.1 >= 12 and post.0 + 12 <= (bytes_view :: :: len):
         face.underline_position = i16_be_ref :: bytes_view, post.0 + 8 :: call
         face.underline_thickness = max_int :: (abs_int :: (i16_be_ref :: bytes_view, post.0 + 10 :: call) :: call), 1 :: call
-    if os2.0 >= 0 and os2.1 >= 30 and os2.0 + 30 <= (bytes_view :: :: len):
-        face.strike_position = i16_be_ref :: bytes_view, os2.0 + 26 :: call
-        face.strike_thickness = max_int :: (abs_int :: (i16_be_ref :: bytes_view, os2.0 + 28 :: call) :: call), 1 :: call
+    if os2_table.0 >= 0 and os2_table.1 >= 30 and os2_table.0 + 30 <= (bytes_view :: :: len):
+        face.strike_position = i16_be_ref :: bytes_view, os2_table.0 + 26 :: call
+        face.strike_thickness = max_int :: (abs_int :: (i16_be_ref :: bytes_view, os2_table.0 + 28 :: call) :: call), 1 :: call
     face.glyph_count = glyph_count
     face.font_view = bytes_view
     face.glyf_offset = glyf.0
@@ -8545,7 +8545,7 @@ fn load_face_from_parts(family_name: Str, read meta: arcana_text.font_leaf.FaceL
     font_leaf_probe_append :: "load_face_from_parts:done" :: call
     return Result.Ok[arcana_text.font_leaf.FontFaceState, Str] :: face :: call
 
-export fn load_face_from_view(read request: arcana_text.font_leaf.FaceLoadRequest, read bytes_view: std.memory.ByteView) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
+export fn load_face_from_view(read request: arcana_text.font_leaf.FaceLoadRequest, read bytes_view: View[Int, Contiguous]) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
     font_leaf_probe_append :: ("load_face_from_view:start face=" + (std.text.from_int :: request.face_index :: call)) :: call
     let source_view = bytes_view
     let face_view_result = arcana_text.font_leaf.face_view_from_source :: source_view, request.face_index :: call
@@ -8561,7 +8561,7 @@ export fn load_face_from_view(read request: arcana_text.font_leaf.FaceLoadReques
         font_leaf_probe_append :: ("load_face_from_view:error " + (result_err_or :: loaded, "load face error" :: call)) :: call
     return loaded
 
-export fn load_face_state_from_request_view(read request: arcana_text.font_leaf.FaceLoadRequest, read bytes_view: std.memory.ByteView) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
+export fn load_face_state_from_request_view(read request: arcana_text.font_leaf.FaceLoadRequest, read bytes_view: View[Int, Contiguous]) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
     return arcana_text.font_leaf.load_face_from_view :: request, bytes_view :: call
 
 export fn load_face_state_from_request_bytes(take request: arcana_text.font_leaf.FaceLoadRequest) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
@@ -8574,7 +8574,7 @@ export fn load_face_state_from_request_bytes(take request: arcana_text.font_leaf
     font_leaf_probe_append :: ("load_face_state_from_request_bytes:start face=" + (std.text.from_int :: face_index :: call) + " bytes=" + (std.text.from_int :: (source_bytes :: :: len) :: call)) :: call
     if (source_bytes :: :: len) <= 0:
         return Result.Err[arcana_text.font_leaf.FontFaceState, Str] :: "font source bytes are empty" :: call
-    let source_view = std.memory.bytes_view :: source_bytes, 0, (source_bytes :: :: len) :: call
+    let source_view = source_bytes[0..(source_bytes :: :: len)]
     let mut face_view = source_view
     if face_index != 0:
         let face_view_result = arcana_text.font_leaf.face_view_from_source :: source_view, face_index :: call
@@ -8614,7 +8614,7 @@ export fn load_face_from_bytes(read request: arcana_text.font_leaf.FaceLoadReque
 
 export fn load_face_from_path(family_name: Str, path: Str, read traits: arcana_text.font_leaf.FaceTraits) -> Result[arcana_text.font_leaf.FontFaceState, Str]:
     font_leaf_probe_append :: ("load_face_from_path:start " + path) :: call
-    let bytes_result = std.fs.read_bytes :: path :: call
+    let bytes_result = arcana_process.fs.read_bytes :: path :: call
     if bytes_result :: :: is_err:
         return Result.Err[arcana_text.font_leaf.FontFaceState, Str] :: (result_err_or :: bytes_result, "failed to read font file" :: call) :: call
     let bytes = bytes_result :: (empty_alpha :: :: call) :: unwrap_or
@@ -8628,3 +8628,5 @@ export fn load_face_from_path(family_name: Str, path: Str, read traits: arcana_t
     else:
         font_leaf_probe_append :: ("load_face_from_path:error " + (result_err_or :: loaded, "path load failure" :: call)) :: call
     return loaded
+
+

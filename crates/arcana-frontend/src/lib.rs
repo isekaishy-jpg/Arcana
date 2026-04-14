@@ -1368,15 +1368,16 @@ enum PlaceMutability {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BorrowedSliceSurfaceKind {
+enum ProjectionSurfaceKind {
     Array,
     List,
-    ReadView,
-    EditView,
-    ByteView,
-    ByteEditView,
+    Bytes,
+    ByteBuffer,
+    Utf16,
+    Utf16Buffer,
+    View,
     Str,
-    StrView,
+    RingBuffer,
     Unsupported,
 }
 
@@ -1531,15 +1532,159 @@ fn numeric_type_class_for_hir_type(
     shackle_decl_numeric_type_class(workspace, resolved_module, path)
 }
 
+fn opaque_lang_item_target_matches_symbol(
+    module: &HirModuleSummary,
+    target: &[String],
+    symbol_module_id: &str,
+    symbol_name: &str,
+) -> bool {
+    match target {
+        [] => false,
+        [name] => module.module_id == symbol_module_id && name == symbol_name,
+        [module_path @ .., name] => {
+            name == symbol_name && module_path.join(".") == symbol_module_id
+        }
+    }
+}
+
+fn opaque_lang_family_for_hir_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &HirPath,
+) -> Option<OpaqueLangFamily> {
+    let symbol_ref = lookup_symbol_path(workspace, resolved_module, &path.segments)?;
+    if symbol_ref.symbol.kind != HirSymbolKind::OpaqueType {
+        return None;
+    }
+    for package in workspace.packages.values() {
+        for module in &package.summary.modules {
+            for lang_item in &module.lang_items {
+                let Some(family) = opaque_lang_family(&lang_item.name) else {
+                    continue;
+                };
+                if opaque_lang_item_target_matches_symbol(
+                    module,
+                    &lang_item.target,
+                    &symbol_ref.module_id,
+                    &symbol_ref.symbol.name,
+                ) {
+                    return Some(family);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn hir_paths_match_or_share_opaque_family(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    expected: &HirPath,
+    actual: &HirPath,
+) -> bool {
+    if expected.render() == actual.render() {
+        return true;
+    }
+    matches!(
+        (
+            opaque_lang_family_for_hir_path(workspace, resolved_module, expected),
+            opaque_lang_family_for_hir_path(workspace, resolved_module, actual),
+        ),
+        (Some(expected_family), Some(actual_family)) if expected_family == actual_family
+    )
+}
+
+fn hir_types_structurally_compatible(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    expected: &HirType,
+    actual: &HirType,
+) -> bool {
+    let expected = canonicalize_local_hir_type(workspace, resolved_module, expected)
+        .unwrap_or_else(|| expected.clone());
+    let actual = canonicalize_local_hir_type(workspace, resolved_module, actual)
+        .unwrap_or_else(|| actual.clone());
+    match (&expected.kind, &actual.kind) {
+        (HirTypeKind::Path(expected), HirTypeKind::Path(actual)) => {
+            hir_paths_match_or_share_opaque_family(workspace, resolved_module, expected, actual)
+        }
+        (
+            HirTypeKind::Apply {
+                base: expected_base,
+                args: expected_args,
+            },
+            HirTypeKind::Apply {
+                base: actual_base,
+                args: actual_args,
+            },
+        ) => {
+            expected_args.len() == actual_args.len()
+                && hir_paths_match_or_share_opaque_family(
+                    workspace,
+                    resolved_module,
+                    expected_base,
+                    actual_base,
+                )
+                && expected_args
+                    .iter()
+                    .zip(actual_args.iter())
+                    .all(|(expected, actual)| {
+                        hir_types_structurally_compatible(
+                            workspace,
+                            resolved_module,
+                            expected,
+                            actual,
+                        )
+                    })
+        }
+        (
+            HirTypeKind::Ref {
+                mode: expected_mode,
+                inner: expected_inner,
+                ..
+            },
+            HirTypeKind::Ref {
+                mode: actual_mode,
+                inner: actual_inner,
+                ..
+            },
+        ) => {
+            expected_mode == actual_mode
+                && hir_types_structurally_compatible(
+                    workspace,
+                    resolved_module,
+                    expected_inner,
+                    actual_inner,
+                )
+        }
+        (HirTypeKind::Tuple(expected_items), HirTypeKind::Tuple(actual_items)) => {
+            expected_items.len() == actual_items.len()
+                && expected_items
+                    .iter()
+                    .zip(actual_items.iter())
+                    .all(|(expected, actual)| {
+                        hir_types_structurally_compatible(
+                            workspace,
+                            resolved_module,
+                            expected,
+                            actual,
+                        )
+                    })
+        }
+        (HirTypeKind::Projection(expected), HirTypeKind::Projection(actual)) => {
+            expected.render() == actual.render()
+        }
+        _ => false,
+    }
+}
+
 fn hir_types_match_or_numeric_compatible(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     expected: &HirType,
     actual: &HirType,
 ) -> bool {
-    if canonical_hir_type_key(workspace, resolved_module, expected)
-        == canonical_hir_type_key(workspace, resolved_module, actual)
-    {
+    if hir_types_structurally_compatible(workspace, resolved_module, expected, actual) {
         return true;
     }
     match (
@@ -1604,54 +1749,49 @@ fn resolved_symbol_kind_for_expr(
     lookup_symbol_path(workspace, resolved_module, path).map(|resolved| resolved.symbol.kind)
 }
 
-fn classify_borrowed_slice_surface(
+fn classify_projection_surface(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     scope: &ValueScope,
     expr: &HirExpr,
-) -> BorrowedSliceSurfaceKind {
+) -> ProjectionSurfaceKind {
     let Some(ty) = infer_receiver_expr_type(workspace, resolved_module, scope, expr) else {
-        return BorrowedSliceSurfaceKind::Unsupported;
+        return ProjectionSurfaceKind::Unsupported;
     };
     if hir_type_matches_path(&ty, &["Array"])
         || hir_type_matches_path(&ty, &["std", "collections", "array", "Array"])
     {
-        return BorrowedSliceSurfaceKind::Array;
+        return ProjectionSurfaceKind::Array;
     }
     if hir_type_matches_path(&ty, &["List"])
         || hir_type_matches_path(&ty, &["std", "collections", "list", "List"])
     {
-        return BorrowedSliceSurfaceKind::List;
-    }
-    if hir_type_matches_path(&ty, &["ReadView"])
-        || hir_type_matches_path(&ty, &["std", "memory", "ReadView"])
-    {
-        return BorrowedSliceSurfaceKind::ReadView;
-    }
-    if hir_type_matches_path(&ty, &["EditView"])
-        || hir_type_matches_path(&ty, &["std", "memory", "EditView"])
-    {
-        return BorrowedSliceSurfaceKind::EditView;
-    }
-    if hir_type_matches_path(&ty, &["ByteView"])
-        || hir_type_matches_path(&ty, &["std", "memory", "ByteView"])
-    {
-        return BorrowedSliceSurfaceKind::ByteView;
-    }
-    if hir_type_matches_path(&ty, &["ByteEditView"])
-        || hir_type_matches_path(&ty, &["std", "memory", "ByteEditView"])
-    {
-        return BorrowedSliceSurfaceKind::ByteEditView;
+        return ProjectionSurfaceKind::List;
     }
     if hir_type_matches_path(&ty, &["Str"]) {
-        return BorrowedSliceSurfaceKind::Str;
+        return ProjectionSurfaceKind::Str;
     }
-    if hir_type_matches_path(&ty, &["StrView"])
-        || hir_type_matches_path(&ty, &["std", "memory", "StrView"])
+    if hir_type_matches_path(&ty, &["Bytes"]) {
+        return ProjectionSurfaceKind::Bytes;
+    }
+    if hir_type_matches_path(&ty, &["ByteBuffer"]) {
+        return ProjectionSurfaceKind::ByteBuffer;
+    }
+    if hir_type_matches_path(&ty, &["Utf16"]) {
+        return ProjectionSurfaceKind::Utf16;
+    }
+    if hir_type_matches_path(&ty, &["Utf16Buffer"]) {
+        return ProjectionSurfaceKind::Utf16Buffer;
+    }
+    if hir_type_matches_path(&ty, &["View"]) {
+        return ProjectionSurfaceKind::View;
+    }
+    if hir_type_matches_path(&ty, &["RingBuffer"])
+        || hir_type_matches_path(&ty, &["std", "memory", "RingBuffer"])
     {
-        return BorrowedSliceSurfaceKind::StrView;
+        return ProjectionSurfaceKind::RingBuffer;
     }
-    BorrowedSliceSurfaceKind::Unsupported
+    ProjectionSurfaceKind::Unsupported
 }
 
 fn expr_place_mutability(expr: &HirExpr, scope: &ValueScope) -> Option<PlaceMutability> {
@@ -1737,15 +1877,6 @@ fn opaque_symbol_is_boundary_unsafe(symbol: &HirSymbol) -> bool {
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpaqueLangFamily {
-    FileStreamHandle,
-    WindowHandle,
-    ImageHandle,
-    AppFrameHandle,
-    AppSessionHandle,
-    WakeHandle,
-    AudioDeviceHandle,
-    AudioBufferHandle,
-    AudioPlaybackHandle,
     ChannelHandle,
     MutexHandle,
     AtomicIntHandle,
@@ -1764,11 +1895,6 @@ enum OpaqueLangFamily {
     RingIdHandle,
     SlabHandle,
     SlabIdHandle,
-    ReadViewHandle,
-    EditViewHandle,
-    ByteViewHandle,
-    ByteEditViewHandle,
-    StrViewHandle,
     TaskHandle,
     ThreadHandle,
 }
@@ -1776,15 +1902,6 @@ enum OpaqueLangFamily {
 impl OpaqueLangFamily {
     const fn name(self) -> &'static str {
         match self {
-            Self::FileStreamHandle => "file_stream_handle",
-            Self::WindowHandle => "window_handle",
-            Self::ImageHandle => "image_handle",
-            Self::AppFrameHandle => "app_frame_handle",
-            Self::AppSessionHandle => "app_session_handle",
-            Self::WakeHandle => "wake_handle",
-            Self::AudioDeviceHandle => "audio_device_handle",
-            Self::AudioBufferHandle => "audio_buffer_handle",
-            Self::AudioPlaybackHandle => "audio_playback_handle",
             Self::ChannelHandle => "channel_handle",
             Self::MutexHandle => "mutex_handle",
             Self::AtomicIntHandle => "atomic_int_handle",
@@ -1803,11 +1920,6 @@ impl OpaqueLangFamily {
             Self::RingIdHandle => "ring_id_handle",
             Self::SlabHandle => "slab_handle",
             Self::SlabIdHandle => "slab_id_handle",
-            Self::ReadViewHandle => "read_view_handle",
-            Self::EditViewHandle => "edit_view_handle",
-            Self::ByteViewHandle => "byte_view_handle",
-            Self::ByteEditViewHandle => "byte_edit_view_handle",
-            Self::StrViewHandle => "str_view_handle",
             Self::TaskHandle => "task_handle",
             Self::ThreadHandle => "thread_handle",
         }
@@ -1815,8 +1927,7 @@ impl OpaqueLangFamily {
 
     const fn expected_ownership(self) -> OwnershipClass {
         match self {
-            Self::WakeHandle
-            | Self::AtomicIntHandle
+            Self::AtomicIntHandle
             | Self::AtomicBoolHandle
             | Self::ArenaIdHandle
             | Self::FrameIdHandle
@@ -1825,15 +1936,7 @@ impl OpaqueLangFamily {
             | Self::SessionIdHandle
             | Self::RingIdHandle
             | Self::SlabIdHandle => OwnershipClass::Copy,
-            Self::FileStreamHandle
-            | Self::WindowHandle
-            | Self::ImageHandle
-            | Self::AppFrameHandle
-            | Self::AppSessionHandle
-            | Self::AudioDeviceHandle
-            | Self::AudioBufferHandle
-            | Self::AudioPlaybackHandle
-            | Self::ChannelHandle
+            Self::ChannelHandle
             | Self::MutexHandle
             | Self::ArenaHandle
             | Self::FrameArenaHandle
@@ -1842,11 +1945,6 @@ impl OpaqueLangFamily {
             | Self::SessionArenaHandle
             | Self::RingBufferHandle
             | Self::SlabHandle
-            | Self::ReadViewHandle
-            | Self::EditViewHandle
-            | Self::ByteViewHandle
-            | Self::ByteEditViewHandle
-            | Self::StrViewHandle
             | Self::TaskHandle
             | Self::ThreadHandle => OwnershipClass::Move,
         }
@@ -1855,15 +1953,6 @@ impl OpaqueLangFamily {
 
 fn opaque_lang_family(name: &str) -> Option<OpaqueLangFamily> {
     match name {
-        "file_stream_handle" => Some(OpaqueLangFamily::FileStreamHandle),
-        "window_handle" => Some(OpaqueLangFamily::WindowHandle),
-        "image_handle" => Some(OpaqueLangFamily::ImageHandle),
-        "app_frame_handle" => Some(OpaqueLangFamily::AppFrameHandle),
-        "app_session_handle" => Some(OpaqueLangFamily::AppSessionHandle),
-        "wake_handle" => Some(OpaqueLangFamily::WakeHandle),
-        "audio_device_handle" => Some(OpaqueLangFamily::AudioDeviceHandle),
-        "audio_buffer_handle" => Some(OpaqueLangFamily::AudioBufferHandle),
-        "audio_playback_handle" => Some(OpaqueLangFamily::AudioPlaybackHandle),
         "channel_handle" => Some(OpaqueLangFamily::ChannelHandle),
         "mutex_handle" => Some(OpaqueLangFamily::MutexHandle),
         "atomic_int_handle" => Some(OpaqueLangFamily::AtomicIntHandle),
@@ -1882,11 +1971,6 @@ fn opaque_lang_family(name: &str) -> Option<OpaqueLangFamily> {
         "ring_id_handle" => Some(OpaqueLangFamily::RingIdHandle),
         "slab_handle" => Some(OpaqueLangFamily::SlabHandle),
         "slab_id_handle" => Some(OpaqueLangFamily::SlabIdHandle),
-        "read_view_handle" => Some(OpaqueLangFamily::ReadViewHandle),
-        "edit_view_handle" => Some(OpaqueLangFamily::EditViewHandle),
-        "byte_view_handle" => Some(OpaqueLangFamily::ByteViewHandle),
-        "byte_edit_view_handle" => Some(OpaqueLangFamily::ByteEditViewHandle),
-        "str_view_handle" => Some(OpaqueLangFamily::StrViewHandle),
         "task_handle" => Some(OpaqueLangFamily::TaskHandle),
         "thread_handle" => Some(OpaqueLangFamily::ThreadHandle),
         _ => None,
@@ -2497,7 +2581,12 @@ fn validate_borrow_operand_place(
         return;
     }
 
-    if let HirExpr::Slice { expr: target, .. } = expr {
+    if let HirExpr::Slice {
+        expr: target,
+        family,
+        ..
+    } = expr
+    {
         if matches!(
             mode,
             arcana_hir::HirParamMode::Take | arcana_hir::HirParamMode::Hold
@@ -2510,44 +2599,83 @@ fn validate_borrow_operand_place(
             );
             return;
         }
-        match classify_borrowed_slice_surface(workspace, resolved_module, scope, target) {
-            BorrowedSliceSurfaceKind::Array | BorrowedSliceSurfaceKind::EditView => {}
-            BorrowedSliceSurfaceKind::ByteEditView if mode == arcana_hir::HirParamMode::Edit => {}
-            BorrowedSliceSurfaceKind::Str | BorrowedSliceSurfaceKind::StrView
-                if mode == arcana_hir::HirParamMode::Edit =>
-            {
+        match (
+            *family,
+            classify_projection_surface(workspace, resolved_module, scope, target),
+        ) {
+            (arcana_hir::HirProjectionFamily::Strided, ProjectionSurfaceKind::RingBuffer)
+            | (_, ProjectionSurfaceKind::Array)
+            | (_, ProjectionSurfaceKind::View)
+            | (arcana_hir::HirProjectionFamily::Contiguous, ProjectionSurfaceKind::ByteBuffer)
+            | (arcana_hir::HirProjectionFamily::Contiguous, ProjectionSurfaceKind::Utf16Buffer) => {
+            }
+            (_, ProjectionSurfaceKind::Str) if mode == arcana_hir::HirParamMode::Edit => {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
                     diagnostics,
-                    "string slices are read-only; `&edit x[a..b]` is not allowed".to_string(),
+                    "string projections are read-only; `&edit x[a..b]` is not allowed".to_string(),
                 );
             }
-            BorrowedSliceSurfaceKind::ReadView | BorrowedSliceSurfaceKind::ByteView
-                if mode == arcana_hir::HirParamMode::Edit =>
-            {
+            (_, ProjectionSurfaceKind::Bytes) if mode == arcana_hir::HirParamMode::Edit => {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
                     diagnostics,
-                    format!("operand of `{op}` is a read-only slice surface"),
+                    "byte projections are read-only on `Bytes`; use `ByteBuffer` for `&edit` access".to_string(),
                 );
             }
-            BorrowedSliceSurfaceKind::List => {
+            (_, ProjectionSurfaceKind::Utf16) if mode == arcana_hir::HirParamMode::Edit => {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
                     diagnostics,
-                    "borrowed slices require contiguous backing; `List` is not supported"
+                    "utf16 projections are read-only on `Utf16`; use `Utf16Buffer` for `&edit` access".to_string(),
+                );
+            }
+            (arcana_hir::HirProjectionFamily::Strided, ProjectionSurfaceKind::Str) => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "strided projections require view or RingBuffer backing; `Str` is not supported".to_string(),
+                );
+            }
+            (arcana_hir::HirProjectionFamily::Strided, ProjectionSurfaceKind::Bytes)
+            | (arcana_hir::HirProjectionFamily::Strided, ProjectionSurfaceKind::ByteBuffer) => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "strided projections on byte payloads are not supported in this window"
                         .to_string(),
                 );
             }
-            BorrowedSliceSurfaceKind::Unsupported => {
+            (arcana_hir::HirProjectionFamily::Strided, ProjectionSurfaceKind::Utf16)
+            | (arcana_hir::HirProjectionFamily::Strided, ProjectionSurfaceKind::Utf16Buffer) => {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
                     diagnostics,
-                    "borrowed slices require array, string, or view backing".to_string(),
+                    "strided projections on utf16 payloads are not supported in this window"
+                        .to_string(),
+                );
+            }
+            (_, ProjectionSurfaceKind::List) => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "borrowed projections require contiguous or view backing; `List` is not supported"
+                        .to_string(),
+                );
+            }
+            (_, ProjectionSurfaceKind::Unsupported) => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "borrowed projections require array, bytes, utf16, string, view, or RingBuffer backing".to_string(),
                 );
             }
             _ => {}
@@ -3703,6 +3831,8 @@ fn validate_expr_borrow_flow_inner(
             expr: target,
             start,
             end,
+            len,
+            stride,
             ..
         } => {
             if !within_place {
@@ -3749,6 +3879,34 @@ fn validate_expr_borrow_flow_inner(
                     module_path,
                     scope,
                     end,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(len) = len {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    len,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(stride) = stride {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    stride,
                     span,
                     state,
                     false,
@@ -3938,7 +4096,12 @@ fn collect_expr_local_borrows(
             collect_expr_local_borrows(index, scope, borrows);
         }
         HirExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             collect_expr_local_borrows(expr, scope, borrows);
             if let Some(start) = start {
@@ -3946,6 +4109,12 @@ fn collect_expr_local_borrows(
             }
             if let Some(end) = end {
                 collect_expr_local_borrows(end, scope, borrows);
+            }
+            if let Some(len) = len {
+                collect_expr_local_borrows(len, scope, borrows);
+            }
+            if let Some(stride) = stride {
+                collect_expr_local_borrows(stride, scope, borrows);
             }
         }
         HirExpr::Range { start, end, .. } => {
@@ -4256,7 +4425,12 @@ fn note_expr_moves(
             note_expr_moves(workspace, resolved_module, type_scope, scope, index, state);
         }
         HirExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
             if let Some(start) = start {
@@ -4264,6 +4438,12 @@ fn note_expr_moves(
             }
             if let Some(end) = end {
                 note_expr_moves(workspace, resolved_module, type_scope, scope, end, state);
+            }
+            if let Some(len) = len {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, len, state);
+            }
+            if let Some(stride) = stride {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, stride, state);
             }
         }
         HirExpr::Range { start, end, .. } => {
@@ -4436,7 +4616,12 @@ fn collect_returned_local_borrows(
             collect_returned_local_borrows(index, scope, roots);
         }
         HirExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             collect_returned_local_borrows(expr, scope, roots);
             if let Some(start) = start {
@@ -4444,6 +4629,12 @@ fn collect_returned_local_borrows(
             }
             if let Some(end) = end {
                 collect_returned_local_borrows(end, scope, roots);
+            }
+            if let Some(len) = len {
+                collect_returned_local_borrows(len, scope, roots);
+            }
+            if let Some(stride) = stride {
+                collect_returned_local_borrows(stride, scope, roots);
             }
         }
         HirExpr::Range { start, end, .. } => {
@@ -9428,7 +9619,12 @@ fn collect_deprecated_call_warnings_in_expr(
             );
         }
         HirExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             collect_deprecated_call_warnings_in_expr(
                 workspace,
@@ -9464,6 +9660,34 @@ fn collect_deprecated_call_warnings_in_expr(
                     type_scope,
                     scope,
                     end,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(len) = len {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    len,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(stride) = stride {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    stride,
                     span,
                     policy,
                     warnings,
@@ -17347,7 +17571,12 @@ fn validate_expr_semantics(
             );
         }
         HirExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             validate_expr_semantics(
                 workspace,
@@ -17397,6 +17626,46 @@ fn validate_expr_semantics(
                     diagnostics,
                     ExprTypeClass::Int,
                     "slice end",
+                );
+            }
+            if let Some(len) = len {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    len,
+                    span,
+                    diagnostics,
+                );
+                validate_expected_expr_type(
+                    module_path,
+                    len,
+                    span,
+                    diagnostics,
+                    ExprTypeClass::Int,
+                    "projection len",
+                );
+            }
+            if let Some(stride) = stride {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    stride,
+                    span,
+                    diagnostics,
+                );
+                validate_expected_expr_type(
+                    module_path,
+                    stride,
+                    span,
+                    diagnostics,
+                    ExprTypeClass::Int,
+                    "projection stride",
                 );
             }
         }
@@ -18069,7 +18338,7 @@ mod tests {
     #[test]
     fn check_sources_counts_modules() {
         let summary = check_sources(
-            ["import std.io\nfn main() -> Int:\n    return 0\n"]
+            ["import arcana_process.io\nfn main() -> Int:\n    return 0\n"]
                 .iter()
                 .copied(),
         )
@@ -20611,7 +20880,7 @@ mod tests {
             &script_seed_dir,
             "directive_append_rejection_runner",
             "reject_flag",
-            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"replace_directive\":\"import std.io\",\"append_symbols\":[\"fn helper() -> Int:\\n    return 1\\n\"],\"append_impls\":[]}\n",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"replace_directive\":\"import arcana_process.io\",\"append_symbols\":[\"fn helper() -> Int:\\n    return 1\\n\"],\"append_impls\":[]}\n",
         );
         let root = make_temp_workspace(
             "executable_foreword_directive_append_rejection",
@@ -20670,7 +20939,7 @@ mod tests {
                 ),
                 (
                     "app/src/shelf.arc",
-                    "#tool.exec.expand\nimport std.io\nfn main() -> Int:\n    return 0\n",
+                    "#tool.exec.expand\nimport arcana_process.io\nfn main() -> Int:\n    return 0\n",
                 ),
                 ("app/src/types.arc", ""),
             ],
@@ -22463,7 +22732,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn consume(take value: Str):\n    return\nfn main() -> Int:\n    let s = \"hi\"\n    consume :: s :: call\n    s :: :: std.io.print\n    return 0\n",
+                    "fn consume(take value: Str):\n    return\nfn main() -> Int:\n    let s = \"hi\"\n    consume :: s :: call\n    s :: :: arcana_process.io.print\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -22592,15 +22861,29 @@ mod tests {
 
     #[test]
     fn check_path_rejects_window_use_after_close() {
-        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let winapi_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .to_string_lossy()
+            .replace('\\', "/");
         let root = make_temp_package(
             "typed_window_use_after_close",
             "app",
-            &[("std", std_dep.as_str())],
+            &[
+                ("arcana_desktop", desktop_dep.as_str()),
+                ("arcana_winapi", winapi_dep.as_str()),
+            ],
             &[
                 (
                     "src/shelf.arc",
-                    "import std.window\nuse std.window.Window\nfn bad(take win: Window) -> Int:\n    std.window.close :: win :: call\n    let alive = std.window.alive :: win :: call\n    return 0\n",
+                    "import arcana_desktop.window\nimport arcana_winapi.desktop_handles\nuse arcana_winapi.desktop_handles.Window\nfn bad(take win: Window) -> Int:\n    arcana_desktop.window.close :: win :: call\n    let alive = arcana_desktop.window.alive :: win :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -22614,15 +22897,29 @@ mod tests {
 
     #[test]
     fn check_path_rejects_stream_use_after_close() {
-        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
+        let process_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("process")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let winapi_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .to_string_lossy()
+            .replace('\\', "/");
         let root = make_temp_package(
             "typed_stream_use_after_close",
             "app",
-            &[("std", std_dep.as_str())],
+            &[
+                ("arcana_process", process_dep.as_str()),
+                ("arcana_winapi", winapi_dep.as_str()),
+            ],
             &[
                 (
                     "src/shelf.arc",
-                    "import std.fs\nuse std.fs.FileStream\nfn bad(take stream: FileStream) -> Int:\n    std.fs.stream_close :: stream :: call\n    let done = std.fs.stream_eof :: stream :: call\n    return 0\n",
+                    "import arcana_process.fs\nimport arcana_winapi.process_handles\nuse arcana_winapi.process_handles.FileStream\nfn bad(take stream: FileStream) -> Int:\n    arcana_process.fs.stream_close :: stream :: call\n    let done = arcana_process.fs.stream_eof :: stream :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -22664,8 +22961,8 @@ mod tests {
                 (
                     "src/types.arc",
                     concat!(
-                        "export opaque type Window as move, boundary_unsafe\n",
-                        "lang window_handle = Window\n",
+                        "export opaque type Portal as move, boundary_unsafe\n",
+                        "lang task_handle = Portal\n",
                     ),
                 ),
                 ("src/book.arc", "reexport desktop.types\n"),
@@ -22687,15 +22984,15 @@ mod tests {
                 (
                     "src/types.arc",
                     concat!(
-                        "export opaque type Window as move, boundary_unsafe\n",
-                        "lang window_handle = Window\n",
+                        "export opaque type Portal as move, boundary_unsafe\n",
+                        "lang task_handle = Portal\n",
                     ),
                 ),
                 (
                     "src/extra.arc",
                     concat!(
-                        "export opaque type AltWindow as move, boundary_unsafe\n",
-                        "lang window_handle = AltWindow\n",
+                        "export opaque type AltPortal as move, boundary_unsafe\n",
+                        "lang task_handle = AltPortal\n",
                     ),
                 ),
                 (
@@ -22707,7 +23004,7 @@ mod tests {
 
         let err = check_path(&root).expect_err("duplicate opaque family binding should fail");
         assert!(
-            err.contains("opaque family lang item `window_handle` is declared more than once"),
+            err.contains("opaque family lang item `task_handle` is declared more than once"),
             "{err}"
         );
 
@@ -22760,15 +23057,29 @@ mod tests {
 
     #[test]
     fn check_path_rejects_opaque_type_constructor_use() {
-        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let winapi_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .to_string_lossy()
+            .replace('\\', "/");
         let root = make_temp_package(
             "opaque_type_constructor_use",
             "app",
-            &[("std", std_dep.as_str())],
+            &[
+                ("arcana_desktop", desktop_dep.as_str()),
+                ("arcana_winapi", winapi_dep.as_str()),
+            ],
             &[
                 (
                     "src/shelf.arc",
-                    "use std.window.Window\nfn bad() -> Int:\n    let win = Window :: :: call\n    return 0\n",
+                    "use arcana_winapi.desktop_handles.Window\nfn bad() -> Int:\n    let win = Window :: :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -22785,15 +23096,29 @@ mod tests {
 
     #[test]
     fn check_path_rejects_boundary_unsafe_std_opaque_type() {
-        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let winapi_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .to_string_lossy()
+            .replace('\\', "/");
         let root = make_temp_package(
             "opaque_type_boundary_contract",
             "app",
-            &[("std", std_dep.as_str())],
+            &[
+                ("arcana_desktop", desktop_dep.as_str()),
+                ("arcana_winapi", winapi_dep.as_str()),
+            ],
             &[
                 (
                     "src/shelf.arc",
-                    "use std.window.Window\n#boundary[target = \"lua\"]\nexport fn bad(read win: Window) -> Int:\n    return 0\n",
+                    "use arcana_winapi.desktop_handles.Window\n#boundary[target = \"lua\"]\nexport fn bad(read win: Window) -> Int:\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],

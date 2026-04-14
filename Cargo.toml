@@ -11,6 +11,18 @@ members = [
     "crates/arcana-runtime",
     "crates/arcana-syntax",
 ]
+default-members = [
+    "crates/arcana-aot",
+    "crates/arcana-cabi",
+    "crates/arcana-cli",
+    "crates/arcana-frontend",
+    "crates/arcana-hir",
+    "crates/arcana-ir",
+    "crates/arcana-language-law",
+    "crates/arcana-package",
+    "crates/arcana-runtime",
+    "crates/arcana-syntax",
+]
 resolver = "2"
 
 [workspace.package]
@@ -38,4 +50,3 @@ serde_stacker = "0.1"
 sha2 = "0.10"
 fs2 = "0.4"
 toml = "0.8"
-windows-sys = "0.59"

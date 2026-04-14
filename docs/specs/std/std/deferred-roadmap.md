@@ -37,7 +37,7 @@ id: STD-D3
 title: higher-level audio engine and streaming support
 reason_deferred: the pre-selfhost plan only needs low-level audio device, buffer, and basic playback substrate.
 target_window: post-first-audio-grimoire stabilization
-trigger_condition: ready_when=low-level `std.audio` and the first audio grimoire are stable; verify=audio smoke demos and grimoire parity checks pass; blocked_by=missing rewrite-owned runtime audio backend.
+trigger_condition: ready_when=low-level `arcana_audio` and the first audio grimoire are stable; verify=audio smoke demos and grimoire parity checks pass; blocked_by=missing rewrite-owned backend audio substrate.
 owner: Arcana std/audio team
 acceptance_criteria: any std-side audio growth remains substrate-level and does not absorb mixer/playback policy better owned by grimoires.
 status: deferred
@@ -53,7 +53,7 @@ status: deferred
 
 id: STD-D5
 title: digest substrate beyond explicit SHA-256 helpers
-reason_deferred: `std.bytes.sha256_hex` is now part of the approved baseline, so the remaining question is only whether Arcana-side tooling later needs binary digests, incremental hashing, or other explicitly named digest helpers.
+reason_deferred: `std.text.bytes_sha256_hex` and the `Bytes` payload surface now cover the approved baseline, so the remaining question is only whether Arcana-side tooling later needs binary digests, incremental hashing, or other explicitly named digest helpers.
 target_window: before any Arcana-owned package/build/fingerprint driver needs more than one-shot SHA-256 strings
 trigger_condition: ready_when=Arcana-side tooling proves that `sha256_hex` is not enough for stable content/API fingerprints; verify=any added surface stays concrete, typed, deterministic, and narrowly named rather than turning into a broad crypto toolkit; blocked_by=current build/fingerprint logic still lives in the Rust rewrite.
 owner: Arcana std/tooling team
@@ -62,7 +62,7 @@ status: deferred
 
 id: STD-D6
 title: manifest and package substrate beyond explicit baseline helpers
-reason_deferred: `std.path` now includes canonical path resolution and explicit prefix handling, `std.config` now provides the generic section/key parser substrate, and `std.manifest` now stays as a thin Arcana-specific wrapper over that substrate. The remaining deferred work is only whatever richer manifest/rendering support Arcana-side tooling later proves it still needs.
+reason_deferred: `arcana_process.path` now includes canonical path resolution and explicit prefix handling, `std.config` now provides the generic section/key parser substrate, and `std.manifest` now stays as a thin Arcana-specific wrapper over that substrate. The remaining deferred work is only whatever richer manifest/rendering support Arcana-side tooling later proves it still needs.
 target_window: before any Arcana-owned package/workspace driver needs more than the current explicit path and manifest baseline
 trigger_condition: ready_when=Arcana-side tooling needs richer manifest tables, typed lockfile rendering, or other deterministic package helpers beyond the current explicit lookup set; verify=the promoted helpers stay substrate-level and deterministic without turning `std.config` into a broad TOML/JSON/YAML/serde umbrella; blocked_by=the current package/build driver still lives in the Rust rewrite.
 owner: Arcana std/tooling team

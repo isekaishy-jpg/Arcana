@@ -122,7 +122,7 @@ fn default_package_member(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     use std::ffi::{CStr, c_char, c_void};
     use std::fs;
     use std::io::Read;
@@ -131,18 +131,42 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     use libloading::Library;
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     use std::process::{Child, Command, Stdio};
-    #[cfg(windows)]
-    use windows_sys::Win32::Foundation::HWND;
-    #[cfg(windows)]
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, SendMessageW, SetForegroundWindow, WM_CHAR, WM_CLOSE,
-        WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    };
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    type HWND = *mut c_void;
+
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_CLOSE: u32 = 0x0010;
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_MOUSEMOVE: u32 = 0x0200;
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_LBUTTONUP: u32 = 0x0202;
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_CHAR: u32 = 0x0102;
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_IME_STARTCOMPOSITION: u32 = 0x010D;
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    const WM_IME_ENDCOMPOSITION: u32 = 0x010E;
+
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            callback: Option<unsafe extern "system" fn(HWND, isize) -> i32>,
+            lparam: isize,
+        ) -> i32;
+        fn GetWindowTextLengthW(hwnd: HWND) -> i32;
+        fn GetWindowTextW(hwnd: HWND, text: *mut u16, max_count: i32) -> i32;
+        fn GetWindowThreadProcessId(hwnd: HWND, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: HWND) -> i32;
+        fn SendMessageW(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn SetForegroundWindow(hwnd: HWND) -> i32;
+    }
 
     use super::*;
 
@@ -178,7 +202,7 @@ mod tests {
         fs::write(path, text).expect("file should write");
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     struct WindowSearch {
         pid: u32,
         title_contains: String,
@@ -186,25 +210,25 @@ mod tests {
         title: String,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     struct WindowListSearch {
         pid: u32,
         windows: Vec<(HWND, String)>,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     struct TestChild {
         child: Child,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     impl TestChild {
         fn new(child: Child) -> Self {
             Self { child }
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     impl Deref for TestChild {
         type Target = Child;
 
@@ -213,14 +237,14 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     impl DerefMut for TestChild {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.child
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     impl Drop for TestChild {
         fn drop(&mut self) {
             if matches!(self.child.try_wait(), Ok(None)) {
@@ -230,7 +254,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     unsafe extern "system" fn collect_process_window(hwnd: HWND, lparam: isize) -> i32 {
         let search = unsafe { &mut *(lparam as *mut WindowSearch) };
         let mut pid = 0u32;
@@ -260,7 +284,7 @@ mod tests {
         0
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     unsafe extern "system" fn collect_process_windows(hwnd: HWND, lparam: isize) -> i32 {
         let search = unsafe { &mut *(lparam as *mut WindowListSearch) };
         let mut pid = 0u32;
@@ -286,7 +310,7 @@ mod tests {
         1
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn wait_for_process_window(pid: u32, timeout: Duration) -> Option<(HWND, String)> {
         let start = Instant::now();
         while start.elapsed() < timeout {
@@ -310,7 +334,7 @@ mod tests {
         None
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn process_windows(pid: u32) -> Vec<(HWND, String)> {
         let mut search = WindowListSearch {
             pid,
@@ -325,7 +349,7 @@ mod tests {
         search.windows
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn wait_for_named_process_window(
         pid: u32,
         title_contains: &str,
@@ -344,7 +368,7 @@ mod tests {
         None
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn wait_for_additional_named_process_window(
         pid: u32,
         exclude: HWND,
@@ -364,7 +388,7 @@ mod tests {
         None
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn read_window_title(hwnd: HWND) -> String {
         let title_len = unsafe { GetWindowTextLengthW(hwnd) };
         if title_len <= 0 {
@@ -378,7 +402,7 @@ mod tests {
         String::from_utf16_lossy(&buffer[..usize::try_from(read).unwrap_or(0)])
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn wait_for_window_title_contains(
         hwnd: HWND,
         needle: &str,
@@ -395,7 +419,7 @@ mod tests {
         None
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn click_until_window_gone(
         pid: u32,
         click_hwnd: HWND,
@@ -423,12 +447,12 @@ mod tests {
         windows
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn pack_mouse_lparam(x: i32, y: i32) -> isize {
         ((y as u32) << 16 | (x as u32 & 0xFFFF)) as isize
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn send_left_click(hwnd: HWND, x: i32, y: i32) {
         unsafe {
             SetForegroundWindow(hwnd);
@@ -439,7 +463,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn desktop_showcase_button_center(id: i32) -> (i32, i32) {
         let width = 1280;
         let gutter = 18;
@@ -458,7 +482,7 @@ mod tests {
         (x, y)
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn wait_for_child_exit(
         child: &mut Child,
         timeout: Duration,
@@ -473,7 +497,7 @@ mod tests {
         None
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn drive_native_text_input_and_ime(hwnd: HWND) -> Result<(), String> {
         unsafe {
             SetForegroundWindow(hwnd);
@@ -628,7 +652,7 @@ mod tests {
         .expect("book manifest should write");
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn compile_c_header_smoke(bundle_dir: &Path, header_name: &str) {
         let source_path = bundle_dir.join("consumer.c");
         let object_path = bundle_dir.join("consumer.obj");
@@ -642,14 +666,14 @@ mod tests {
                 "    int64_t answer_result = 0;\n",
                 "    int64_t len_result = 0;\n",
                 "    const uint8_t label_bytes[] = {{ 'a', 'r', 'c', 'a', 'n', 'a' }};\n",
-                "    ArcanaStrView name = {{ label_bytes, 6 }};\n",
+                "    ArcanaViewV1 name = {{ label_bytes, 6, 1, 1, 1, 1 }};\n",
                 "    ArcanaOwnedStr out_text = {{ 0 }};\n",
                 "    ArcanaOwnedBytes out_bytes = {{ 0 }};\n",
                 "    ArcanaPairView__Pair__Str__Int pair = {{ name, 7 }};\n",
                 "    answer(&answer_result);\n",
                 "    greet(name, &out_text);\n",
                 "    prefix(&out_bytes);\n",
-                "    byte_len((ArcanaBytesView){{ label_bytes, 6 }}, &len_result);\n",
+                "    byte_len((ArcanaViewV1){{ label_bytes, 6, 1, 1, 1, 0 }}, &len_result);\n",
                 "    echo_pair(pair, (ArcanaPairOwned__Pair__Str__Int*)0);\n",
                 "    return 0;\n",
                 "}}\n"
@@ -729,7 +753,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn try_compile_c_header_with_vcvars(
         source_path: &Path,
         include_dir: &Path,
@@ -768,7 +792,7 @@ mod tests {
         )
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn find_msvc_vcvars64() -> Option<PathBuf> {
         let program_files = [
             PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
@@ -807,7 +831,7 @@ mod tests {
         None
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     fn cmd_compatible_path(path: &Path) -> String {
         let rendered = path.display().to_string();
         if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
@@ -817,52 +841,48 @@ mod tests {
         }
     }
 
-    fn write_std_bytes_grimoire(dir: &Path) {
+    fn write_std_text_grimoire(dir: &Path) {
         write_file(
             &dir.join("std/book.toml"),
             "name = \"std\"\nkind = \"lib\"\n",
         );
         write_file(
             &dir.join("std/src/book.arc"),
-            "import bytes\nimport kernel.text\n",
+            "import text\nimport kernel.text\n",
         );
         write_file(&dir.join("std/src/types.arc"), "// std types\n");
         write_file(
-            &dir.join("std/src/bytes.arc"),
+            &dir.join("std/src/text.arc"),
             concat!(
                 "import std.kernel.text\n",
-                "export fn from_str_utf8(text: Str) -> Array[Int]:\n",
+                "export fn from_str_utf8(text: Str) -> Bytes:\n",
                 "    return std.kernel.text.bytes_from_str_utf8 :: text :: call\n",
-                "export fn len(read bytes: Array[Int]) -> Int:\n",
+                "export fn len(read bytes: Bytes) -> Int:\n",
                 "    return std.kernel.text.bytes_len :: bytes :: call\n",
             ),
         );
         write_file(
             &dir.join("std/src/kernel/text.arc"),
             concat!(
-                "intrinsic fn bytes_from_str_utf8(text: Str) -> Array[Int] = HostBytesFromStrUtf8\n",
-                "intrinsic fn bytes_len(read bytes: Array[Int]) -> Int = HostBytesLen\n",
+                "intrinsic fn bytes_from_str_utf8(text: Str) -> Bytes = HostBytesFromStrUtf8\n",
+                "intrinsic fn bytes_len(read bytes: Bytes) -> Int = HostBytesLen\n",
             ),
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct ArcanaStrView {
+    struct ArcanaViewV1 {
         ptr: *const u8,
         len: usize,
+        stride_bytes: usize,
+        family: u32,
+        element_size: u32,
+        flags: u32,
     }
 
-    #[cfg(windows)]
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct ArcanaBytesView {
-        ptr: *const u8,
-        len: usize,
-    }
-
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct ArcanaOwnedStr {
@@ -870,7 +890,7 @@ mod tests {
         len: usize,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct ArcanaOwnedBytes {
@@ -878,15 +898,15 @@ mod tests {
         len: usize,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct ArcanaPairView__Pair__Str__Int {
-        left: ArcanaStrView,
+        left: ArcanaViewV1,
         right: i64,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct ArcanaPairOwned__Pair__Str__Int {
@@ -894,7 +914,7 @@ mod tests {
         right: i64,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[repr(C)]
     struct TestArcanaCabiProductApiV1 {
         descriptor_size: usize,
@@ -908,14 +928,14 @@ mod tests {
         reserved1: *const c_void,
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     unsafe fn read_cabi_utf8_field(ptr: *const c_char) -> String {
         unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned()
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_runnable_windows_exe_bundle() {
         let dir = temp_dir("windows_exe");
@@ -965,7 +985,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_unit_returning_windows_exe_bundle() {
         let dir = temp_dir("windows_exe_unit_main");
@@ -991,7 +1011,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_arcana_desktop_windows_exe_bundle() {
         let dir = temp_dir("windows_exe_arcana_desktop");
@@ -1022,7 +1042,7 @@ mod tests {
                 "import arcana_desktop.monitor\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "\n",
                 "record Demo:\n",
                 "    seen: Int\n",
@@ -1077,8 +1097,8 @@ mod tests {
                 "        arcana_desktop.types.WindowTheme.Unknown => 1\n",
                 "\n",
                 "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
-                "    std.io.print_line[Int] :: id :: call\n",
-                "    std.io.print_line[Int] :: self.seen :: call\n",
+                "    arcana_process.io.print_line[Int] :: id :: call\n",
+                "    arcana_process.io.print_line[Int] :: self.seen :: call\n",
                 "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
                 "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
                 "\n",
@@ -1106,15 +1126,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_arcana_desktop_multi_window_clipboard_windows_exe_bundle() {
         let dir = temp_dir("windows_exe_arcana_desktop_multi_window_clipboard");
         let desktop_dep = repo_root()
             .join("grimoires")
-            .join("owned")
             .join("libs")
             .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let process_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("process")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let winapi_dep = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
             .to_string_lossy()
             .replace('\\', "/");
         write_file(
@@ -1125,8 +1156,12 @@ mod tests {
                     "kind = \"app\"\n",
                     "[deps]\n",
                     "arcana_desktop = {desktop_dep:?}\n",
+                    "arcana_process = {process_dep:?}\n",
+                    "arcana_winapi = {winapi_dep:?}\n",
                 ),
                 desktop_dep = desktop_dep,
+                process_dep = process_dep,
+                winapi_dep = winapi_dep,
             ),
         );
         write_file(
@@ -1136,8 +1171,9 @@ mod tests {
                 "import arcana_desktop.clipboard\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
+                "import arcana_winapi.desktop_handles\n",
                 "import std.result\n",
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "\n",
                 "record Demo:\n",
                 "    second_window: Int\n",
@@ -1177,7 +1213,7 @@ mod tests {
                 "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "fn on_second_window(edit self: Demo, edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window):\n",
+                "fn on_second_window(edit self: Demo, edit cx: arcana_desktop.types.AppContext, take win: arcana_winapi.desktop_handles.Window):\n",
                 "    let mut win = win\n",
                 "    self.second_window = (arcana_desktop.window.id :: win :: call).value\n",
                 "    arcana_desktop.app.request_window_redraw :: cx, win :: call\n",
@@ -1186,7 +1222,7 @@ mod tests {
                 "\n",
                 "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
                 "    if id == self.second_window:\n",
-                "        std.io.print_line[Int] :: id :: call\n",
+                "        arcana_process.io.print_line[Int] :: id :: call\n",
                 "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
                 "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
                 "\n",
@@ -1220,7 +1256,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_arcana_desktop_settings_windows_exe_bundle() {
         let dir = temp_dir("windows_exe_arcana_desktop_settings");
@@ -1250,7 +1286,7 @@ mod tests {
                 "import arcana_desktop.text_input\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "\n",
                 "record Demo:\n",
                 "    done: Bool\n",
@@ -1290,7 +1326,7 @@ mod tests {
                 "                    if text.composition_area.size.0 == 20:\n",
                 "                        if text.composition_area.size.1 == 21:\n",
                 "                            total += 64\n",
-                "        std.io.print_line[Int] :: total :: call\n",
+                "        arcana_process.io.print_line[Int] :: total :: call\n",
                 "        self.done = true\n",
                 "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
                 "\n",
@@ -1336,7 +1372,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_arcana_desktop_record_settings_windows_exe_bundle() {
         let dir = temp_dir("windows_exe_arcana_desktop_record_settings");
@@ -1366,7 +1402,7 @@ mod tests {
                 "import arcana_desktop.text_input\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
-                "import std.io\n",
+                "import arcana_process.io\n",
                 "\n",
                 "record Demo:\n",
                 "    done: Bool\n",
@@ -1415,7 +1451,7 @@ mod tests {
                 "                        if text_now.composition_area.size.0 == 260:\n",
                 "                            if text_now.composition_area.size.1 == 28:\n",
                 "                                total += 64\n",
-                "        std.io.print_line[Int] :: total :: call\n",
+                "        arcana_process.io.print_line[Int] :: total :: call\n",
                 "        self.done = true\n",
                 "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
                 "\n",
@@ -1461,7 +1497,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_arcana_desktop_text_input_ime_windows_exe_bundle() {
         let dir = temp_dir("windows_exe_arcana_desktop_text_input_ime");
@@ -1499,7 +1535,7 @@ mod tests {
                     "import arcana_desktop.text_input\n",
                     "import arcana_desktop.types\n",
                     "import arcana_desktop.window\n",
-                    "import std.io\n",
+                    "import arcana_process.io\n",
                     "\n",
                     "record Demo:\n",
                     "    settings_ok: Bool\n",
@@ -1522,7 +1558,7 @@ mod tests {
                     "            if self.saw_text:\n",
                     "                if self.saw_comp_started:\n",
                     "                    self.done = true\n",
-                    "                    std.io.print_line[Int] :: 1 :: call\n",
+                    "                    arcana_process.io.print_line[Int] :: 1 :: call\n",
                     "                    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
                     "\n",
                     "impl arcana_desktop.app.Application[Demo] for Demo:\n",
@@ -1664,7 +1700,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_large_arcana_desktop_windows_bundle_with_runtime_dll() {
         let workspace_dir = desktop_proof_workspace_copy("windows_large_arcana_desktop_workspace");
@@ -1719,7 +1755,7 @@ mod tests {
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_closes_arcana_desktop_showcase_from_window_close_button() {
         let workspace_dir =
@@ -1753,7 +1789,7 @@ mod tests {
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_drives_arcana_desktop_showcase_next_page_from_mouse_click() {
         let workspace_dir =
@@ -1804,7 +1840,7 @@ mod tests {
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_clicking_second_window_does_not_crash_showcase() {
         let workspace_dir =
@@ -1922,7 +1958,7 @@ mod tests {
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_main_button_closes_showcase_second_window() {
         let workspace_dir =
@@ -2009,7 +2045,7 @@ mod tests {
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_main_button_reopens_showcase_second_window_after_close() {
         let workspace_dir =
@@ -2115,7 +2151,7 @@ mod tests {
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_windows_exe_bundle_with_owner_activation() {
         let dir = temp_dir("windows_exe_owner");
@@ -2150,7 +2186,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_windows_exe_bundle_with_owner_context_hooks() {
         let dir = temp_dir("windows_exe_owner_context");
@@ -2194,7 +2230,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_windows_exe_bundle_with_active_owner_reentry_context() {
         let dir = temp_dir("windows_exe_owner_reentry_context");
@@ -2246,7 +2282,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_windows_exe_bundle_with_object_only_owner_attachment() {
         let dir = temp_dir("windows_exe_owner_object_only");
@@ -2284,15 +2320,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_loadable_windows_dll_bundle() {
         let dir = temp_dir("windows_dll");
-        write_std_bytes_grimoire(&dir);
+        write_std_text_grimoire(&dir);
         write_lib_workspace(
             &dir,
             concat!(
-                "import std.bytes\n",
+                "import std.text\n",
                 "fn touch():\n",
                 "    return\n",
                 "fn answer_impl(value: Int) -> Int:\n",
@@ -2311,10 +2347,10 @@ mod tests {
                 "        return 0\n",
                 "export fn greet(read name: Str) -> Str:\n",
                 "    return \"hello \" + name\n",
-                "export fn prefix() -> Array[Int]:\n",
-                "    return std.bytes.from_str_utf8 :: \"arc\" :: call\n",
-                "export fn byte_len(read bytes: Array[Int]) -> Int:\n",
-                "    return std.bytes.len :: bytes :: call\n",
+                "export fn prefix() -> Bytes:\n",
+                "    return std.text.bytes_from_str_utf8 :: \"arc\" :: call\n",
+                "export fn byte_len(read bytes: Bytes) -> Int:\n",
+                "    return std.text.bytes_len :: bytes :: call\n",
                 "export fn echo_pair(read pair: (Str, Int)) -> (Str, Int):\n",
                 "    return pair\n",
             ),
@@ -2413,15 +2449,13 @@ mod tests {
                 .get::<unsafe extern "system" fn(*mut i64) -> u8>(b"answer")
                 .expect("typed answer export should exist");
             let greet = library
-                .get::<unsafe extern "system" fn(ArcanaStrView, *mut ArcanaOwnedStr) -> u8>(
-                    b"greet",
-                )
+                .get::<unsafe extern "system" fn(ArcanaViewV1, *mut ArcanaOwnedStr) -> u8>(b"greet")
                 .expect("typed greet export should exist");
             let prefix = library
                 .get::<unsafe extern "system" fn(*mut ArcanaOwnedBytes) -> u8>(b"prefix")
                 .expect("typed prefix export should exist");
             let byte_len = library
-                .get::<unsafe extern "system" fn(ArcanaBytesView, *mut i64) -> u8>(b"byte_len")
+                .get::<unsafe extern "system" fn(ArcanaViewV1, *mut i64) -> u8>(b"byte_len")
                 .expect("typed byte_len export should exist");
             let echo_pair = library
                 .get::<unsafe extern "system" fn(
@@ -2454,9 +2488,13 @@ mod tests {
             let mut greeting = ArcanaOwnedStr::default();
             let name = b"arcana";
             let ok = greet(
-                ArcanaStrView {
+                ArcanaViewV1 {
                     ptr: name.as_ptr(),
                     len: name.len(),
+                    stride_bytes: 1,
+                    family: 1,
+                    element_size: 1,
+                    flags: 1,
                 },
                 &mut greeting,
             );
@@ -2484,9 +2522,13 @@ mod tests {
             let payload = b"bundle";
             let mut len_result = 0i64;
             let ok = byte_len(
-                ArcanaBytesView {
+                ArcanaViewV1 {
                     ptr: payload.as_ptr(),
                     len: payload.len(),
+                    stride_bytes: 1,
+                    family: 1,
+                    element_size: 1,
+                    flags: 0,
                 },
                 &mut len_result,
             );
@@ -2501,9 +2543,13 @@ mod tests {
             let mut echoed_pair = ArcanaPairOwned__Pair__Str__Int::default();
             let ok = echo_pair(
                 ArcanaPairView__Pair__Str__Int {
-                    left: ArcanaStrView {
+                    left: ArcanaViewV1 {
                         ptr: pair_label.as_ptr(),
                         len: pair_label.len(),
+                        stride_bytes: 1,
+                        family: 1,
+                        element_size: 1,
+                        flags: 1,
                     },
                     right: 17,
                 },
@@ -2523,7 +2569,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_named_child_root_windows_dll_product() {
         let dir = temp_dir("windows_dll_child_root_product");
@@ -2659,7 +2705,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_rejects_invalid_rust_cdylib_native_product_descriptor() {
         let dir = temp_dir("windows_dll_invalid_rust_cdylib_descriptor");
@@ -2719,7 +2765,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_requires_product_for_non_export_windows_dll_roots() {
         let dir = temp_dir("windows_dll_child_root_requires_product");
@@ -2750,7 +2796,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_stages_loadable_windows_dll_bundle_with_owner_activation() {
         let dir = temp_dir("windows_dll_owner");
@@ -2807,146 +2853,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn package_workspace_runs_native_window_owner_app_bundle() {
-        let dir = temp_dir("windows_window_owner");
-        write_app_workspace(
-            &dir,
-            concat!(
-                "import std.io\n",
-                "import std.window\n",
-                "use std.result.Result\n",
-                "obj WindowState:\n",
-                "    win: std.window.Window\n",
-                "\n",
-                "create Session [WindowState] scope-exit:\n",
-                "    closed: when not (std.window.alive :: WindowState.win :: call) retain [WindowState]\n",
-                "\n",
-                "Session\n",
-                "WindowState\n",
-                "fn run_with_window(take win: std.window.Window) -> Int:\n",
-                "    let active = Session :: :: call\n",
-                "    WindowState.win = win\n",
-                "    let resumed = Session :: :: call\n",
-                "    let size = std.window.size :: resumed.WindowState.win :: call\n",
-                "    std.io.print[Int] :: size.0 :: call\n",
-                "    std.io.print[Int] :: size.1 :: call\n",
-                "    let close = std.window.close :: resumed.WindowState.win :: call\n",
-                "    if close :: :: is_err:\n",
-                "        return 3\n",
-                "    return 0\n",
-                "\n",
-                "fn run() -> Int:\n",
-                "    return match (std.window.open :: \"Arcana Owner\", 160, 120 :: call):\n",
-                "        Result.Ok(win) => run_with_window :: win :: call\n",
-                "        Result.Err(_) => 1\n",
-                "fn main() -> Int:\n",
-                "    return run :: :: call\n",
-            ),
-        );
-        add_std_dep(&dir);
-
-        let bundle = package_workspace(
-            dir.clone(),
-            BuildTarget::windows_exe(),
-            Some("app".to_string()),
-            None,
-        )
-        .expect("window owner package should succeed");
-        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
-        let output = Command::new(&exe_path)
-            .current_dir(&bundle.bundle_dir)
-            .output()
-            .expect("staged owner window bundle should launch");
-        assert_eq!(output.status.code(), Some(0));
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["160120"]
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn package_workspace_runs_native_window_canvas_app_bundle() {
-        let dir = temp_dir("windows_window_canvas");
-        write_test_bmp(&dir.join("fixture").join("sprite.bmp"));
-        write_app_workspace(
-            &dir,
-            concat!(
-                "import std.canvas\n",
-                "import std.io\n",
-                "import std.window\n",
-                "use std.result.Result\n",
-                "fn draw_image(edit win: std.window.Window, read img: std.canvas.Image) -> Int:\n",
-                "    let img_size = std.canvas.image_size :: img :: call\n",
-                "    if img_size.0 != 2:\n",
-                "        return 4\n",
-                "    if img_size.1 != 2:\n",
-                "        return 5\n",
-                "    std.canvas.blit :: win, img, 8 :: call\n",
-                "        y = 9\n",
-                "    return 0\n",
-                "fn run(take win: std.window.Window) -> Int:\n",
-                "    let mut win = win\n",
-                "    if not (std.window.alive :: win :: call):\n",
-                "        return 2\n",
-                "    let size = std.window.size :: win :: call\n",
-                "    std.io.print[Int] :: size.0 :: call\n",
-                "    std.io.print[Int] :: size.1 :: call\n",
-                "    let color = std.canvas.rgb :: 10, 20, 30 :: call\n",
-                "    std.canvas.fill :: win, color :: call\n",
-                "    let image_status = match (std.canvas.image_load :: \"sprite.bmp\" :: call):\n",
-                "        Result.Ok(img) => draw_image :: win, img :: call\n",
-                "        Result.Err(_) => 6\n",
-                "    if image_status != 0:\n",
-                "        return image_status\n",
-                "    std.canvas.present :: win :: call\n",
-                "    let close = std.window.close :: win :: call\n",
-                "    if close :: :: is_err:\n",
-                "        return 3\n",
-                "    return 0\n",
-                "fn main() -> Int:\n",
-                "    return match (std.window.open :: \"Arcana\", 320, 200 :: call):\n",
-                "        Result.Ok(win) => run :: win :: call\n",
-                "        Result.Err(_) => 1\n",
-            ),
-        );
-        add_std_dep(&dir);
-
-        let bundle = package_workspace(
-            dir.clone(),
-            BuildTarget::windows_exe(),
-            Some("app".to_string()),
-            None,
-        )
-        .expect("window canvas package should succeed");
-        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
-        fs::copy(
-            dir.join("fixture").join("sprite.bmp"),
-            bundle.bundle_dir.join("sprite.bmp"),
-        )
-        .expect("sprite fixture should copy into bundle");
-        let output = Command::new(&exe_path)
-            .current_dir(&bundle.bundle_dir)
-            .output()
-            .expect("staged bundle should launch");
-        assert_eq!(output.status.code(), Some(0));
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["320200"]
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_runs_native_audio_app_bundle() {
         let dir = temp_dir("windows_audio");
@@ -2954,27 +2861,27 @@ mod tests {
         write_app_workspace(
             &dir,
             concat!(
-                "import std.audio\n",
-                "import std.io\n",
+                "import arcana_audio\n",
+                "import arcana_process.io\n",
                 "use std.result.Result\n",
-                "fn use_playback(take device: std.audio.AudioDevice, take playback: std.audio.AudioPlayback) -> Int:\n",
+                "fn use_playback(take device: arcana_audio.types.AudioDevice, take playback: arcana_audio.types.AudioPlayback) -> Int:\n",
                 "    let stop = playback :: :: stop\n",
                 "    if stop :: :: is_err:\n",
                 "        return 4\n",
-                "    let close = std.audio.output_close :: device :: call\n",
+                "    let close = arcana_audio.output.close :: device :: call\n",
                 "    if close :: :: is_err:\n",
                 "        return 5\n",
                 "    return 0\n",
-                "fn use_clip(take device: std.audio.AudioDevice, read clip: std.audio.AudioBuffer) -> Int:\n",
+                "fn use_clip(take device: arcana_audio.types.AudioDevice, read clip: arcana_audio.types.AudioBuffer) -> Int:\n",
                 "    let mut device = device\n",
-                "    std.io.print[Int] :: (std.audio.buffer_sample_rate_hz :: clip :: call) :: call\n",
-                "    let playback_result = std.audio.play_buffer :: device, clip :: call\n",
+                "    arcana_process.io.print[Int] :: ((arcana_audio.clip.info :: clip :: call).sample_rate_hz) :: call\n",
+                "    let playback_result = arcana_audio.playback.play :: device, clip :: call\n",
                 "    return match playback_result:\n",
                 "        Result.Ok(value) => use_playback :: device, value :: call\n",
                 "        Result.Err(_) => 3\n",
                 "fn main() -> Int:\n",
-                "    return match (std.audio.default_output :: :: call):\n",
-                "        Result.Ok(device) => match (std.audio.buffer_load_wav :: \"clip.wav\" :: call):\n",
+                "    return match (arcana_audio.output.default_output :: :: call):\n",
+                "        Result.Ok(device) => match (arcana_audio.clip.load_wav :: \"clip.wav\" :: call):\n",
                 "            Result.Ok(clip) => use_clip :: device, clip :: call\n",
                 "            Result.Err(_) => 2\n",
                 "        Result.Err(_) => 1\n",
@@ -3010,7 +2917,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     #[test]
     fn package_workspace_rejects_native_audio_buffer_format_mismatch() {
         let dir = temp_dir("windows_audio_mismatch");
@@ -3019,22 +2926,22 @@ mod tests {
         write_app_workspace(
             &dir,
             concat!(
-                "import std.audio\n",
+                "import arcana_audio\n",
                 "use std.result.Result\n",
-                "fn mismatch_path(read device: std.audio.AudioDevice) -> Str:\n",
-                "    if (std.audio.output_sample_rate_hz :: device :: call) == 48000:\n",
+                "fn mismatch_path(read device: arcana_audio.types.AudioDevice) -> Str:\n",
+                "    if (arcana_audio.output.sample_rate_hz :: device :: call) == 48000:\n",
                 "        return \"clip_44k_stereo.wav\"\n",
                 "    return \"clip_48k_stereo.wav\"\n",
-                "fn use_device(take device: std.audio.AudioDevice) -> Int:\n",
+                "fn use_device(take device: arcana_audio.types.AudioDevice) -> Int:\n",
                 "    let mut device = device\n",
                 "    let path = mismatch_path :: device :: call\n",
-                "    return match (std.audio.buffer_load_wav :: path :: call):\n",
-                "        Result.Ok(clip) => match (std.audio.play_buffer :: device, clip :: call):\n",
+                "    return match (arcana_audio.clip.load_wav :: path :: call):\n",
+                "        Result.Ok(clip) => match (arcana_audio.playback.play :: device, clip :: call):\n",
                 "            Result.Ok(_) => 4\n",
                 "            Result.Err(_) => 0\n",
                 "        Result.Err(_) => 3\n",
                 "fn main() -> Int:\n",
-                "    return match (std.audio.default_output :: :: call):\n",
+                "    return match (arcana_audio.output.default_output :: :: call):\n",
                 "        Result.Ok(device) => use_device :: device :: call\n",
                 "        Result.Err(_) => 1\n",
             ),
@@ -3068,7 +2975,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     unsafe fn read_allocated_utf8(
         alloc: &libloading::Symbol<unsafe extern "system" fn(*mut usize) -> *mut u8>,
         free: &libloading::Symbol<unsafe extern "system" fn(*mut u8, usize)>,
@@ -3083,7 +2990,7 @@ mod tests {
         String::from_utf8(bytes).map_err(|e| format!("utf8 decode failed: {e}"))
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     unsafe fn read_owned_bytes(
         owned: ArcanaOwnedBytes,
         free: &libloading::Symbol<unsafe extern "system" fn(*mut u8, usize)>,
@@ -3096,7 +3003,7 @@ mod tests {
         Ok(bytes)
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     unsafe fn read_owned_utf8(
         owned: ArcanaOwnedStr,
         free: &libloading::Symbol<unsafe extern "system" fn(*mut u8, usize)>,

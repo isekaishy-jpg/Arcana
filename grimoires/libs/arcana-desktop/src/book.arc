@@ -1,11 +1,8 @@
 reexport types
 reexport arcana_desktop.app
 reexport arcana_desktop.window
-reexport arcana_desktop.canvas
 reexport arcana_desktop.monitor
 reexport arcana_desktop.input
 reexport arcana_desktop.events
 reexport arcana_desktop.clipboard
 reexport arcana_desktop.text_input
-reexport arcana_desktop.loop
-reexport arcana_desktop.ecs

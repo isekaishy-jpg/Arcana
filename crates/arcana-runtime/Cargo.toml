@@ -8,6 +8,7 @@ arcana-aot.workspace = true
 arcana-cabi.workspace = true
 arcana-ir.workspace = true
 arcana-language-law.workspace = true
+libloading.workspace = true
 pathdiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -15,30 +16,6 @@ stacker.workspace = true
 serde_stacker.workspace = true
 sha2.workspace = true
 toml.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-# Preexisting Windows host/runtime substrate and native-loader plumbing.
-# This remains transitional host debt outside the package binding seam.
-windows-sys = { workspace = true, features = [
-    "Win32_Devices_HumanInterfaceDevice",
-    "Win32_Graphics_Dwm",
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Media",
-    "Win32_Media_Audio",
-    "Win32_Media_Multimedia",
-    "Win32_System_DataExchange",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_Ole",
-    "Win32_System_Registry",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input",
-    "Win32_UI_Input_Ime",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-] }
 
 [dev-dependencies]
 arcana-frontend.workspace = true

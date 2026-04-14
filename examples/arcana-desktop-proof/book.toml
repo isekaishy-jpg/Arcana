@@ -2,4 +2,4 @@ name = "desktop_proof_workspace"
 kind = "lib"
 
 [workspace]
-members = ["app"]
+members = ["arcsb_app"]

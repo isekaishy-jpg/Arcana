@@ -774,6 +774,23 @@ pub enum BinaryOp {
     Mod,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionFamily {
+    Inferred,
+    Contiguous,
+    Strided,
+}
+
+impl ProjectionFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inferred => "inferred",
+            Self::Contiguous => "contiguous",
+            Self::Strided => "strided",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
     Path {
@@ -852,8 +869,11 @@ pub enum Expr {
     },
     Slice {
         expr: Box<Expr>,
+        family: ProjectionFamily,
         start: Option<Box<Expr>>,
         end: Option<Box<Expr>>,
+        len: Option<Box<Expr>>,
+        stride: Option<Box<Expr>>,
         inclusive_end: bool,
     },
     Range {
@@ -6415,11 +6435,17 @@ fn parse_access_expression(text: &str) -> Result<Option<Expr>, String> {
                 type_args,
             }));
         }
+        if let Some(projection) = parse_projection_spec(base, inside)? {
+            return Ok(Some(projection));
+        }
         if let Some((start, end, inclusive_end)) = parse_range_parts(inside) {
             return Ok(Some(Expr::Slice {
                 expr: Box::new(parse_expression_core(base)?),
+                family: ProjectionFamily::Inferred,
                 start: parse_optional_range_bound(start)?,
                 end: parse_optional_range_bound(end)?,
+                len: None,
+                stride: None,
                 inclusive_end,
             }));
         }
@@ -6468,6 +6494,114 @@ fn parse_range_parts(text: &str) -> Option<(&str, &str, bool)> {
         return Some((&text[..index], &text[index + 3..], true));
     }
     find_top_level_token(text, "..").map(|index| (&text[..index], &text[index + 2..], false))
+}
+
+fn parse_projection_spec(base: &str, inside: &str) -> Result<Option<Expr>, String> {
+    let trimmed = inside.trim();
+    if let Some(fields) = trimmed.strip_prefix("contiguous ") {
+        let named = parse_projection_named_fields(fields, "contiguous projection")?;
+        let start = named
+            .get("start")
+            .ok_or_else(|| "contiguous projection is missing required field `start`".to_string())?;
+        let end = named
+            .get("end")
+            .ok_or_else(|| "contiguous projection is missing required field `end`".to_string())?;
+        return Ok(Some(Expr::Slice {
+            expr: Box::new(parse_expression_core(base)?),
+            family: ProjectionFamily::Contiguous,
+            start: Some(Box::new(parse_expression_core(start)?)),
+            end: Some(Box::new(parse_expression_core(end)?)),
+            len: None,
+            stride: None,
+            inclusive_end: false,
+        }));
+    }
+    if let Some(fields) = trimmed.strip_prefix("strided ") {
+        let named = parse_projection_named_fields(fields, "strided projection")?;
+        let start = named
+            .get("start")
+            .ok_or_else(|| "strided projection is missing required field `start`".to_string())?;
+        let len = named
+            .get("len")
+            .ok_or_else(|| "strided projection is missing required field `len`".to_string())?;
+        let stride = named
+            .get("stride")
+            .ok_or_else(|| "strided projection is missing required field `stride`".to_string())?;
+        return Ok(Some(Expr::Slice {
+            expr: Box::new(parse_expression_core(base)?),
+            family: ProjectionFamily::Strided,
+            start: Some(Box::new(parse_expression_core(start)?)),
+            end: None,
+            len: Some(Box::new(parse_expression_core(len)?)),
+            stride: Some(Box::new(parse_expression_core(stride)?)),
+            inclusive_end: false,
+        }));
+    }
+    Ok(None)
+}
+
+fn parse_projection_named_fields<'a>(
+    text: &'a str,
+    context: &str,
+) -> Result<BTreeMap<String, &'a str>, String> {
+    let mut fields = BTreeMap::new();
+    for field in split_top_level(text, ',') {
+        let field = field.trim();
+        if field.is_empty() {
+            return Err(format!("{context} contains an empty field"));
+        }
+        let Some((name, value)) = split_top_level_named_field(field) else {
+            return Err(format!("{context} field `{field}` must use `name: value`"));
+        };
+        if !is_identifier(name) {
+            return Err(format!("{context} field name `{name}` is not a valid identifier"));
+        }
+        if value.trim().is_empty() {
+            return Err(format!("{context} field `{name}` is missing a value"));
+        }
+        if fields.insert(name.to_string(), value.trim()).is_some() {
+            return Err(format!("{context} field `{name}` is repeated"));
+        }
+    }
+    Ok(fields)
+}
+
+fn split_top_level_named_field(text: &str) -> Option<(&str, &str)> {
+    let mut square_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut string_delim = None::<char>;
+    let mut escape = false;
+    for (index, ch) in text.char_indices() {
+        if let Some(delim) = string_delim {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == delim {
+                string_delim = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => string_delim = Some(ch),
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ':' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                return Some((text[..index].trim(), text[index + 1..].trim()));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn split_trailing_bracket_suffix(text: &str) -> Option<(&str, &str)> {
@@ -8275,6 +8409,46 @@ const BUILTIN_TYPE_INFOS: &[BuiltinTypeInfo] = &[
         boundary_unsafe: false,
     },
     BuiltinTypeInfo {
+        name: "Bytes",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "ByteBuffer",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Utf16",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Utf16Buffer",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "View",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "Contiguous",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Strided",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Mapped",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
         name: "Bool",
         ownership: BuiltinOwnershipClass::Copy,
         boundary_unsafe: false,
@@ -8758,7 +8932,12 @@ fn validate_expr_phrase_contract(
             validate_expr_phrase_contract(index, span, false)?;
         }
         Expr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             validate_expr_phrase_contract(expr, span, false)?;
             if let Some(start) = start {
@@ -8766,6 +8945,12 @@ fn validate_expr_phrase_contract(
             }
             if let Some(end) = end {
                 validate_expr_phrase_contract(end, span, false)?;
+            }
+            if let Some(len) = len {
+                validate_expr_phrase_contract(len, span, false)?;
+            }
+            if let Some(stride) = stride {
+                validate_expr_phrase_contract(stride, span, false)?;
             }
         }
         Expr::Range { start, end, .. } => {
@@ -9296,7 +9481,12 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             validate_expr_tuple_contract(index, span)
         }
         Expr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             validate_expr_tuple_contract(expr, span)?;
             if let Some(start) = start {
@@ -9304,6 +9494,12 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             }
             if let Some(end) = end {
                 validate_expr_tuple_contract(end, span)?;
+            }
+            if let Some(len) = len {
+                validate_expr_tuple_contract(len, span)?;
+            }
+            if let Some(stride) = stride {
+                validate_expr_tuple_contract(stride, span)?;
             }
             Ok(())
         }
@@ -9833,7 +10029,7 @@ mod tests {
     #[test]
     fn parse_module_collects_directives_and_symbols() {
         let parsed = parse_module(
-            "import std.io\nuse std.result.Result\nreexport types\nexport record Counter:\n    value: Int\nexport enum Result[T]:\n    Ok(Int)\n    Err(Str)\nexport trait CounterOps[T]:\n    type Output\n    fn tick(edit self: T) -> Int:\n        return 0\nfn main() -> Int:\n",
+            "import arcana_process.io\nuse std.result.Result\nreexport types\nexport record Counter:\n    value: Int\nexport enum Result[T]:\n    Ok(Int)\n    Err(Str)\nexport trait CounterOps[T]:\n    type Output\n    fn tick(edit self: T) -> Int:\n        return 0\nfn main() -> Int:\n",
         )
         .expect("parse should pass");
 
@@ -10499,7 +10695,7 @@ mod tests {
                 "attached blocks are only valid on standalone qualified/memory phrase statements",
             ),
             (
-                "fn main() -> Int:\n    io.print :: 1 :: std.io.print\n        value = 2\n    return 0\n",
+                "fn main() -> Int:\n    io.print :: 1 :: arcana_process.io.print\n        value = 2\n    return 0\n",
                 "qualifier `path qualifier` does not support named header entries",
             ),
             (

@@ -106,6 +106,41 @@ impl ArcanaCabiPassMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ArcanaCabiViewFamily {
+    Contiguous,
+    Strided,
+    Mapped,
+}
+
+impl ArcanaCabiViewFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contiguous => "Contiguous",
+            Self::Strided => "Strided",
+            Self::Mapped => "Mapped",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "Contiguous" => Ok(Self::Contiguous),
+            "Strided" => Ok(Self::Strided),
+            "Mapped" => Ok(Self::Mapped),
+            other => Err(format!("unsupported view family `{other}`")),
+        }
+    }
+
+    pub const fn cabi_tag(self) -> u32 {
+        match self {
+            Self::Contiguous => ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+            Self::Strided => ARCANA_CABI_VIEW_FAMILY_STRIDED,
+            Self::Mapped => ARCANA_CABI_VIEW_FAMILY_MAPPED,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ArcanaCabiType {
     Int,
@@ -123,7 +158,7 @@ impl ArcanaCabiType {
             Self::Int => "Int".to_string(),
             Self::Bool => "Bool".to_string(),
             Self::Str => "Str".to_string(),
-            Self::Bytes => "Array[Int]".to_string(),
+            Self::Bytes => "Bytes".to_string(),
             Self::Opaque(name) => name.clone(),
             Self::Unit => "Unit".to_string(),
             Self::Pair(left, right) => format!("Pair[{}, {}]", left.render(), right.render()),
@@ -139,7 +174,7 @@ impl ArcanaCabiType {
             "Int" => Ok(Self::Int),
             "Bool" => Ok(Self::Bool),
             "Str" => Ok(Self::Str),
-            "Array[Int]" => Ok(Self::Bytes),
+            "Bytes" => Ok(Self::Bytes),
             "Unit" => Ok(Self::Unit),
             _ if trimmed.starts_with("Pair[") && trimmed.ends_with(']') => {
                 let inner = &trimmed["Pair[".len()..trimmed.len() - 1];
@@ -235,11 +270,21 @@ impl ArcanaCabiBindingScalarType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ArcanaCabiBindingViewType {
+    pub element_type: Box<ArcanaCabiBindingType>,
+    pub family: ArcanaCabiViewFamily,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ArcanaCabiBindingType {
     Int,
     Bool,
     Str,
     Bytes,
+    Utf16,
+    ByteBuffer,
+    Utf16Buffer,
+    View(ArcanaCabiBindingViewType),
     I8,
     U8,
     I16,
@@ -262,7 +307,15 @@ impl ArcanaCabiBindingType {
             Self::Int => "Int".to_string(),
             Self::Bool => "Bool".to_string(),
             Self::Str => "Str".to_string(),
-            Self::Bytes => "Array[Int]".to_string(),
+            Self::Bytes => "Bytes".to_string(),
+            Self::Utf16 => "Utf16".to_string(),
+            Self::ByteBuffer => "ByteBuffer".to_string(),
+            Self::Utf16Buffer => "Utf16Buffer".to_string(),
+            Self::View(view) => format!(
+                "View[{}, {}]",
+                view.element_type.render(),
+                view.family.as_str()
+            ),
             Self::I8 => "I8".to_string(),
             Self::U8 => "U8".to_string(),
             Self::I16 => "I16".to_string(),
@@ -289,7 +342,10 @@ impl ArcanaCabiBindingType {
             "Int" => Self::Int,
             "Bool" => Self::Bool,
             "Str" => Self::Str,
-            "Array[Int]" => Self::Bytes,
+            "Bytes" => Self::Bytes,
+            "Utf16" => Self::Utf16,
+            "ByteBuffer" => Self::ByteBuffer,
+            "Utf16Buffer" => Self::Utf16Buffer,
             "I8" => Self::I8,
             "U8" => Self::U8,
             "I16" => Self::I16,
@@ -303,6 +359,15 @@ impl ArcanaCabiBindingType {
             "F32" => Self::F32,
             "F64" => Self::F64,
             "Unit" => Self::Unit,
+            _ if trimmed.starts_with("View[") && trimmed.ends_with(']') => {
+                let inner = &trimmed["View[".len()..trimmed.len() - 1];
+                let (element_type, family) =
+                    split_top_level_pair_args_with_context(inner, "View")?;
+                Self::View(ArcanaCabiBindingViewType {
+                    element_type: Box::new(Self::parse(element_type)?),
+                    family: ArcanaCabiViewFamily::parse(family)?,
+                })
+            }
             _ if trimmed.contains(['[', ']', ',']) => {
                 return Err(format!("unsupported binding cabi type syntax `{trimmed}`"));
             }
@@ -326,8 +391,27 @@ impl ArcanaCabiBindingType {
             Self::USize => Some(ArcanaCabiBindingScalarType::USize),
             Self::F32 => Some(ArcanaCabiBindingScalarType::F32),
             Self::F64 => Some(ArcanaCabiBindingScalarType::F64),
-            Self::Str | Self::Bytes | Self::Named(_) | Self::Unit => None,
+            Self::Str
+            | Self::Bytes
+            | Self::Utf16
+            | Self::ByteBuffer
+            | Self::Utf16Buffer
+            | Self::View(_)
+            | Self::Named(_)
+            | Self::Unit => None,
         }
+    }
+
+    pub fn supports_in_place_edit(&self) -> bool {
+        matches!(self, Self::ByteBuffer | Self::Utf16Buffer | Self::View(_))
+    }
+
+    pub fn is_immutable_owned_payload(&self) -> bool {
+        matches!(self, Self::Str | Self::Bytes | Self::Utf16)
+    }
+
+    pub fn is_view(&self) -> bool {
+        matches!(self, Self::View(_))
     }
 }
 
@@ -468,17 +552,21 @@ impl ArcanaCabiBindingParam {
         source_mode: ArcanaCabiParamSourceMode,
         input_type: ArcanaCabiBindingType,
     ) -> Self {
-        let write_back_type =
-            matches!(source_mode, ArcanaCabiParamSourceMode::Edit).then(|| input_type.clone());
+        let (pass_mode, write_back_type) = match source_mode {
+            ArcanaCabiParamSourceMode::Edit if input_type.supports_in_place_edit() => {
+                (ArcanaCabiPassMode::In, None)
+            }
+            ArcanaCabiParamSourceMode::Edit => {
+                (ArcanaCabiPassMode::InWithWriteBack, Some(input_type.clone()))
+            }
+            ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
+                (ArcanaCabiPassMode::In, None)
+            }
+        };
         Self {
             name: name.into(),
             source_mode,
-            pass_mode: match source_mode {
-                ArcanaCabiParamSourceMode::Edit => ArcanaCabiPassMode::InWithWriteBack,
-                ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
-                    ArcanaCabiPassMode::In
-                }
-            },
+            pass_mode,
             input_type,
             write_back_type,
         }
@@ -546,18 +634,49 @@ impl ArcanaCabiBindingCallback {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ArcanaBytesView {
-    pub ptr: *const u8,
-    pub len: usize,
-}
+pub const ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS: u32 = 1;
+pub const ARCANA_CABI_VIEW_FAMILY_STRIDED: u32 = 2;
+pub const ARCANA_CABI_VIEW_FAMILY_MAPPED: u32 = 3;
+pub const ARCANA_CABI_VIEW_FLAG_UTF8: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ArcanaStrView {
+pub struct ArcanaViewV1 {
     pub ptr: *const u8,
     pub len: usize,
+    pub stride_bytes: usize,
+    pub family: u32,
+    pub element_size: u32,
+    pub flags: u32,
+}
+
+pub const fn raw_view(
+    ptr: *const u8,
+    len: usize,
+    stride_bytes: usize,
+    family: u32,
+    element_size: u32,
+    flags: u32,
+) -> ArcanaViewV1 {
+    ArcanaViewV1 {
+        ptr,
+        len,
+        stride_bytes,
+        family,
+        element_size,
+        flags,
+    }
+}
+
+pub const fn contiguous_u8_view(ptr: *const u8, len: usize, flags: u32) -> ArcanaViewV1 {
+    raw_view(
+        ptr,
+        len,
+        1,
+        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+        1,
+        flags,
+    )
 }
 
 #[repr(C)]
@@ -657,6 +776,20 @@ pub type ArcanaCabiBindingRegisterCallbackFn = unsafe extern "system" fn(
 ) -> i32;
 pub type ArcanaCabiBindingUnregisterCallbackFn =
     unsafe extern "system" fn(instance: *mut c_void, handle: u64) -> i32;
+pub type ArcanaCabiBindingMappedViewLenBytesFn =
+    unsafe extern "system" fn(instance: *mut c_void, handle: u64, out_len: *mut usize) -> i32;
+pub type ArcanaCabiBindingMappedViewReadByteFn = unsafe extern "system" fn(
+    instance: *mut c_void,
+    handle: u64,
+    index: usize,
+    out_value: *mut u8,
+) -> i32;
+pub type ArcanaCabiBindingMappedViewWriteByteFn = unsafe extern "system" fn(
+    instance: *mut c_void,
+    handle: u64,
+    index: usize,
+    value: u8,
+) -> i32;
 pub type ArcanaCabiBindingInvokeImportFn = unsafe extern "system" fn(
     import_name: *const c_char,
     instance: *mut c_void,
@@ -779,6 +912,7 @@ pub enum ArcanaCabiBindingValueTag {
     F32 = 17,
     F64 = 18,
     Layout = 19,
+    View = 20,
 }
 
 impl TryFrom<u32> for ArcanaCabiBindingValueTag {
@@ -805,6 +939,7 @@ impl TryFrom<u32> for ArcanaCabiBindingValueTag {
             tag if tag == Self::F32 as u32 => Ok(Self::F32),
             tag if tag == Self::F64 as u32 => Ok(Self::F64),
             tag if tag == Self::Layout as u32 => Ok(Self::Layout),
+            tag if tag == Self::View as u32 => Ok(Self::View),
             other => Err(format!("unsupported native binding value tag `{other}`")),
         }
     }
@@ -827,8 +962,7 @@ pub union ArcanaCabiBindingPayloadV1 {
     pub usize_value: usize,
     pub f32_value: f32,
     pub f64_value: f64,
-    pub str_value: ArcanaStrView,
-    pub bytes_value: ArcanaBytesView,
+    pub view_value: ArcanaViewV1,
     pub opaque_value: u64,
     pub owned_str_value: ArcanaOwnedStr,
     pub owned_bytes_value: ArcanaOwnedBytes,
@@ -873,6 +1007,18 @@ unsafe impl Sync for ArcanaCabiBindingImportEntryV1 {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct ArcanaCabiBindingMappedViewOpsV1 {
+    pub ops_size: usize,
+    pub len_bytes: ArcanaCabiBindingMappedViewLenBytesFn,
+    pub read_byte: ArcanaCabiBindingMappedViewReadByteFn,
+    pub write_byte: ArcanaCabiBindingMappedViewWriteByteFn,
+    pub reserved0: *const c_void,
+    pub reserved1: *const c_void,
+}
+unsafe impl Sync for ArcanaCabiBindingMappedViewOpsV1 {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct ArcanaCabiBindingCallbackEntryV1 {
     pub name: *const c_char,
     pub return_type: *const c_char,
@@ -901,10 +1047,10 @@ pub struct ArcanaCabiBindingOpsV1 {
     pub layout_count: usize,
     pub register_callback: ArcanaCabiBindingRegisterCallbackFn,
     pub unregister_callback: ArcanaCabiBindingUnregisterCallbackFn,
+    pub mapped_view_ops: *const ArcanaCabiBindingMappedViewOpsV1,
     pub last_error_alloc: ArcanaCabiLastErrorAllocFn,
     pub owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
     pub owned_str_free: ArcanaCabiOwnedStrFreeFn,
-    pub reserved0: *const c_void,
     pub reserved1: *const c_void,
 }
 unsafe impl Sync for ArcanaCabiBindingOpsV1 {}
@@ -915,6 +1061,9 @@ pub fn validate_binding_transport_type(ty: &ArcanaCabiBindingType) -> Result<(),
         | ArcanaCabiBindingType::Bool
         | ArcanaCabiBindingType::Str
         | ArcanaCabiBindingType::Bytes
+        | ArcanaCabiBindingType::Utf16
+        | ArcanaCabiBindingType::ByteBuffer
+        | ArcanaCabiBindingType::Utf16Buffer
         | ArcanaCabiBindingType::I8
         | ArcanaCabiBindingType::U8
         | ArcanaCabiBindingType::I16
@@ -928,8 +1077,36 @@ pub fn validate_binding_transport_type(ty: &ArcanaCabiBindingType) -> Result<(),
         | ArcanaCabiBindingType::F32
         | ArcanaCabiBindingType::F64
         | ArcanaCabiBindingType::Unit => Ok(()),
+        ArcanaCabiBindingType::View(view) => validate_binding_view_type(view),
         ArcanaCabiBindingType::Named(name) if !name.trim().is_empty() => Ok(()),
         ArcanaCabiBindingType::Named(_) => Err("binding named type id cannot be empty".to_string()),
+    }
+}
+
+fn validate_binding_view_type(view: &ArcanaCabiBindingViewType) -> Result<(), String> {
+    match view.element_type.as_ref() {
+        ArcanaCabiBindingType::Int
+        | ArcanaCabiBindingType::Bool
+        | ArcanaCabiBindingType::I8
+        | ArcanaCabiBindingType::U8
+        | ArcanaCabiBindingType::I16
+        | ArcanaCabiBindingType::U16
+        | ArcanaCabiBindingType::I32
+        | ArcanaCabiBindingType::U32
+        | ArcanaCabiBindingType::I64
+        | ArcanaCabiBindingType::U64
+        | ArcanaCabiBindingType::ISize
+        | ArcanaCabiBindingType::USize
+        | ArcanaCabiBindingType::F32
+        | ArcanaCabiBindingType::F64 => Ok(()),
+        ArcanaCabiBindingType::Named(name) if !name.trim().is_empty() => Ok(()),
+        ArcanaCabiBindingType::Named(_) => {
+            Err("binding view element named type id cannot be empty".to_string())
+        }
+        other => Err(format!(
+            "binding view element type `{}` is not transport-safe; views require scalar or raw layout element types",
+            other.render()
+        )),
     }
 }
 
@@ -940,19 +1117,44 @@ pub fn validate_binding_param(param: &ArcanaCabiBindingParam) -> Result<(), Stri
     validate_binding_transport_type(&param.input_type)?;
     match param.source_mode {
         ArcanaCabiParamSourceMode::Edit => {
-            if param.pass_mode != ArcanaCabiPassMode::InWithWriteBack {
+            if param.input_type.is_immutable_owned_payload() {
                 return Err(format!(
-                    "binding param `{}` uses source_mode `edit` but pass_mode is `{}` instead of `in_with_write_back`",
-                    param.name,
-                    param.pass_mode.as_str()
-                ));
-            }
-            if param.write_back_type.as_ref() != Some(&param.input_type) {
-                return Err(format!(
-                    "binding param `{}` uses source_mode `edit` but write_back_type does not match input_type `{}`",
+                    "binding param `{}` uses source_mode `edit` on immutable payload type `{}`",
                     param.name,
                     param.input_type.render()
                 ));
+            }
+            if param.input_type.supports_in_place_edit() {
+                if param.pass_mode != ArcanaCabiPassMode::In {
+                    return Err(format!(
+                        "binding param `{}` uses in-place edit type `{}` but pass_mode is `{}` instead of `in`",
+                        param.name,
+                        param.input_type.render(),
+                        param.pass_mode.as_str()
+                    ));
+                }
+                if param.write_back_type.is_some() {
+                    return Err(format!(
+                        "binding param `{}` uses in-place edit type `{}` but still declares write_back_type",
+                        param.name,
+                        param.input_type.render()
+                    ));
+                }
+            } else {
+                if param.pass_mode != ArcanaCabiPassMode::InWithWriteBack {
+                    return Err(format!(
+                        "binding param `{}` uses source_mode `edit` but pass_mode is `{}` instead of `in_with_write_back`",
+                        param.name,
+                        param.pass_mode.as_str()
+                    ));
+                }
+                if param.write_back_type.as_ref() != Some(&param.input_type) {
+                    return Err(format!(
+                        "binding param `{}` uses source_mode `edit` but write_back_type does not match input_type `{}`",
+                        param.name,
+                        param.input_type.render()
+                    ));
+                }
             }
         }
         ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
@@ -1481,6 +1683,38 @@ pub fn clone_owned_binding_str(
     String::from_utf8(bytes).map_err(|err| format!("native binding string is not utf-8: {err}"))
 }
 
+pub fn view_total_bytes(view: ArcanaViewV1) -> Result<usize, String> {
+    if view.len == 0 {
+        return Ok(0);
+    }
+    let element_size = usize::try_from(view.element_size)
+        .map_err(|_| "native binding view element size does not fit usize".to_string())?;
+    if element_size == 0 {
+        return Err("native binding view element size must be non-zero when len > 0".to_string());
+    }
+    let stride = if view.stride_bytes == 0 {
+        element_size
+    } else {
+        view.stride_bytes
+    };
+    stride
+        .checked_mul(view.len.saturating_sub(1))
+        .and_then(|prefix| prefix.checked_add(element_size))
+        .ok_or_else(|| "native binding view byte span overflowed usize".to_string())
+}
+
+pub fn clone_binding_view_bytes(
+    view: ArcanaViewV1,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<Vec<u8>, String> {
+    let total = view_total_bytes(view)?;
+    let owned = ArcanaOwnedBytes {
+        ptr: view.ptr.cast_mut(),
+        len: total,
+    };
+    clone_owned_binding_bytes(owned, free)
+}
+
 pub fn release_binding_output_value(
     value: ArcanaCabiBindingValueV1,
     owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
@@ -1498,6 +1732,14 @@ pub fn release_binding_output_value(
             let owned = unsafe { value.payload.owned_bytes_value };
             unsafe {
                 owned_bytes_free(owned.ptr, owned.len);
+            }
+            Ok(())
+        }
+        ArcanaCabiBindingValueTag::View => {
+            let view = unsafe { value.payload.view_value };
+            let len = view_total_bytes(view)?;
+            unsafe {
+                owned_bytes_free(view.ptr.cast_mut(), len);
             }
             Ok(())
         }
@@ -1529,14 +1771,18 @@ pub fn release_binding_output_value(
 
 pub fn render_c_value_type_defs() -> String {
     concat!(
-        "typedef struct ArcanaBytesView {\n",
+        "#define ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS 1u\n",
+        "#define ARCANA_CABI_VIEW_FAMILY_STRIDED 2u\n",
+        "#define ARCANA_CABI_VIEW_FAMILY_MAPPED 3u\n",
+        "#define ARCANA_CABI_VIEW_FLAG_UTF8 1u\n\n",
+        "typedef struct ArcanaViewV1 {\n",
         "    const uint8_t* ptr;\n",
         "    size_t len;\n",
-        "} ArcanaBytesView;\n\n",
-        "typedef struct ArcanaStrView {\n",
-        "    const uint8_t* ptr;\n",
-        "    size_t len;\n",
-        "} ArcanaStrView;\n\n",
+        "    size_t stride_bytes;\n",
+        "    uint32_t family;\n",
+        "    uint32_t element_size;\n",
+        "    uint32_t flags;\n",
+        "} ArcanaViewV1;\n\n",
         "typedef struct ArcanaOwnedBytes {\n",
         "    uint8_t* ptr;\n",
         "    size_t len;\n",
@@ -1560,8 +1806,7 @@ pub fn render_c_value_type_defs() -> String {
         "    uintptr_t usize_value;\n",
         "    float f32_value;\n",
         "    double f64_value;\n",
-        "    ArcanaStrView str_value;\n",
-        "    ArcanaBytesView bytes_value;\n",
+        "    ArcanaViewV1 view_value;\n",
         "    uint64_t opaque_value;\n",
         "    ArcanaOwnedStr owned_str_value;\n",
         "    ArcanaOwnedBytes owned_bytes_value;\n",
@@ -1651,6 +1896,14 @@ pub fn render_c_descriptor_type_defs() -> String {
         "    const ArcanaCabiExportParamV1* params;\n",
         "    size_t param_count;\n",
         "} ArcanaCabiBindingCallbackEntryV1;\n\n",
+        "typedef struct ArcanaCabiBindingMappedViewOpsV1 {\n",
+        "    size_t ops_size;\n",
+        "    int32_t (*len_bytes)(void* instance, uint64_t handle, size_t* out_len);\n",
+        "    int32_t (*read_byte)(void* instance, uint64_t handle, size_t index, uint8_t* out_value);\n",
+        "    int32_t (*write_byte)(void* instance, uint64_t handle, size_t index, uint8_t value);\n",
+        "    const void* reserved0;\n",
+        "    const void* reserved1;\n",
+        "} ArcanaCabiBindingMappedViewOpsV1;\n\n",
         "typedef struct ArcanaCabiBindingLayoutEntryV1 {\n",
         "    const char* layout_id;\n",
         "    const char* detail_json;\n",
@@ -1665,10 +1918,10 @@ pub fn render_c_descriptor_type_defs() -> String {
         "    size_t layout_count;\n",
         "    int32_t (*register_callback)(void* instance, const char* callback_name, int32_t (*callback)(void* user_data, const ArcanaCabiBindingValueV1* args, size_t arg_count, ArcanaCabiBindingValueV1* out_write_backs, ArcanaCabiBindingValueV1* out_result), void (*callback_owned_bytes_free)(uint8_t* ptr, size_t len), void (*callback_owned_str_free)(uint8_t* ptr, size_t len), void* user_data, uint64_t* out_handle);\n",
         "    int32_t (*unregister_callback)(void* instance, uint64_t handle);\n",
+        "    const ArcanaCabiBindingMappedViewOpsV1* mapped_view_ops;\n",
         "    uint8_t* (*last_error_alloc)(size_t* out_len);\n",
         "    void (*owned_bytes_free)(uint8_t* ptr, size_t len);\n",
         "    void (*owned_str_free)(uint8_t* ptr, size_t len);\n",
-        "    const void* reserved0;\n",
         "    const void* reserved1;\n",
         "} ArcanaCabiBindingOpsV1;\n\n",
     )
@@ -1676,6 +1929,13 @@ pub fn render_c_descriptor_type_defs() -> String {
 }
 
 fn split_top_level_pair_args(text: &str) -> Result<(&str, &str), String> {
+    split_top_level_pair_args_with_context(text, "Pair")
+}
+
+fn split_top_level_pair_args_with_context<'a>(
+    text: &'a str,
+    context: &str,
+) -> Result<(&'a str, &'a str), String> {
     let mut depth = 0usize;
     let mut split = None;
     let mut extra_split = None;
@@ -1684,7 +1944,7 @@ fn split_top_level_pair_args(text: &str) -> Result<(&str, &str), String> {
             '[' => depth += 1,
             ']' => {
                 if depth == 0 {
-                    return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+                    return Err(format!("invalid cabi type syntax `{context}[{text}]`"));
                 }
                 depth -= 1;
             }
@@ -1700,15 +1960,15 @@ fn split_top_level_pair_args(text: &str) -> Result<(&str, &str), String> {
         }
     }
     let Some(split_index) = split else {
-        return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+        return Err(format!("invalid cabi type syntax `{context}[{text}]`"));
     };
     if extra_split.is_some() {
-        return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+        return Err(format!("invalid cabi type syntax `{context}[{text}]`"));
     }
     let left = text[..split_index].trim();
     let right = text[split_index + 1..].trim();
     if left.is_empty() || right.is_empty() {
-        return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+        return Err(format!("invalid cabi type syntax `{context}[{text}]`"));
     }
     Ok((left, right))
 }
@@ -1765,12 +2025,14 @@ mod tests {
         ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam, ArcanaCabiBindingRawType,
         ArcanaCabiBindingScalarType, ArcanaCabiBindingSignature, ArcanaCabiBindingSignatureKind,
         ArcanaCabiBindingType, ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1,
-        ArcanaCabiParamSourceMode, ArcanaStrView, binding_write_back_slots,
+        ArcanaCabiBindingViewType, ArcanaCabiParamSourceMode, ArcanaCabiViewFamily, ArcanaViewV1,
+        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS, ARCANA_CABI_VIEW_FLAG_UTF8, binding_write_back_slots,
         clone_owned_binding_bytes, clone_owned_binding_str, compare_binding_layouts,
         compare_binding_signatures, free_owned_bytes, free_owned_str, into_owned_bytes,
         into_owned_str, release_binding_output_value, render_c_descriptor_type_defs,
         render_c_value_type_defs, validate_binding_callbacks, validate_binding_layouts,
-        validate_binding_write_backs,
+        validate_binding_param, validate_binding_transport_type, validate_binding_write_backs,
+        view_total_bytes,
     };
 
     unsafe extern "system" fn test_free_owned_bytes(ptr: *mut u8, len: usize) {
@@ -1842,9 +2104,10 @@ mod tests {
     #[test]
     fn render_c_value_type_defs_includes_owned_and_view_buffers() {
         let text = render_c_value_type_defs();
-        assert!(text.contains("typedef struct ArcanaBytesView"));
+        assert!(text.contains("typedef struct ArcanaViewV1"));
         assert!(text.contains("typedef struct ArcanaOwnedStr"));
         assert!(text.contains("typedef struct ArcanaCabiBindingValueV1"));
+        assert!(text.contains("#define ARCANA_CABI_VIEW_FAMILY_MAPPED 3u"));
     }
 
     #[test]
@@ -1856,11 +2119,38 @@ mod tests {
         assert!(text.contains("typedef struct ArcanaCabiChildOpsV1"));
         assert!(text.contains("typedef struct ArcanaCabiPluginOpsV1"));
         assert!(text.contains("typedef struct ArcanaCabiBindingOpsV1"));
+        assert!(text.contains("typedef struct ArcanaCabiBindingMappedViewOpsV1"));
         assert!(text.contains("use_instance"));
         assert!(text.contains("owned_str_free"));
+        assert!(text.contains("mapped_view_ops"));
         assert!(text.contains("ArcanaCabiBindingValueV1* out_write_backs"));
         assert!(text.contains("callback_owned_bytes_free"));
         assert!(!text.contains("typedef struct ArcanaCabiProviderOpsV1"));
+    }
+
+    #[test]
+    fn binding_view_types_parse_render_and_validate() {
+        let parsed = ArcanaCabiBindingType::parse("View[U8, Mapped]")
+            .expect("View type should parse");
+        assert_eq!(parsed.render(), "View[U8, Mapped]");
+        validate_binding_transport_type(&parsed).expect("U8 mapped view should validate");
+
+        let named = ArcanaCabiBindingType::View(ArcanaCabiBindingViewType {
+            element_type: Box::new(ArcanaCabiBindingType::Named(
+                "hostapi.raw.Rect".to_string(),
+            )),
+            family: ArcanaCabiViewFamily::Strided,
+        });
+        validate_binding_transport_type(&named).expect("named strided view should validate");
+
+        let err = validate_binding_transport_type(&ArcanaCabiBindingType::View(
+            ArcanaCabiBindingViewType {
+                element_type: Box::new(ArcanaCabiBindingType::Bytes),
+                family: ArcanaCabiViewFamily::Contiguous,
+            },
+        ))
+        .expect_err("owned payload elements should be rejected in View");
+        assert!(err.contains("view element type"), "{err}");
     }
 
     #[test]
@@ -1874,7 +2164,7 @@ mod tests {
             ArcanaCabiBindingParam::binding(
                 "target",
                 ArcanaCabiParamSourceMode::Edit,
-                ArcanaCabiBindingType::Str,
+                ArcanaCabiBindingType::Int,
             ),
         ];
         let mut slots = binding_write_back_slots(&params);
@@ -1888,7 +2178,7 @@ mod tests {
             ArcanaCabiBindingValueTag::Unit
         );
 
-        slots[1] = binding_owned_str("mutated");
+        slots[1] = binding_int(12);
         validate_binding_write_backs(&params, &slots).expect("edit write-back should validate");
 
         slots[0] = binding_int(9);
@@ -1897,7 +2187,7 @@ mod tests {
         assert!(err.contains("must be Unit"), "{err}");
 
         release_binding_output_value(slots[1], test_free_owned_bytes, test_free_owned_str)
-            .expect("owned slot should release");
+            .expect("int slot should release");
     }
 
     #[test]
@@ -1925,6 +2215,32 @@ mod tests {
     }
 
     #[test]
+    fn release_binding_output_value_frees_view_payloads() {
+        let owned = into_owned_bytes(vec![1, 2, 3, 4]);
+        let value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::View as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                view_value: super::raw_view(
+                    owned.ptr.cast_const(),
+                    2,
+                    2,
+                    super::ARCANA_CABI_VIEW_FAMILY_STRIDED,
+                    2,
+                    0,
+                ),
+            },
+        };
+        assert_eq!(
+            view_total_bytes(unsafe { value.payload.view_value }).expect("view span should compute"),
+            4
+        );
+        release_binding_output_value(value, test_free_owned_bytes, test_free_owned_str)
+            .expect("view payload should release");
+    }
+
+    #[test]
     fn generic_callback_fixture_round_trips_owned_result_and_edit_write_back() {
         let params = [
             ArcanaCabiBindingValueV1 {
@@ -1932,9 +2248,13 @@ mod tests {
                 reserved0: 0,
                 reserved1: 0,
                 payload: super::ArcanaCabiBindingPayloadV1 {
-                    str_value: ArcanaStrView {
+                    view_value: ArcanaViewV1 {
                         ptr: b"arcana".as_ptr(),
                         len: "arcana".len(),
+                        stride_bytes: 1,
+                        family: ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                        element_size: 1,
+                        flags: ARCANA_CABI_VIEW_FLAG_UTF8,
                     },
                 },
             },
@@ -1995,7 +2315,7 @@ mod tests {
             params: vec![ArcanaCabiBindingParam::binding(
                 "value",
                 ArcanaCabiParamSourceMode::Edit,
-                ArcanaCabiBindingType::Str,
+                ArcanaCabiBindingType::Int,
             )],
         }];
         let actual = vec![ArcanaCabiBindingSignature {
@@ -2004,7 +2324,7 @@ mod tests {
             params: vec![ArcanaCabiBindingParam::binding(
                 "value",
                 ArcanaCabiParamSourceMode::Edit,
-                ArcanaCabiBindingType::Str,
+                ArcanaCabiBindingType::Int,
             )],
         }];
         let err = compare_binding_signatures(
@@ -2014,6 +2334,48 @@ mod tests {
         )
         .expect_err("return mismatch should fail");
         assert!(err.contains("return type mismatch"), "{err}");
+    }
+
+    #[test]
+    fn binding_buffer_edit_params_use_in_place_transport_without_write_back() {
+        let byte_buffer = ArcanaCabiBindingParam::binding(
+            "bytes",
+            ArcanaCabiParamSourceMode::Edit,
+            ArcanaCabiBindingType::ByteBuffer,
+        );
+        assert_eq!(byte_buffer.pass_mode, super::ArcanaCabiPassMode::In);
+        assert!(byte_buffer.write_back_type.is_none());
+        validate_binding_param(&byte_buffer).expect("byte buffer edit param should validate");
+
+        let utf16_buffer = ArcanaCabiBindingParam::binding(
+            "text",
+            ArcanaCabiParamSourceMode::Edit,
+            ArcanaCabiBindingType::Utf16Buffer,
+        );
+        assert_eq!(utf16_buffer.pass_mode, super::ArcanaCabiPassMode::In);
+        assert!(utf16_buffer.write_back_type.is_none());
+        validate_binding_param(&utf16_buffer).expect("utf16 buffer edit param should validate");
+    }
+
+    #[test]
+    fn binding_param_validation_rejects_edit_on_immutable_payloads() {
+        let bytes = ArcanaCabiBindingParam::binding(
+            "bytes",
+            ArcanaCabiParamSourceMode::Edit,
+            ArcanaCabiBindingType::Bytes,
+        );
+        let err =
+            validate_binding_param(&bytes).expect_err("edit Bytes must be rejected by validation");
+        assert!(err.contains("immutable payload type `Bytes`"), "{err}");
+
+        let utf16 = ArcanaCabiBindingParam::binding(
+            "text",
+            ArcanaCabiParamSourceMode::Edit,
+            ArcanaCabiBindingType::Utf16,
+        );
+        let err =
+            validate_binding_param(&utf16).expect_err("edit Utf16 must be rejected by validation");
+        assert!(err.contains("immutable payload type `Utf16`"), "{err}");
     }
 
     #[test]

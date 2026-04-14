@@ -12,11 +12,6 @@ export opaque type RingBuffer[T] as move, boundary_unsafe
 export opaque type RingId[T] as copy, boundary_unsafe
 export opaque type Slab[T] as move, boundary_unsafe
 export opaque type SlabId[T] as copy, boundary_unsafe
-export opaque type ReadView[T] as move, boundary_unsafe
-export opaque type EditView[T] as move, boundary_unsafe
-export opaque type ByteView as move, boundary_unsafe
-export opaque type ByteEditView as move, boundary_unsafe
-export opaque type StrView as move, boundary_unsafe
 
 lang temp_arena_handle = TempArena
 lang temp_id_handle = TempId
@@ -26,29 +21,10 @@ lang ring_buffer_handle = RingBuffer
 lang ring_id_handle = RingId
 lang slab_handle = Slab
 lang slab_id_handle = SlabId
-lang read_view_handle = ReadView
-lang edit_view_handle = EditView
-lang byte_view_handle = ByteView
-lang byte_edit_view_handle = ByteEditView
-lang str_view_handle = StrView
 
 export record PoolRelocation[T]:
     old: PoolId[T]
     new: PoolId[T]
-
-export trait ViewSource[S]:
-    type Item
-    fn as_view(read self: S, start: Int, end: Int) -> ReadView[std.memory.ViewSource[S].Item]
-
-export trait EditViewSource[S]:
-    type Item
-    fn as_edit_view(edit self: S, start: Int, end: Int) -> EditView[std.memory.EditViewSource[S].Item]
-
-export trait ContiguousBytes[S]:
-    fn as_bytes(read self: S, start: Int, end: Int) -> ByteView
-
-export trait ContiguousBytesEdit[S]:
-    fn as_bytes_edit(edit self: S, start: Int, end: Int) -> ByteEditView
 
 export trait Resettable[S]:
     fn reset_value(edit self: S)
@@ -96,66 +72,6 @@ export fn ring_new[T](capacity: Int) -> RingBuffer[T]:
 
 export fn slab_new[T](capacity: Int) -> Slab[T]:
     return std.kernel.memory.slab_new[T] :: capacity :: call
-
-export fn array_view_read[T](read values: Array[T], start: Int, end: Int) -> ReadView[T]:
-    return std.kernel.memory.array_view_read[T] :: values, start, end :: call
-
-export fn array_view_edit[T](edit values: Array[T], start: Int, end: Int) -> EditView[T]:
-    return std.kernel.memory.array_view_edit[T] :: values, start, end :: call
-
-export fn bytes_view(read values: Array[Int], start: Int, end: Int) -> ByteView:
-    return std.kernel.memory.bytes_view :: values, start, end :: call
-
-export fn bytes_view_edit(edit values: Array[Int], start: Int, end: Int) -> ByteEditView:
-    return std.kernel.memory.bytes_view_edit :: values, start, end :: call
-
-export fn str_view(read text: Str, start: Int, end: Int) -> StrView:
-    return std.kernel.memory.str_view :: text, start, end :: call
-
-impl[T] std.memory.ViewSource[Array[T]] for Array[T]:
-    type Item = T
-    fn as_view(read self: Array[T], start: Int, end: Int) -> ReadView[T]:
-        return std.memory.array_view_read[T] :: self, start, end :: call
-
-impl[T] std.memory.ViewSource[ReadView[T]] for ReadView[T]:
-    type Item = T
-    fn as_view(read self: ReadView[T], start: Int, end: Int) -> ReadView[T]:
-        return self :: start, end :: subview
-
-impl[T] std.memory.ViewSource[EditView[T]] for EditView[T]:
-    type Item = T
-    fn as_view(read self: EditView[T], start: Int, end: Int) -> ReadView[T]:
-        return self :: start, end :: subview_read
-
-impl[T] std.memory.EditViewSource[Array[T]] for Array[T]:
-    type Item = T
-    fn as_edit_view(edit self: Array[T], start: Int, end: Int) -> EditView[T]:
-        return std.memory.array_view_edit[T] :: self, start, end :: call
-
-impl[T] std.memory.EditViewSource[EditView[T]] for EditView[T]:
-    type Item = T
-    fn as_edit_view(edit self: EditView[T], start: Int, end: Int) -> EditView[T]:
-        return self :: start, end :: subview_edit
-
-impl std.memory.ContiguousBytes[Array[Int]] for Array[Int]:
-    fn as_bytes(read self: Array[Int], start: Int, end: Int) -> ByteView:
-        return std.memory.bytes_view :: self, start, end :: call
-
-impl std.memory.ContiguousBytes[ByteView] for ByteView:
-    fn as_bytes(read self: ByteView, start: Int, end: Int) -> ByteView:
-        return self :: start, end :: subview
-
-impl std.memory.ContiguousBytes[ByteEditView] for ByteEditView:
-    fn as_bytes(read self: ByteEditView, start: Int, end: Int) -> ByteView:
-        return self :: start, end :: subview_read
-
-impl std.memory.ContiguousBytesEdit[Array[Int]] for Array[Int]:
-    fn as_bytes_edit(edit self: Array[Int], start: Int, end: Int) -> ByteEditView:
-        return std.memory.bytes_view_edit :: self, start, end :: call
-
-impl std.memory.ContiguousBytesEdit[ByteEditView] for ByteEditView:
-    fn as_bytes_edit(edit self: ByteEditView, start: Int, end: Int) -> ByteEditView:
-        return self :: start, end :: subview_edit
 
 impl[T] Arena[T]:
     fn len(read self: Arena[T]) -> Int:
@@ -313,10 +229,10 @@ impl[T] RingBuffer[T]:
     fn reset(edit self: RingBuffer[T]):
         std.kernel.memory.ring_reset :: self :: call
 
-    fn window_read(read self: RingBuffer[T], start: Int, len: Int) -> ReadView[T]:
+    fn window_read(read self: RingBuffer[T], start: Int, len: Int) -> View[T, Strided]:
         return std.kernel.memory.ring_window_read[T] :: self, start, len :: call
 
-    fn window_edit(edit self: RingBuffer[T], start: Int, len: Int) -> EditView[T]:
+    fn window_edit(edit self: RingBuffer[T], start: Int, len: Int) -> View[T, Strided]:
         return std.kernel.memory.ring_window_edit[T] :: self, start, len :: call
 
     fn borrow_read['ring](read self: RingBuffer[T], id: RingId[T]) -> &'ring T:
@@ -362,76 +278,57 @@ impl[T] Slab[T]:
     fn borrow_edit['slab](edit self: Slab[T], id: SlabId[T]) -> &'slab mut T:
         return std.kernel.memory.slab_borrow_edit :: self, id :: call
 
-impl[T] ReadView[T]:
-    fn len(read self: ReadView[T]) -> Int:
-        return std.kernel.memory.view_len[T] :: self :: call
+impl[T] View[T, Contiguous]:
+    fn len(read self: View[T, Contiguous]) -> Int:
+        return std.kernel.memory.view_len[T, Contiguous] :: self :: call
 
-    fn get(read self: ReadView[T], index: Int) -> T:
-        return std.kernel.memory.view_get[T] :: self, index :: call
+    fn get(read self: View[T, Contiguous], index: Int) -> T:
+        return std.kernel.memory.view_get[T, Contiguous] :: self, index :: call
 
-    fn subview(read self: ReadView[T], start: Int, end: Int) -> ReadView[T]:
-        return std.kernel.memory.view_subview[T] :: self, start, end :: call
+    fn set(edit self: View[T, Contiguous], index: Int, take value: T):
+        std.kernel.memory.view_set[T, Contiguous] :: self, index, value :: call
 
-impl[T] EditView[T]:
-    fn len(read self: EditView[T]) -> Int:
-        return std.kernel.memory.edit_view_len[T] :: self :: call
+    fn subview(read self: View[T, Contiguous], start: Int, end: Int) -> View[T, Contiguous]:
+        return std.kernel.memory.view_subview[T, Contiguous] :: self, start, end :: call
 
-    fn get(read self: EditView[T], index: Int) -> T:
-        return std.kernel.memory.edit_view_get[T] :: self, index :: call
+    fn to_array(read self: View[T, Contiguous]) -> Array[T]:
+        let mut items = std.collections.list.new[T] :: :: call
+        let total = self :: :: len
+        let mut index = 0
+        while index < total:
+            items :: (self :: index :: get) :: push
+            index += 1
+        return std.collections.array.from_list[T] :: items :: call
 
-    fn set(edit self: EditView[T], index: Int, take value: T):
-        std.kernel.memory.edit_view_set[T] :: self, index, value :: call
+impl View[U8, Contiguous]:
+    fn to_str(read self: View[U8, Contiguous]) -> Str:
+        return std.kernel.memory.view_to_str :: self :: call
 
-    fn subview_read(read self: EditView[T], start: Int, end: Int) -> ReadView[T]:
-        return std.kernel.memory.edit_view_subview_read[T] :: self, start, end :: call
+impl[T] View[T, Strided]:
+    fn len(read self: View[T, Strided]) -> Int:
+        return std.kernel.memory.view_len[T, Strided] :: self :: call
 
-    fn subview_edit(edit self: EditView[T], start: Int, end: Int) -> EditView[T]:
-        return std.kernel.memory.edit_view_subview_edit[T] :: self, start, end :: call
+    fn get(read self: View[T, Strided], index: Int) -> T:
+        return std.kernel.memory.view_get[T, Strided] :: self, index :: call
 
-impl ByteView:
-    fn len(read self: ByteView) -> Int:
-        return std.kernel.memory.byte_view_len :: self :: call
+    fn set(edit self: View[T, Strided], index: Int, take value: T):
+        std.kernel.memory.view_set[T, Strided] :: self, index, value :: call
 
-    fn at(read self: ByteView, index: Int) -> Int:
-        return std.kernel.memory.byte_view_at :: self, index :: call
+    fn subview(read self: View[T, Strided], start: Int, end: Int) -> View[T, Strided]:
+        return std.kernel.memory.view_subview[T, Strided] :: self, start, end :: call
 
-    fn subview(read self: ByteView, start: Int, end: Int) -> ByteView:
-        return std.kernel.memory.byte_view_subview :: self, start, end :: call
+impl View[U8, Mapped]:
+    fn len(read self: View[U8, Mapped]) -> Int:
+        return std.kernel.memory.view_len[U8, Mapped] :: self :: call
 
-    fn to_array(read self: ByteView) -> Array[Int]:
-        return std.kernel.memory.byte_view_to_array :: self :: call
+    fn get(read self: View[U8, Mapped], index: Int) -> Int:
+        return Int :: (std.kernel.memory.view_get[U8, Mapped] :: self, index :: call) :: call
 
-impl ByteEditView:
-    fn len(read self: ByteEditView) -> Int:
-        return std.kernel.memory.byte_edit_view_len :: self :: call
+    fn set(edit self: View[U8, Mapped], index: Int, value: Int):
+        std.kernel.memory.view_set[U8, Mapped] :: self, index, (U8 :: value :: call) :: call
 
-    fn at(read self: ByteEditView, index: Int) -> Int:
-        return std.kernel.memory.byte_edit_view_at :: self, index :: call
-
-    fn set(edit self: ByteEditView, index: Int, value: Int):
-        std.kernel.memory.byte_edit_view_set :: self, index, value :: call
-
-    fn subview_read(read self: ByteEditView, start: Int, end: Int) -> ByteView:
-        return std.kernel.memory.byte_edit_view_subview_read :: self, start, end :: call
-
-    fn subview_edit(edit self: ByteEditView, start: Int, end: Int) -> ByteEditView:
-        return std.kernel.memory.byte_edit_view_subview_edit :: self, start, end :: call
-
-    fn to_array(read self: ByteEditView) -> Array[Int]:
-        return std.kernel.memory.byte_edit_view_to_array :: self :: call
-
-impl StrView:
-    fn len_bytes(read self: StrView) -> Int:
-        return std.kernel.memory.str_view_len_bytes :: self :: call
-
-    fn byte_at(read self: StrView, index: Int) -> Int:
-        return std.kernel.memory.str_view_byte_at :: self, index :: call
-
-    fn subview(read self: StrView, start: Int, end: Int) -> StrView:
-        return std.kernel.memory.str_view_subview :: self, start, end :: call
-
-    fn to_str(read self: StrView) -> Str:
-        return std.kernel.memory.str_view_to_str :: self :: call
+    fn subview(read self: View[U8, Mapped], start: Int, end: Int) -> View[U8, Mapped]:
+        return std.kernel.memory.view_subview[U8, Mapped] :: self, start, end :: call
 
 impl[T] std.memory.Resettable[Arena[T]] for Arena[T]:
     fn reset_value(edit self: Arena[T]):

@@ -5,36 +5,36 @@ import arcana_text.shape.glyphs
 import arcana_text.shape.styles
 import arcana_text.shape.tokens
 import arcana_text.shape.types
-import std.bytes
-import std.fs
+import std.text
+import arcana_process.fs
 import std.option
-import std.path
+import arcana_process.path
 use arcana_text.types as text_types
 use std.option.Option
 
 fn shape_probe_flag_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
 
 fn shape_probe_log_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "text_shape_probe.log" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "text_shape_probe.log" :: call
 
 fn shape_probe_enabled() -> Bool:
-    return std.fs.is_file :: (shape_probe_flag_path :: :: call) :: call
+    return arcana_process.fs.is_file :: (shape_probe_flag_path :: :: call) :: call
 
 fn shape_probe_append(line: Str):
     if not (shape_probe_enabled :: :: call):
         return
-    let _ = std.fs.mkdir_all :: (std.path.parent :: (shape_probe_log_path :: :: call) :: call) :: call
-    let opened = std.fs.stream_open_write :: (shape_probe_log_path :: :: call), true :: call
+    let _ = arcana_process.fs.mkdir_all :: (arcana_process.path.parent :: (shape_probe_log_path :: :: call) :: call) :: call
+    let opened = arcana_process.fs.stream_open_write :: (shape_probe_log_path :: :: call), true :: call
     return match opened:
         std.result.Result.Ok(value) => shape_probe_append_ready :: value, line :: call
         std.result.Result.Err(_) => 0
 
-fn shape_probe_append_ready(take value: std.fs.FileStream, line: Str):
+fn shape_probe_append_ready(take value: arcana_winapi.process_handles.FileStream, line: Str):
     let mut stream = value
-    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
-    let _ = std.fs.stream_write :: stream, bytes :: call
-    let _ = std.fs.stream_close :: stream :: call
+    let bytes = std.text.bytes_from_str_utf8 :: (line + "\n") :: call
+    let _ = arcana_process.fs.stream_write :: stream, bytes :: call
+    let _ = arcana_process.fs.stream_close :: stream :: call
 
 record ShapePassContext:
     buffer_version: Int
@@ -295,3 +295,4 @@ fn snapshot_active(edit fonts: arcana_text.fonts.FontSystem, read buffer: arcana
 
 export fn snapshot(edit fonts: arcana_text.fonts.FontSystem, read buffer: arcana_text.buffer.TextBuffer) -> arcana_text.shape.types.ShapeSnapshot:
     return snapshot_active :: fonts, buffer :: call
+

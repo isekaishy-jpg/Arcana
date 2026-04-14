@@ -11,7 +11,7 @@ use std.result.Result
 
 export record Mailbox[T]:
     queue: Mutex[List[T]]
-    wake: arcana_desktop.types.WakeHandle
+    wake: arcana_winapi.desktop_handles.WakeHandle
 
 record RunWindow:
     cfg: arcana_desktop.types.AppConfig
@@ -19,8 +19,8 @@ record RunWindow:
 
 record LaunchConfig:
     cfg: arcana_desktop.types.AppConfig
-    session: arcana_desktop.types.Session
-    wake: arcana_desktop.types.WakeHandle
+    session: arcana_winapi.desktop_handles.Session
+    wake: arcana_winapi.desktop_handles.WakeHandle
 
 obj DesktopAppState:
     cx: arcana_desktop.types.AppContext
@@ -61,7 +61,7 @@ export fn default_app_config() -> arcana_desktop.types.AppConfig:
     let wait_loop = arcana_desktop.types.AppLoop :: wait_poll_ms = 0 :: call
     return arcana_desktop.types.AppConfig :: window = (arcana_desktop.window.default_config :: :: call), loop = wait_loop :: call
 
-export fn mailbox[T](read wake: arcana_desktop.types.WakeHandle) -> arcana_desktop.app.Mailbox[T]:
+export fn mailbox[T](read wake: arcana_winapi.desktop_handles.WakeHandle) -> arcana_desktop.app.Mailbox[T]:
     return arcana_desktop.app.Mailbox[T] :: queue = (std.concurrent.mutex[List[T]] :: (std.collections.list.new[T] :: :: call) :: call), wake = wake :: call
 
 impl[T] Mailbox[T]:
@@ -180,7 +180,7 @@ fn dispatch_event[A, where arcana_desktop.app.Application[A]](edit app: A, edit 
         arcana_desktop.types.AppEvent.Window(dispatch) => arcana_desktop.app.dispatch_targeted_window_event :: app, cx, dispatch :: call
         arcana_desktop.types.AppEvent.Device(value) => arcana_desktop.app.run_device_event :: app, cx, value :: call
 
-export fn wake_handle(read cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.WakeHandle:
+export fn wake_handle(read cx: arcana_desktop.types.AppContext) -> arcana_winapi.desktop_handles.WakeHandle:
     return cx.runtime.wake
 
 export fn device_events(edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.DeviceEvents:
@@ -189,7 +189,7 @@ export fn device_events(edit cx: arcana_desktop.types.AppContext) -> arcana_desk
 export fn set_device_events(edit cx: arcana_desktop.types.AppContext, read value: arcana_desktop.types.DeviceEvents):
     arcana_desktop.events.set_device_events :: cx.runtime.session, value :: call
 
-export fn window_for_id(read cx: arcana_desktop.types.AppContext, read id: arcana_desktop.types.WindowId) -> Option[arcana_desktop.types.Window]:
+export fn window_for_id(read cx: arcana_desktop.types.AppContext, read id: arcana_desktop.types.WindowId) -> Option[arcana_winapi.desktop_handles.Window]:
     return arcana_desktop.events.window_for_id :: cx.runtime.session, id :: call
 
 export fn event_window_id(read event: arcana_desktop.types.AppEvent) -> Option[arcana_desktop.types.WindowId]:
@@ -198,21 +198,21 @@ export fn event_window_id(read event: arcana_desktop.types.AppEvent) -> Option[a
 export fn main_window_id(read cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.WindowId:
     return cx.runtime.main_window_id
 
-export fn main_window(read cx: arcana_desktop.types.AppContext) -> Result[arcana_desktop.types.Window, Str]:
+export fn main_window(read cx: arcana_desktop.types.AppContext) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     return match (arcana_desktop.app.best_main_window :: cx :: call):
-        Option.Some(win) => Result.Ok[arcana_desktop.types.Window, Str] :: win :: call
-        Option.None => Result.Err[arcana_desktop.types.Window, Str] :: "missing main window" :: call
+        Option.Some(win) => Result.Ok[arcana_winapi.desktop_handles.Window, Str] :: win :: call
+        Option.None => Result.Err[arcana_winapi.desktop_handles.Window, Str] :: "missing main window" :: call
 
-export fn cached_main_window(read cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.Window:
+export fn cached_main_window(read cx: arcana_desktop.types.AppContext) -> arcana_winapi.desktop_handles.Window:
     return cx.runtime.main_window
 
-export fn main_window_or_cached(read cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.Window:
+export fn main_window_or_cached(read cx: arcana_desktop.types.AppContext) -> arcana_winapi.desktop_handles.Window:
     return (arcana_desktop.app.main_window :: cx :: call) :: (arcana_desktop.app.cached_main_window :: cx :: call) :: unwrap_or
 
-export fn require_main_window(read cx: arcana_desktop.types.AppContext) -> Result[arcana_desktop.types.Window, Str]:
+export fn require_main_window(read cx: arcana_desktop.types.AppContext) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     return arcana_desktop.app.main_window :: cx :: call
 
-export fn request_window_redraw(edit cx: arcana_desktop.types.AppContext, read win: arcana_desktop.types.Window):
+export fn request_window_redraw(edit cx: arcana_desktop.types.AppContext, read win: arcana_winapi.desktop_handles.Window):
     let _ = cx
     arcana_desktop.app.owner_queue_redraw :: (arcana_desktop.window.id :: win :: call) :: call
 
@@ -226,32 +226,32 @@ export fn request_main_window_redraw(edit cx: arcana_desktop.types.AppContext):
         Result.Ok(win) => arcana_desktop.app.request_window_redraw :: cx, win :: call
         Result.Err(_) => 0
 
-export fn event_window(read cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.AppEvent) -> Option[arcana_desktop.types.Window]:
+export fn event_window(read cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.AppEvent) -> Option[arcana_winapi.desktop_handles.Window]:
     return arcana_desktop.events.event_window :: cx.runtime.session, event :: call
 
-fn target_window_for_id(read cx: arcana_desktop.types.AppContext, read id: arcana_desktop.types.WindowId) -> Option[arcana_desktop.types.Window]:
+fn target_window_for_id(read cx: arcana_desktop.types.AppContext, read id: arcana_desktop.types.WindowId) -> Option[arcana_winapi.desktop_handles.Window]:
     if id.value == cx.runtime.main_window_id.value:
         return arcana_desktop.app.cached_main_window_if_live :: cx :: call
     return arcana_desktop.app.window_for_id :: cx, id :: call
 
-fn cached_main_window_if_live(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
+fn cached_main_window_if_live(read cx: arcana_desktop.types.AppContext) -> Option[arcana_winapi.desktop_handles.Window]:
     return arcana_desktop.app.window_for_id :: cx, cx.runtime.main_window_id :: call
 
-fn live_main_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
+fn live_main_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_winapi.desktop_handles.Window]:
     return arcana_desktop.app.cached_main_window_if_live :: cx :: call
 
-fn best_main_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
+fn best_main_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_winapi.desktop_handles.Window]:
     return arcana_desktop.app.live_main_window :: cx :: call
 
-fn first_live_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
+fn first_live_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_winapi.desktop_handles.Window]:
     let ids = arcana_desktop.events.window_ids :: cx.runtime.session :: call
     for id in ids:
         let found = arcana_desktop.app.window_for_id :: cx, id :: call
         if found :: :: is_some:
             return found
-    return Option.None[arcana_desktop.types.Window] :: :: call
+    return Option.None[arcana_winapi.desktop_handles.Window] :: :: call
 
-fn assign_main_window(edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window) -> Bool:
+fn assign_main_window(edit cx: arcana_desktop.types.AppContext, take win: arcana_winapi.desktop_handles.Window) -> Bool:
     let window_id = arcana_desktop.window.id :: win :: call
     cx.runtime.main_window_id = window_id
     cx.runtime.main_window = win
@@ -263,7 +263,7 @@ fn sync_main_window(edit cx: arcana_desktop.types.AppContext) -> Bool:
         Option.Some(win) => sync_main_window_live_ready :: cx, win :: call
         Option.None => sync_main_window_missing :: cx :: call
 
-fn sync_main_window_live_ready(edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window) -> Bool:
+fn sync_main_window_live_ready(edit cx: arcana_desktop.types.AppContext, take win: arcana_winapi.desktop_handles.Window) -> Bool:
     return arcana_desktop.app.assign_main_window :: cx, win :: call
 
 fn sync_main_window_missing(edit cx: arcana_desktop.types.AppContext) -> Bool:
@@ -272,7 +272,7 @@ fn sync_main_window_missing(edit cx: arcana_desktop.types.AppContext) -> Bool:
         Option.Some(win) => arcana_desktop.app.assign_main_window :: cx, win :: call
         Option.None => false
 
-export fn event_targets_window(read event: arcana_desktop.types.AppEvent, read win: arcana_desktop.types.Window) -> Bool:
+export fn event_targets_window(read event: arcana_desktop.types.AppEvent, read win: arcana_winapi.desktop_handles.Window) -> Bool:
     return match (arcana_desktop.app.event_window_id :: event :: call):
         Option.Some(id) => id.value == (arcana_desktop.window.id :: win :: call).value
         Option.None => false
@@ -282,7 +282,7 @@ export fn event_targets_main_window(read cx: arcana_desktop.types.AppContext, re
         Option.Some(id) => id.value == (arcana_desktop.app.main_window_id :: cx :: call).value
         Option.None => false
 
-export fn is_main_window(read cx: arcana_desktop.types.AppContext, read win: arcana_desktop.types.Window) -> Bool:
+export fn is_main_window(read cx: arcana_desktop.types.AppContext, read win: arcana_winapi.desktop_handles.Window) -> Bool:
     return (arcana_desktop.window.id :: win :: call).value == (arcana_desktop.app.main_window_id :: cx :: call).value
 
 fn clear_current_target(edit cx: arcana_desktop.types.AppContext):
@@ -293,13 +293,13 @@ fn set_current_target(edit cx: arcana_desktop.types.AppContext, read window_id: 
     cx.current_window_id = Option.Some[arcana_desktop.types.WindowId] :: window_id :: call
     cx.current_is_main_window = is_main_window
 
-export fn target_window(read cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> Option[arcana_desktop.types.Window]:
+export fn target_window(read cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> Option[arcana_winapi.desktop_handles.Window]:
     return arcana_desktop.app.target_window_for_id :: cx, target.window_id :: call
 
-export fn require_target_window(read cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> Result[arcana_desktop.types.Window, Str]:
+export fn require_target_window(read cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     return match (arcana_desktop.app.target_window :: cx, target :: call):
-        Option.Some(win) => Result.Ok[arcana_desktop.types.Window, Str] :: win :: call
-        Option.None => Result.Err[arcana_desktop.types.Window, Str] :: "missing target event window" :: call
+        Option.Some(win) => Result.Ok[arcana_winapi.desktop_handles.Window, Str] :: win :: call
+        Option.None => Result.Err[arcana_winapi.desktop_handles.Window, Str] :: "missing target event window" :: call
 
 export fn target_is_main_window(read target: arcana_desktop.types.TargetedEvent) -> Bool:
     return target.is_main_window
@@ -307,15 +307,15 @@ export fn target_is_main_window(read target: arcana_desktop.types.TargetedEvent)
 export fn current_window_id(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.WindowId]:
     return cx.current_window_id
 
-export fn current_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
+export fn current_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_winapi.desktop_handles.Window]:
     return match cx.current_window_id:
         Option.Some(id) => arcana_desktop.app.target_window_for_id :: cx, id :: call
-        Option.None => Option.None[arcana_desktop.types.Window] :: :: call
+        Option.None => Option.None[arcana_winapi.desktop_handles.Window] :: :: call
 
-export fn require_current_window(read cx: arcana_desktop.types.AppContext) -> Result[arcana_desktop.types.Window, Str]:
+export fn require_current_window(read cx: arcana_desktop.types.AppContext) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     return match (arcana_desktop.app.current_window :: cx :: call):
-        Option.Some(win) => Result.Ok[arcana_desktop.types.Window, Str] :: win :: call
-        Option.None => Result.Err[arcana_desktop.types.Window, Str] :: "missing current event window" :: call
+        Option.Some(win) => Result.Ok[arcana_winapi.desktop_handles.Window, Str] :: win :: call
+        Option.None => Result.Err[arcana_winapi.desktop_handles.Window, Str] :: "missing current event window" :: call
 
 export fn current_is_main_window(read cx: arcana_desktop.types.AppContext) -> Bool:
     return cx.current_is_main_window
@@ -328,7 +328,7 @@ export fn close_target_window(edit cx: arcana_desktop.types.AppContext, read tar
         Option.Some(win) => arcana_desktop.app.queue_window_close :: win :: call
         Option.None => Result.Ok[arcana_desktop.types.ControlFlow, Str] :: (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call
 
-export fn close_window(edit cx: arcana_desktop.types.AppContext, read win: arcana_desktop.types.Window) -> Result[arcana_desktop.types.ControlFlow, Str]:
+export fn close_window(edit cx: arcana_desktop.types.AppContext, read win: arcana_winapi.desktop_handles.Window) -> Result[arcana_desktop.types.ControlFlow, Str]:
     let _ = cx
     return arcana_desktop.app.queue_window_close :: win :: call
 
@@ -337,12 +337,12 @@ export fn close_current_window(edit cx: arcana_desktop.types.AppContext) -> Resu
         Option.Some(win) => queue_window_close :: win :: call
         Option.None => Result.Err[arcana_desktop.types.ControlFlow, Str] :: "missing current event window" :: call
 
-fn queue_window_close(read win: arcana_desktop.types.Window) -> Result[arcana_desktop.types.ControlFlow, Str]:
+fn queue_window_close(read win: arcana_winapi.desktop_handles.Window) -> Result[arcana_desktop.types.ControlFlow, Str]:
     arcana_desktop.app.owner_queue_close :: (arcana_desktop.window.id :: win :: call) :: call
     arcana_desktop.app.owner_request_main_sync :: :: call
     return Result.Ok[arcana_desktop.types.ControlFlow, Str] :: (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call
 
-export fn open_window(edit cx: arcana_desktop.types.AppContext, title: Str, size: (Int, Int)) -> Result[arcana_desktop.types.Window, Str]:
+export fn open_window(edit cx: arcana_desktop.types.AppContext, title: Str, size: (Int, Int)) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     let mut cfg = arcana_desktop.window.default_config :: :: call
     let mut bounds = arcana_desktop.types.WindowBounds :: size = size, position = cfg.bounds.position, visible = cfg.bounds.visible :: call
     bounds.min_size = cfg.bounds.min_size
@@ -351,19 +351,19 @@ export fn open_window(edit cx: arcana_desktop.types.AppContext, title: Str, size
     cfg.bounds = bounds
     return arcana_desktop.app.open_window_cfg :: cx, cfg :: call
 
-export fn open_window_cfg(edit cx: arcana_desktop.types.AppContext, read cfg: arcana_desktop.types.WindowConfig) -> Result[arcana_desktop.types.Window, Str]:
+export fn open_window_cfg(edit cx: arcana_desktop.types.AppContext, read cfg: arcana_desktop.types.WindowConfig) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     let opened = arcana_desktop.window.open_in :: cx.runtime.session, cfg :: call
     return match opened:
         Result.Ok(win) => open_window_cfg_ready :: cx, cfg, win :: call
-        Result.Err(err) => Result.Err[arcana_desktop.types.Window, Str] :: err :: call
+        Result.Err(err) => Result.Err[arcana_winapi.desktop_handles.Window, Str] :: err :: call
 
-fn open_window_cfg_ready(edit cx: arcana_desktop.types.AppContext, read cfg: arcana_desktop.types.WindowConfig, take win: arcana_desktop.types.Window) -> Result[arcana_desktop.types.Window, Str]:
+fn open_window_cfg_ready(edit cx: arcana_desktop.types.AppContext, read cfg: arcana_desktop.types.WindowConfig, take win: arcana_winapi.desktop_handles.Window) -> Result[arcana_winapi.desktop_handles.Window, Str]:
     let win_id = arcana_desktop.window.id :: win :: call
     if cfg.bounds.visible:
         arcana_desktop.app.owner_queue_redraw :: win_id :: call
-    return Result.Ok[arcana_desktop.types.Window, Str] :: win :: call
+    return Result.Ok[arcana_winapi.desktop_handles.Window, Str] :: win :: call
 
-fn redraw_window(take win: arcana_desktop.types.Window):
+fn redraw_window(take win: arcana_winapi.desktop_handles.Window):
     let mut win = win
     arcana_desktop.window.request_redraw :: win :: call
 
@@ -417,7 +417,7 @@ fn apply_close_id(edit cx: arcana_desktop.types.AppContext, read id: arcana_desk
         Option.Some(win) => apply_close_id_ready :: win :: call
         Option.None => 0
 
-fn apply_close_id_ready(take win: arcana_desktop.types.Window):
+fn apply_close_id_ready(take win: arcana_winapi.desktop_handles.Window):
     let mut win = win
     let _ = arcana_desktop.window.close :: win :: call
 
@@ -426,7 +426,7 @@ fn apply_redraw_id(edit cx: arcana_desktop.types.AppContext, read id: arcana_des
         Option.Some(win) => apply_redraw_id_ready :: win :: call
         Option.None => 0
 
-fn apply_redraw_id_ready(take win: arcana_desktop.types.Window):
+fn apply_redraw_id_ready(take win: arcana_winapi.desktop_handles.Window):
     redraw_window :: win :: call
 
 fn sync_window_lifetime(edit cx: arcana_desktop.types.AppContext):
@@ -452,7 +452,7 @@ fn owner_wait_timeout(read app_loop: arcana_desktop.types.AppLoop) -> Int:
     return arcana_desktop.app.wait_timeout_for_flow :: DesktopAppState.cx.control.control_flow, app_loop :: call
 
 DesktopAppState
-fn owner_next_frame(read app_loop: arcana_desktop.types.AppLoop) -> arcana_desktop.types.FrameInput:
+fn owner_next_frame(read app_loop: arcana_desktop.types.AppLoop) -> arcana_winapi.desktop_handles.FrameInput:
     let timeout = arcana_desktop.app.owner_wait_timeout :: app_loop :: call
     let mut session = DesktopAppState.cx.runtime.session
     let frame = match timeout:
@@ -483,7 +483,7 @@ fn owner_apply_pending_actions():
     DesktopAppState.cx = cx
 
 DesktopAppState
-fn owner_run_frame[A, where arcana_desktop.app.Application[A]](edit app: A, edit frame: arcana_desktop.types.FrameInput):
+fn owner_run_frame[A, where arcana_desktop.app.Application[A]](edit app: A, edit frame: arcana_winapi.desktop_handles.FrameInput):
     while true:
         let next = arcana_desktop.events.poll :: frame :: call
         if next :: :: is_none:
@@ -525,7 +525,7 @@ fn run_with_window[A, where arcana_desktop.app.Application[A]](edit app: A, take
         arcana_desktop.app.owner_run_frame :: app, frame :: call
     return arcana_desktop.app.finish_run :: app :: call
 
-fn run_open_failed(edit session: arcana_desktop.types.Session) -> Int:
+fn run_open_failed(edit session: arcana_winapi.desktop_handles.Session) -> Int:
     arcana_desktop.events.close_session :: session :: call
     return 1
 
@@ -542,7 +542,7 @@ fn run_open_failed_launch(read launch: arcana_desktop.app.LaunchConfig) -> Int:
     let mut session = launch.session
     return arcana_desktop.app.run_open_failed :: session :: call
 
-fn run_with_window_ready[A, where arcana_desktop.app.Application[A]](edit app: A, read launch: arcana_desktop.app.LaunchConfig, take value: arcana_desktop.types.Window) -> Int:
+fn run_with_window_ready[A, where arcana_desktop.app.Application[A]](edit app: A, read launch: arcana_desktop.app.LaunchConfig, take value: arcana_winapi.desktop_handles.Window) -> Int:
     let main_window_id = arcana_desktop.window.id :: value :: call
     let mut runtime = arcana_desktop.types.RuntimeContext :: session = launch.session, wake = launch.wake, main_window_id = main_window_id :: call
     runtime.main_window = value
@@ -551,3 +551,6 @@ fn run_with_window_ready[A, where arcana_desktop.app.Application[A]](edit app: A
         let mut main_window = run.runtime.main_window
         arcana_desktop.window.request_redraw :: main_window :: call
     return arcana_desktop.app.run_with_window :: app, run :: call
+
+
+

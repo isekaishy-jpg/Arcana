@@ -1,7 +1,7 @@
 import arcana_text.assets
 import arcana_text.types
 import std.collections.list
-import std.path
+import arcana_process.path
 
 export enum MonaspaceFamily:
     Argon
@@ -45,8 +45,8 @@ export fn file_name(read family: arcana_text.monaspace.MonaspaceFamily, read for
     return (arcana_text.monaspace.family_name :: family :: call) + " Var.ttf"
 
 export fn variable_font_path(read family: arcana_text.monaspace.MonaspaceFamily) -> Str:
-    let family_dir = std.path.join :: (arcana_text.assets.monaspace_variable_root :: :: call), (arcana_text.monaspace.family_name :: family :: call) :: call
-    return std.path.join :: family_dir, (arcana_text.monaspace.file_name :: family, (arcana_text.monaspace.MonaspaceForm.Variable :: :: call) :: call) :: call
+    let family_dir = arcana_process.path.join :: (arcana_text.assets.monaspace_variable_root :: :: call), (arcana_text.monaspace.family_name :: family :: call) :: call
+    return arcana_process.path.join :: family_dir, (arcana_text.monaspace.file_name :: family, (arcana_text.monaspace.MonaspaceForm.Variable :: :: call) :: call) :: call
 
 export fn feature_tag(read feature: arcana_text.monaspace.MonaspaceFeature) -> Str:
     return match feature:

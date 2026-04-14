@@ -3,6 +3,8 @@ param(
     [string]$Head = "HEAD"
 )
 
+$exceptionFile = ".ci/language_freeze_exceptions.txt"
+
 if ($env:ARCANA_ALLOW_LANGUAGE_FREEZE_EXCEPTION -eq "1") {
     Write-Host "language freeze exception enabled"
     exit 0
@@ -38,8 +40,23 @@ if (-not $changed) {
 $normalized = $changed | ForEach-Object { $_.Replace("\", "/").Trim() } | Where-Object { $_ }
 $hits = $normalized | Where-Object { $protected -contains $_ }
 
-if ($hits.Count -gt 0) {
-    Write-Error ("language freeze violation: changed protected files without ARCANA_ALLOW_LANGUAGE_FREEZE_EXCEPTION=1:`n" + ($hits -join "`n"))
+$allowed = @()
+if (Test-Path $exceptionFile) {
+    $allowed = Get-Content $exceptionFile |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and -not $_.StartsWith("#") } |
+        ForEach-Object { $_.Replace("\", "/") }
+}
+
+$remaining = $hits | Where-Object { $allowed -notcontains $_ }
+
+if ($remaining.Count -gt 0) {
+    $message = "language freeze violation: changed protected files without ARCANA_ALLOW_LANGUAGE_FREEZE_EXCEPTION=1"
+    if ($allowed.Count -gt 0) {
+        $message += " or an entry in $exceptionFile"
+    }
+    $message += ":`n" + ($remaining -join "`n")
+    Write-Error $message
     exit 1
 }
 

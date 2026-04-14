@@ -7,7 +7,7 @@ This scope freezes the rewrite direction for `arcana_text` as the Arcana-owned t
 ## Role
 
 - `arcana_text` is the public Arcana-owned paragraph/font/layout boundary.
-- It sits above low-level substrate such as `std.canvas`, `std.text`, and `std.fs`.
+- It sits above low-level substrate such as `arcana_graphics.arcsb`, `std.text`, and `arcana_process.fs`.
 - It is analogous in role breadth to SkParagraph: paragraph construction, styled runs, layout, metrics, hit testing, selection boxes, placeholders, and text paint.
 
 ## Boundaries
@@ -18,7 +18,7 @@ This scope freezes the rewrite direction for `arcana_text` as the Arcana-owned t
 - `arcana_text` must not depend on `arcana_desktop` for its public contract.
 - `arcana_text` is a normal source library dependency; runtime must not special-case `arcana_text` by package name or fixed text opaque families.
 - Host-installed font discovery belongs in a generic binding grimoire such as `arcana_winapi`, not in text-specific runtime substrate.
-- File IO remains in `std.fs`; `arcana_text` may layer asset helpers on top, but it must not redefine host-core file APIs.
+- File IO remains in `arcana_process.fs`; `arcana_text` may layer asset helpers on top, but it must not redefine host-core file APIs.
 
 ## Public Surface
 

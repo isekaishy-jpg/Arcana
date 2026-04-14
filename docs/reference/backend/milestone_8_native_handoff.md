@@ -52,9 +52,9 @@ Runtime-side support already exists for native bundles:
 - runtime package image embedding/loading
 - typed native ABI conversion in `crates/arcana-runtime/src/native_abi.rs`
 - stable entrypoint execution keyed by routine identity rather than loose symbol lookup
-- generated native entry/runtime fallback now calls `current_process_runtime_host()`
-- on Windows, `current_process_runtime_host()` constructs `NativeProcessHost`, which provides real stdout/stderr/stdin, time/sleep, Win32 window/input/canvas/event behavior, BMP image loading/blitting, and WinMM WAV playback for emitted bundles
-- non-Windows callers still fall back to `BufferedHost`, but the Milestone 8 native `windows-exe` / `windows-dll` path now runs on the real Windows host seam instead of the synthetic app/runtime host
+- generated native entry/runtime fallback now calls `current_process_core_host()`
+- `current_process_core_host()` constructs the narrow current-process runtime core host, which only provides stdout/stderr/stdin plus monotonic time and sleep
+- desktop, graphics, audio, and process/filesystem behavior now flow through `arcana_winapi` bindings and the public consumer grimoires rather than a runtime-owned Win32 host crate
 
 ## What Is Implemented Now
 
@@ -66,8 +66,8 @@ Bundle/runtime contract:
 - native bundles stage and run without Arcana installed
 - runtime package images are generated at native build time and embedded into the emitted native project
 - native bundle manifests are backend-owned artifacts
-- generated native runtime fallback uses the current-process runtime host rather than a synthetic buffered launcher host
-- emitted native bundles now execute real host-backed window/canvas and audio flows on Windows
+- generated native runtime fallback uses the current-process runtime core host rather than a synthetic buffered launcher host
+- emitted native bundles now execute desktop/software-buffer and audio flows through `arcana_winapi` plus consumer packages on Windows
 
 Direct native lowering:
 - direct lowering supports local `let` blocks, including mutable locals
@@ -81,17 +81,13 @@ Direct native lowering:
 - direct lowering still falls back to runtime dispatch when the routine/body shape is outside the supported subset
 
 Typed DLL ABI:
-- current ABI covers `Int`, `Bool`, `Str`, `Array[Int]`, `Pair[...]`, and `Unit`
+- current ABI covers `Int`, `Bool`, `Str`, `Bytes`, `ByteBuffer`, `Utf16`, `Utf16Buffer`, `View[...]`, `Pair[...]`, and `Unit`
 - exports are package-specific typed native functions, not the old generic JSON shim ABI
 
-Native runtime-host coverage:
-- `NativeProcessHost` delegates host-core filesystem/path/process behavior through `BufferedHost` where that is already rewrite-owned and sufficient, but owns the real OS-bound window/canvas/audio/time/stdin/stdout seams itself
-- canvas support covers fill/rect/line/circle/label/present plus BMP image load and blit/blit_scaled/blit_region
-- audio support covers default-output selection, WAV decode to PCM16, playback start/stop/pause/resume, looping, gain, and position queries
-- playback-open failure paths now clean up native audio handles before returning errors instead of leaking partially opened playback state
-- audio `stop` and `output_close` now follow the approved consuming-lifecycle contract in both the native host and the buffered host used by synthetic runtime tests
-- Win32 window-class registration is now module-specific, so multiple Arcana-generated DLLs can create windows in the same host process without colliding on a shared class name
-- native asset decoders now have direct unit coverage and stricter overflow/shape validation in addition to the emitted-binary smokes
+Native runtime/core-host coverage:
+- the runtime core-host is intentionally narrow and only covers stdout/stderr/stdin plus monotonic time and sleep
+- Win32 window/session/event/input/clipboard/text-input, software-surface mapping/present, audio device/playback, and process/filesystem operations now live below `arcana_winapi` and above it in `arcana_desktop`, `arcana_graphics.arcsb`, `arcana_audio`, and `arcana_process`
+- emitted-binary smokes now validate those consumer lanes instead of a runtime-owned Win32 host crate
 
 ## Recent Slices
 
@@ -118,12 +114,9 @@ The latest Milestone 8 slice also closed a package-planning hole and broadened e
 - native exe smoke coverage now includes app-substrate window/canvas and audio apps running as emitted bundles, not only trivial helper-style programs
 
 The completion slice closed the remaining real-host gap:
-- `arcana-runtime` now exposes `current_process_runtime_host()`
-- generated `windows-exe` / `windows-dll` runtime fallback code now constructs that host instead of hardcoding `BufferedHost`
-- the Windows implementation is `NativeProcessHost`, a real current-process runtime host backed by Win32 window/canvas/input/events plus WinMM audio
-- native visual smoke now stages and loads a real BMP image from the emitted bundle and blits it through the real canvas host path
-- native audio smoke now stages and loads a real WAV file from the emitted bundle and plays it through a real default audio output path
-- `native_host.rs` now has direct unit tests for BMP/WAV decoding and stricter size/shape validation so the host seam is covered below the end-to-end bundle tests
+- `arcana-runtime` now exposes `current_process_core_host()`
+- generated `windows-exe` / `windows-dll` runtime fallback code now constructs that narrow core host instead of hardcoding `BufferedHost`
+- the old runtime-owned Windows host crate has been removed; native visual and audio bundle smoke now validate the binding-backed `arcana_winapi` plus consumer-package path instead
 
 The follow-up hardening slice closed the review findings from the first completion pass:
 - `play_buffer` cleanup now closes native audio state on post-open failures instead of leaking a `waveOut` handle or leaving partially started playback behind

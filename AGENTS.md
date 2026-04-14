@@ -1,30 +1,33 @@
 # Arcana Repo Instructions
 
-## Rewrite Authority Order
+## Authority Order
 
-When judging rewrite architecture, selfhost readiness, or whether something is "current Arcana behavior", use this order:
+Use this order when judging current Arcana behavior:
 
 1. `POLICY.md`
-2. `docs/specs/spec-status.md` and any spec files it marks frozen or approved
-3. `PLAN.md` and `docs/rewrite-roadmap.md` for sequencing and milestone intent
-4. `crates/*` for the actual Rust rewrite implementation
-5. `std/`, `grimoires/reference/*`, and conformance fixtures only as carried source corpus unless an approved scope explicitly ratifies the surface being discussed
+2. approved/frozen specs under `docs/specs/`
+3. `PLAN.md` and `docs/rewrite-roadmap.md`
+4. `crates/*`
+5. `llm.md`
+6. active first-party source packages: `std/`, `grimoires/arcana/*`, `grimoires/libs/*`
 
-## Review Boundary
+## Current Repo Reality
 
-- Do not treat imported `std`, `grimoires/reference/*`, or generated direct-emit snapshots as rewrite architecture evidence by themselves.
-- For architecture reviews and selfhost-progress reviews, findings must distinguish:
-  - crate-side rewrite implementation
-  - approved first-party contract
-  - transitional carried corpus
-- If a problem exists only in carried corpus, label it as `corpus-only` or `transitional`, not as crate-side rewrite dependence.
-- If a carried corpus surface conflicts with approved docs, the docs and `crates/*` win; the corpus becomes migration work, not architecture authority.
+- `std/` is first-party rewrite surface.
+- `grimoires/arcana/*` is the core/tooling grimoire layer.
+- `grimoires/libs/*` is the app/media grimoire layer.
+- `docs/reference/*`, `examples/`, and `conformance/` are supporting material, not primary architecture authority by themselves.
 
-## Imported Corpus Hotspots
+## Use `llm.md`
 
-- `std/` and `grimoires/reference/*` are still useful for behavioral checks and migration pressure.
-- `grimoires/reference/toolchain/arcana-compiler-core/src/direct_emit_specs_*` are carried/generated artifacts and should not be used as primary evidence for current rewrite architecture.
-- If a review needs to talk about these paths, state explicitly whether the issue is:
-  - rewrite-crate behavior
-  - approved contract mismatch
-  - carried-corpus drift
+- `llm.md` is the quick guide for Arcana source form, crate lookup, and common parser/frontend/runtime gotchas.
+- It helps with source work, but it does not outrank approved specs or `crates/*`.
+
+## Review Rule
+
+- Distinguish:
+  - approved contract
+  - crate implementation
+  - active first-party source package shape
+  - examples/fixtures/reference drift
+- If source packages or examples conflict with approved docs and `crates/*`, treat that as drift or implementation debt, not silent contract change.

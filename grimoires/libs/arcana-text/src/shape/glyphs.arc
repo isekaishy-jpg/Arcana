@@ -5,38 +5,38 @@ import arcana_text.shape.styles
 import arcana_text.shape.tokens
 import arcana_text.shape.types
 import arcana_text.text_units
-import std.bytes
+import std.text
 import std.collections.array
 import std.collections.list
-import std.fs
+import arcana_process.fs
 import std.option
-import std.path
+import arcana_process.path
 import std.text
 use std.option.Option
 
 fn shape_probe_flag_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
 
 fn shape_probe_log_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "text_shape_probe.log" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "text_shape_probe.log" :: call
 
 fn shape_probe_enabled() -> Bool:
-    return std.fs.is_file :: (shape_probe_flag_path :: :: call) :: call
+    return arcana_process.fs.is_file :: (shape_probe_flag_path :: :: call) :: call
 
 fn shape_probe_append(line: Str):
     if not (shape_probe_enabled :: :: call):
         return
-    let _ = std.fs.mkdir_all :: (std.path.parent :: (shape_probe_log_path :: :: call) :: call) :: call
-    let opened = std.fs.stream_open_write :: (shape_probe_log_path :: :: call), true :: call
+    let _ = arcana_process.fs.mkdir_all :: (arcana_process.path.parent :: (shape_probe_log_path :: :: call) :: call) :: call
+    let opened = arcana_process.fs.stream_open_write :: (shape_probe_log_path :: :: call), true :: call
     return match opened:
         std.result.Result.Ok(value) => shape_probe_append_ready :: value, line :: call
         std.result.Result.Err(_) => 0
 
-fn shape_probe_append_ready(take value: std.fs.FileStream, line: Str):
+fn shape_probe_append_ready(take value: arcana_winapi.process_handles.FileStream, line: Str):
     let mut stream = value
-    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
-    let _ = std.fs.stream_write :: stream, bytes :: call
-    let _ = std.fs.stream_close :: stream :: call
+    let bytes = std.text.bytes_from_str_utf8 :: (line + "\n") :: call
+    let _ = arcana_process.fs.stream_write :: stream, bytes :: call
+    let _ = arcana_process.fs.stream_close :: stream :: call
 
 export record AppendGlyphRequest:
     text: Str
@@ -365,24 +365,24 @@ fn bidi_scalar_slice(read scalars: List[arcana_text.shape.glyphs.BidiScalar], st
 fn utf8_scalar_from_codepoint(codepoint: Int) -> Str:
     if codepoint <= 0:
         return ""
-    let mut buf = std.bytes.new_buf :: :: call
+    let mut buf = std.text.bytes_builder :: :: call
     if codepoint < 128:
-        let _ = std.bytes.buf_push :: buf, codepoint :: call
-        return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: buf :: call) :: call
+        let _ = std.text.bytes_builder_push :: buf, codepoint :: call
+        return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: buf :: call) :: call
     if codepoint < 2048:
-        let _ = std.bytes.buf_push :: buf, (192 + (codepoint / 64)) :: call
-        let _ = std.bytes.buf_push :: buf, (128 + (codepoint % 64)) :: call
-        return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: buf :: call) :: call
+        let _ = std.text.bytes_builder_push :: buf, (192 + (codepoint / 64)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (128 + (codepoint % 64)) :: call
+        return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: buf :: call) :: call
     if codepoint < 65536:
-        let _ = std.bytes.buf_push :: buf, (224 + (codepoint / 4096)) :: call
-        let _ = std.bytes.buf_push :: buf, (128 + ((codepoint / 64) % 64)) :: call
-        let _ = std.bytes.buf_push :: buf, (128 + (codepoint % 64)) :: call
-        return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: buf :: call) :: call
-    let _ = std.bytes.buf_push :: buf, (240 + (codepoint / 262144)) :: call
-    let _ = std.bytes.buf_push :: buf, (128 + ((codepoint / 4096) % 64)) :: call
-    let _ = std.bytes.buf_push :: buf, (128 + ((codepoint / 64) % 64)) :: call
-    let _ = std.bytes.buf_push :: buf, (128 + (codepoint % 64)) :: call
-    return std.bytes.to_str_utf8 :: (std.bytes.buf_to_array :: buf :: call) :: call
+        let _ = std.text.bytes_builder_push :: buf, (224 + (codepoint / 4096)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (128 + ((codepoint / 64) % 64)) :: call
+        let _ = std.text.bytes_builder_push :: buf, (128 + (codepoint % 64)) :: call
+        return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: buf :: call) :: call
+    let _ = std.text.bytes_builder_push :: buf, (240 + (codepoint / 262144)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (128 + ((codepoint / 4096) % 64)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (128 + ((codepoint / 64) % 64)) :: call
+    let _ = std.text.bytes_builder_push :: buf, (128 + (codepoint % 64)) :: call
+    return std.text.bytes_to_str_utf8 :: (std.text.bytes_builder_freeze :: buf :: call) :: call
 
 fn mirrored_codepoint(codepoint: Int) -> Int:
     return match codepoint:
@@ -459,11 +459,11 @@ fn bidi_close_bracket_for(codepoint: Int) -> Int:
         _ => 0
 
 fn bidi_text_is_simple_ascii(read text: Str) -> Bool:
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     let mut index = 0
     while index < total:
-        let value = std.bytes.at :: bytes, index :: call
+        let value = std.text.bytes_at :: bytes, index :: call
         if value >= 128:
             return false
         if value < 32 and value != 9 and value != 10 and value != 13:
@@ -494,12 +494,12 @@ fn bidi_ascii_class_for_byte(value: Int) -> Str:
 
 fn bidi_ascii_scalars(read text: Str) -> List[arcana_text.shape.glyphs.BidiScalar]:
     let mut out = std.collections.list.empty[arcana_text.shape.glyphs.BidiScalar] :: :: call
-    let bytes = std.bytes.from_str_utf8 :: text :: call
-    let total = std.bytes.len :: bytes :: call
+    let bytes = std.text.bytes_from_str_utf8 :: text :: call
+    let total = std.text.bytes_len :: bytes :: call
     let mut index = 0
     while index < total:
-        let value = std.bytes.at :: bytes, index :: call
-        let end = match value == 13 and (index + 1) < total and (std.bytes.at :: bytes, index + 1 :: call) == 10:
+        let value = std.text.bytes_at :: bytes, index :: call
+        let end = match value == 13 and (index + 1) < total and (std.text.bytes_at :: bytes, index + 1 :: call) == 10:
             true => index + 2
             false => index + 1
         let mut scalar = arcana_text.shape.glyphs.BidiScalar :: start = index, end = end, class = (arcana_text.shape.glyphs.bidi_ascii_class_for_byte :: value :: call) :: call
@@ -1441,10 +1441,10 @@ fn mirrored_scalar_text(text: Str, read direction: arcana_text.types.TextDirecti
         "}" => "{"
         "<" => ">"
         ">" => "<"
-        "«" => "»"
-        "»" => "«"
-        "‹" => "›"
-        "›" => "‹"
+        "Ã‚Â«" => "Ã‚Â»"
+        "Ã‚Â»" => "Ã‚Â«"
+        "Ã¢â‚¬Â¹" => "Ã¢â‚¬Âº"
+        "Ã¢â‚¬Âº" => "Ã¢â‚¬Â¹"
         _ => text
 
 fn default_feature(tag: Str) -> arcana_text.types.FontFeature:
@@ -2709,3 +2709,4 @@ export fn shape_token(edit fonts: arcana_text.fonts.FontSystem, read token: arca
     for run in runs:
         return run
     return arcana_text.shape.glyphs.shape_placeholder :: span_style, (arcana_text.shape.types.fallback_placeholder :: token.range :: call) :: call
+

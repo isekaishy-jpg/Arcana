@@ -490,7 +490,12 @@ fn collect_expr_callees(
             collect_expr_callees(package, current_module_id, index, out);
         }
         ExecExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             collect_expr_callees(package, current_module_id, expr, out);
             if let Some(start) = start {
@@ -498,6 +503,12 @@ fn collect_expr_callees(
             }
             if let Some(end) = end {
                 collect_expr_callees(package, current_module_id, end, out);
+            }
+            if let Some(len) = len {
+                collect_expr_callees(package, current_module_id, len, out);
+            }
+            if let Some(stride) = stride {
+                collect_expr_callees(package, current_module_id, stride, out);
             }
         }
         ExecExpr::Range { start, end, .. } => {
@@ -599,24 +610,15 @@ fn runtime_requirement_for_intrinsic_impl(intrinsic_impl: &str) -> Option<&'stat
         "IoPrint" | "IoEprint" | "IoFlushStdout" | "IoFlushStderr" | "IoStdinReadLineTry" => {
             "std.kernel.io"
         }
-        name if name.starts_with("HostArg") => "std.kernel.args",
-        name if name.starts_with("HostEnv") => "std.kernel.env",
-        name if name.starts_with("HostPath") => "std.kernel.path",
-        name if name.starts_with("HostFs") => "std.kernel.fs",
-        name if name.starts_with("Window")
-            || name.starts_with("Canvas")
-            || name.starts_with("Image")
-            || name.starts_with("Input") =>
-        {
-            "std.kernel.gfx"
-        }
-        name if name.starts_with("Events") => "std.kernel.events",
         name if name.starts_with("HostTime") => "std.kernel.time",
         name if name.starts_with("Concurrent") => "std.kernel.concurrency",
         name if name.starts_with("Memory") => "std.kernel.memory",
-        name if name.starts_with("Audio") => "std.kernel.audio",
-        name if name.starts_with("HostProcess") => "std.kernel.process",
-        name if name.starts_with("HostText") || name.starts_with("HostBytes") => "std.kernel.text",
+        name if name.starts_with("HostText")
+            || name.starts_with("HostBytes")
+            || name.starts_with("HostUtf16") =>
+        {
+            "std.kernel.text"
+        }
         "ListNew" | "ListLen" | "ListPush" | "ListPop" | "ListTryPopOr" | "ArrayNew"
         | "ArrayLen" | "ArrayFromList" | "ArrayToList" | "MapNew" | "MapLen" | "MapHas"
         | "MapGet" | "MapSet" | "MapRemove" | "MapTryGetOr" => "std.kernel.collections",
@@ -796,7 +798,10 @@ mod tests {
                         ExecStmt::Recycle {
                             default_modifier: Some(ExecHeadedModifier {
                                 kind: "return".to_string(),
-                                payload: Some(call_expr("std.io#sym-0", &["std", "io", "print"])),
+                                payload: Some(call_expr(
+                                    "arcana_process.io#sym-0",
+                                    &["arcana_process", "io", "print"],
+                                )),
                             }),
                             lines: vec![ExecRecycleLine {
                                 kind: ExecRecycleLineKind::Expr {
@@ -808,8 +813,8 @@ mod tests {
                                 modifier: Some(ExecHeadedModifier {
                                     kind: "return".to_string(),
                                     payload: Some(call_expr(
-                                        "std.args#sym-0",
-                                        &["std", "args", "count"],
+                                        "arcana_process.args#sym-0",
+                                        &["arcana_process", "args", "count"],
                                     )),
                                 }),
                             }],
@@ -828,21 +833,24 @@ mod tests {
                                         mutable: false,
                                         name: "value".to_string(),
                                         gate: call_expr(
-                                            "std.fs#sym-0",
-                                            &["std", "fs", "read_text"],
+                                            "arcana_process.fs#sym-0",
+                                            &["arcana_process", "fs", "read_text"],
                                         ),
                                     },
                                     modifier: None,
                                 },
                                 ExecBindLine {
                                     kind: ExecBindLineKind::Require {
-                                        expr: call_expr("std.env#sym-0", &["std", "env", "get"]),
+                                        expr: call_expr(
+                                            "arcana_process.env#sym-0",
+                                            &["arcana_process", "env", "get"],
+                                        ),
                                     },
                                     modifier: Some(ExecHeadedModifier {
                                         kind: "return".to_string(),
                                         payload: Some(call_expr(
-                                            "std.path#sym-0",
-                                            &["std", "path", "cwd"],
+                                            "arcana_process.path#sym-0",
+                                            &["arcana_process", "path", "cwd"],
                                         )),
                                     }),
                                 },
@@ -858,16 +866,16 @@ mod tests {
                                 target: ExecAssignTarget::Index {
                                     target: Box::new(ExecAssignTarget::Name("slots".to_string())),
                                     index: call_expr(
-                                        "std.process#sym-0",
-                                        &["std", "process", "status"],
+                                        "arcana_process.process#sym-0",
+                                        &["arcana_process", "process", "status"],
                                     ),
                                 },
                             }),
                             default_modifier: Some(ExecHeadedModifier {
                                 kind: "return".to_string(),
                                 payload: Some(call_expr(
-                                    "std.audio#sym-0",
-                                    &["std", "audio", "default_output"],
+                                    "std.time#sym-0",
+                                    &["std", "time", "now_ms"],
                                 )),
                             }),
                             lines: vec![ExecConstructLine {
@@ -908,8 +916,8 @@ mod tests {
                     ],
                 ),
                 routine(
-                    "std.io",
-                    "std.io#sym-0",
+                    "arcana_process.io",
+                    "arcana_process.io#sym-0",
                     "print",
                     Some("IoPrint"),
                     Vec::new(),
@@ -922,10 +930,10 @@ mod tests {
                     Vec::new(),
                 ),
                 routine(
-                    "std.args",
-                    "std.args#sym-0",
+                    "arcana_process.args",
+                    "arcana_process.args#sym-0",
                     "count",
-                    Some("HostArgCount"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
@@ -936,38 +944,31 @@ mod tests {
                     Vec::new(),
                 ),
                 routine(
-                    "std.fs",
-                    "std.fs#sym-0",
+                    "arcana_process.fs",
+                    "arcana_process.fs#sym-0",
                     "read_text",
-                    Some("HostFsReadTextTry"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
-                    "std.env",
-                    "std.env#sym-0",
+                    "arcana_process.env",
+                    "arcana_process.env#sym-0",
                     "get",
-                    Some("HostEnvGet"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
-                    "std.path",
-                    "std.path#sym-0",
+                    "arcana_process.path",
+                    "arcana_process.path#sym-0",
                     "cwd",
-                    Some("HostPathCwd"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
-                    "std.process",
-                    "std.process#sym-0",
+                    "arcana_process.process",
+                    "arcana_process.process#sym-0",
                     "status",
-                    Some("HostProcessExecStatus"),
-                    Vec::new(),
-                ),
-                routine(
-                    "std.audio",
-                    "std.audio#sym-0",
-                    "default_output",
-                    Some("AudioDefaultOutputTry"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
@@ -1000,16 +1001,10 @@ mod tests {
         assert_eq!(
             derive_runtime_requirements(&package),
             vec![
-                "std.kernel.args".to_string(),
-                "std.kernel.audio".to_string(),
                 "std.kernel.collections".to_string(),
                 "std.kernel.concurrency".to_string(),
-                "std.kernel.env".to_string(),
-                "std.kernel.fs".to_string(),
                 "std.kernel.io".to_string(),
                 "std.kernel.memory".to_string(),
-                "std.kernel.path".to_string(),
-                "std.kernel.process".to_string(),
                 "std.kernel.text".to_string(),
                 "std.kernel.time".to_string(),
             ]
@@ -1081,8 +1076,8 @@ mod tests {
                                 default_modifier: Some(ExecHeadedModifier {
                                     kind: "return".to_string(),
                                     payload: Some(call_expr(
-                                        "std.io#sym-0",
-                                        &["std", "io", "print"],
+                                        "arcana_process.io#sym-0",
+                                        &["arcana_process", "io", "print"],
                                     )),
                                 }),
                                 lines: vec![ExecConstructLine {
@@ -1095,8 +1090,8 @@ mod tests {
                                     modifier: Some(ExecHeadedModifier {
                                         kind: "default".to_string(),
                                         payload: Some(call_expr(
-                                            "std.args#sym-0",
-                                            &["std", "args", "count"],
+                                            "arcana_process.args#sym-0",
+                                            &["arcana_process", "args", "count"],
                                         )),
                                     }),
                                 }],
@@ -1108,8 +1103,8 @@ mod tests {
                     ],
                 ),
                 routine(
-                    "std.io",
-                    "std.io#sym-0",
+                    "arcana_process.io",
+                    "arcana_process.io#sym-0",
                     "print",
                     Some("IoPrint"),
                     Vec::new(),
@@ -1122,10 +1117,10 @@ mod tests {
                     Vec::new(),
                 ),
                 routine(
-                    "std.args",
-                    "std.args#sym-0",
+                    "arcana_process.args",
+                    "arcana_process.args#sym-0",
                     "count",
-                    Some("HostArgCount"),
+                    None,
                     Vec::new(),
                 ),
             ],
@@ -1136,11 +1131,7 @@ mod tests {
 
         assert_eq!(
             derive_runtime_requirements(&package),
-            vec![
-                "std.kernel.args".to_string(),
-                "std.kernel.io".to_string(),
-                "std.kernel.text".to_string(),
-            ]
+            vec!["std.kernel.io".to_string(), "std.kernel.text".to_string(),]
         );
     }
 
@@ -1201,13 +1192,6 @@ mod tests {
                     "std.text#sym-0",
                     "len_bytes",
                     Some("HostTextLenBytes"),
-                    Vec::new(),
-                ),
-                routine(
-                    "std.audio",
-                    "std.audio#sym-0",
-                    "default_output",
-                    Some("AudioDefaultOutputTry"),
                     Vec::new(),
                 ),
             ],
@@ -1279,20 +1263,16 @@ mod tests {
                     "core#sym-0",
                     "read_file",
                     None,
-                    vec![call("std.fs#sym-0", &["std", "fs", "read_text"])],
+                    vec![call(
+                        "arcana_process.fs#sym-0",
+                        &["arcana_process", "fs", "read_text"],
+                    )],
                 ),
                 routine(
-                    "std.fs",
-                    "std.fs#sym-0",
+                    "arcana_process.fs",
+                    "arcana_process.fs#sym-0",
                     "read_text",
-                    Some("HostFsReadTextTry"),
-                    Vec::new(),
-                ),
-                routine(
-                    "std.window",
-                    "std.window#sym-0",
-                    "open",
-                    Some("WindowOpenTry"),
+                    None,
                     Vec::new(),
                 ),
             ],
@@ -1301,10 +1281,7 @@ mod tests {
             owners: Vec::new(),
         };
 
-        assert_eq!(
-            derive_runtime_requirements(&package),
-            vec!["std.kernel.fs".to_string()]
-        );
+        assert!(derive_runtime_requirements(&package).is_empty());
     }
 
     #[test]
@@ -1350,11 +1327,14 @@ mod tests {
                     "core#sym-0",
                     "announce",
                     None,
-                    vec![call("std.io#sym-0", &["std", "io", "print"])],
+                    vec![call(
+                        "arcana_process.io#sym-0",
+                        &["arcana_process", "io", "print"],
+                    )],
                 ),
                 routine(
-                    "std.io",
-                    "std.io#sym-0",
+                    "arcana_process.io",
+                    "arcana_process.io#sym-0",
                     "print",
                     Some("IoPrint"),
                     Vec::new(),
@@ -1417,20 +1397,16 @@ mod tests {
                     "core#sym-0",
                     "announce",
                     None,
-                    vec![call("std.io#sym-0", &["std", "io", "print"])],
+                    vec![call(
+                        "arcana_process.io#sym-0",
+                        &["arcana_process", "io", "print"],
+                    )],
                 ),
                 routine(
-                    "std.io",
-                    "std.io#sym-0",
+                    "arcana_process.io",
+                    "arcana_process.io#sym-0",
                     "print",
                     Some("IoPrint"),
-                    Vec::new(),
-                ),
-                routine(
-                    "std.audio",
-                    "std.audio#sym-0",
-                    "default_output",
-                    Some("AudioDefaultOutputTry"),
                     Vec::new(),
                 ),
             ],

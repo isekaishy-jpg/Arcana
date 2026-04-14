@@ -17,24 +17,25 @@ Scope notes:
 - Desktop/app-shell grimoire
   - rewrite-owned package: `grimoires/libs/arcana-desktop`
   - responsibility: Arcana-owned public desktop/window/event-loop boundary for native desktop apps, with winit-class role breadth over rewrite-owned substrate rather than a thin wrapper above a separately-public raw desktop layer
-  - responsibility: may own the canonical session runner, raw window/session/event/wake contracts, blocking wait policy, multi-window coordination, input/timing helpers, monitor/clipboard helpers, event routing, frame-input snapshots, optional ECS-loop adapters, keybind/action helpers, and similar desktop-shell utilities if Arcana's rewrite-native layout folds those into one package
+  - responsibility: may own the canonical session runner, raw window/session/event/wake contracts, blocking wait policy, multi-window coordination, input/timing helpers, monitor helpers, clipboard helpers, event routing, frame-input snapshots, keybind/action helpers, IME/text-input hooks, and similar desktop-shell utilities if Arcana's rewrite-native layout folds those into one package
   - note: window events remain window-ID centric; `TargetedEvent.window_id` is the authoritative routing identity, and any higher-level "main window" convenience must stay phase-separated from callback dispatch and may only promote another live window after the callback/reconcile phase
-  - note: `std.window`, `std.input`, `std.events`, `std.canvas`, `std.time`, and `std.clipboard` remain rewrite-owned substrate and backend-support layers; future desktop apps and higher grimoires should normally treat `arcana_desktop` as the app-shell package boundary
+  - note: `arcana_desktop` is the public desktop shell boundary; the historical parallel std desktop shell is retired rather than kept as a second public lane
   - responsibility: must not absorb graphics/text draw policy that belongs in sibling grimoires above the shared low-level substrate
 - Graphics grimoire
   - rewrite-owned package: `grimoires/libs/arcana-graphics`
-  - responsibility: Arcana-owned 2D graphics/image boundary above `std.canvas`, with small skia-class role breadth rather than a thin wrapper over raw canvas primitives
+  - responsibility: Arcana-owned graphics/image boundary that may host multiple rendering backends, with small skia-class role breadth rather than a thin wrapper over retired canvas primitives
 - Text grimoire
   - rewrite-owned package: `grimoires/libs/arcana-text`
-  - responsibility: Arcana-owned text draw, shaping, layout, and text-asset boundary above `std.canvas`, `std.text`, and `std.fs`, with cosmic-text-class role breadth rather than label-only wrappers
-  - note: file IO remains in `std.fs`; this layer may add text-asset convenience rather than replace host-core file APIs
+  - responsibility: Arcana-owned text draw, shaping, layout, and text-asset boundary above graphics/backing surfaces plus `std.text` and `arcana_process.fs`, with cosmic-text-class role breadth rather than label-only wrappers
+  - note: file IO remains in `arcana_process.fs`; this layer may add text-asset convenience rather than replace host-core file APIs
 - Audio grimoire
   - rewrite-owned package: `grimoires/libs/arcana-audio`
-  - responsibility: Arcana-owned playback/audio boundary above `std.audio`, with miniaudio-class role breadth rather than a bootstrap-only shim
+  - responsibility: Arcana-owned public low-level audio boundary above the WinAPI-backed helper substrate, with miniaudio-class role breadth rather than a bootstrap-only shim
 
 ## Rules
 
 - Future Arcana-owned grimoires may add ergonomic layers, but they must consume the rewrite-owned std substrate rather than relying on compiler special cases.
+- Public owner grimoires may depend on binding-owned opaque handle types from `arcana_winapi`, but they must not keep duplicate handle declarations or alias-only public type paths alive once the binding-owned canonical modules exist.
 - If a future Arcana-owned grimoire repeatedly needs the same low-level capability, that may justify a std-scope update only when the need is clearly substrate-level.
 - Arcana-owned grimoire replacement or renaming is allowed before selfhost as long as the required role remains satisfied and the status ledger is updated.
 - Arcana-owned grimoire merging or splitting is allowed before selfhost as long as the required responsibilities remain satisfied and the status ledger is updated.

@@ -7,7 +7,9 @@ use arcana_cabi::{
     ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,
     ArcanaCabiBindingCallback, ArcanaCabiBindingCallbackEntryV1, ArcanaCabiBindingImport,
     ArcanaCabiBindingImportEntryV1, ArcanaCabiBindingImportFn, ArcanaCabiBindingLayout,
-    ArcanaCabiBindingLayoutEntryV1, ArcanaCabiBindingOpsV1, ArcanaCabiBindingParam,
+    ArcanaCabiBindingLayoutEntryV1, ArcanaCabiBindingMappedViewLenBytesFn,
+    ArcanaCabiBindingMappedViewOpsV1, ArcanaCabiBindingMappedViewReadByteFn,
+    ArcanaCabiBindingMappedViewWriteByteFn, ArcanaCabiBindingOpsV1, ArcanaCabiBindingParam,
     ArcanaCabiBindingRegisterCallbackFn, ArcanaCabiBindingSignature,
     ArcanaCabiBindingSignatureKind, ArcanaCabiBindingType, ArcanaCabiBindingUnregisterCallbackFn,
     ArcanaCabiBindingValueV1, ArcanaCabiChildOpsV1, ArcanaCabiChildRunEntrypointFn,
@@ -19,6 +21,7 @@ use arcana_cabi::{
     compare_binding_signatures, release_binding_output_value, validate_binding_callbacks,
     validate_binding_imports, validate_binding_layouts, validate_binding_write_backs,
 };
+use libloading::Library;
 use serde::Deserialize;
 
 const DISTRIBUTION_BUNDLE_FORMAT: &str = "arcana-distribution-bundle-v2";
@@ -673,6 +676,183 @@ impl RuntimeNativeProductCatalog {
         }
     }
 
+    pub(crate) fn invoke_binding_mapped_view_len_bytes(
+        &mut self,
+        package_id: &str,
+        callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
+        expected_imports: &[ArcanaCabiBindingSignature],
+        expected_callbacks: &[ArcanaCabiBindingSignature],
+        expected_layouts: &[ArcanaCabiBindingLayout],
+        handle: u64,
+    ) -> Result<usize, String> {
+        #[cfg(windows)]
+        {
+            let binding = self.ensure_active_binding(
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                expected_layouts,
+            )?;
+            let ops = binding.mapped_view_ops.ok_or_else(|| {
+                format!(
+                    "binding package `{}:{}` does not expose mapped-view ops",
+                    binding.product.package_name, binding.product.product_name
+                )
+            })?;
+            let mut out_len = 0usize;
+            let ok = unsafe { (ops.len_bytes)(binding.active.instance, handle, &mut out_len) };
+            if ok == 0 {
+                let err = read_library_last_error(
+                    binding.last_error_alloc,
+                    binding.owned_bytes_free,
+                )
+                .unwrap_or_else(|| {
+                    format!(
+                        "binding mapped-view byte length failed for `{}:{}` handle `{handle}`",
+                        binding.product.package_name, binding.product.product_name
+                    )
+                });
+                return Err(err);
+            }
+            native_product_probe(
+                "binding_mapped_view_len_bytes",
+                format!(
+                    "package={} product={} handle={} len={}",
+                    binding.product.package_name, binding.product.product_name, handle, out_len
+                ),
+            );
+            Ok(out_len)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                expected_layouts,
+                handle,
+            );
+            Err("native binding products currently require a Windows host".to_string())
+        }
+    }
+
+    pub(crate) fn invoke_binding_mapped_view_read_byte(
+        &mut self,
+        package_id: &str,
+        callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
+        expected_imports: &[ArcanaCabiBindingSignature],
+        expected_callbacks: &[ArcanaCabiBindingSignature],
+        expected_layouts: &[ArcanaCabiBindingLayout],
+        handle: u64,
+        index: usize,
+    ) -> Result<u8, String> {
+        #[cfg(windows)]
+        {
+            let binding = self.ensure_active_binding(
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                expected_layouts,
+            )?;
+            let ops = binding.mapped_view_ops.ok_or_else(|| {
+                format!(
+                    "binding package `{}:{}` does not expose mapped-view ops",
+                    binding.product.package_name, binding.product.product_name
+                )
+            })?;
+            let mut out_value = 0u8;
+            let ok =
+                unsafe { (ops.read_byte)(binding.active.instance, handle, index, &mut out_value) };
+            if ok == 0 {
+                let err =
+                    read_library_last_error(binding.last_error_alloc, binding.owned_bytes_free)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "binding mapped-view read failed for `{}:{}` handle `{handle}` index `{index}`",
+                                binding.product.package_name, binding.product.product_name
+                            )
+                        });
+                return Err(err);
+            }
+            Ok(out_value)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                expected_layouts,
+                handle,
+                index,
+            );
+            Err("native binding products currently require a Windows host".to_string())
+        }
+    }
+
+    pub(crate) fn invoke_binding_mapped_view_write_byte(
+        &mut self,
+        package_id: &str,
+        callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
+        expected_imports: &[ArcanaCabiBindingSignature],
+        expected_callbacks: &[ArcanaCabiBindingSignature],
+        expected_layouts: &[ArcanaCabiBindingLayout],
+        handle: u64,
+        index: usize,
+        value: u8,
+    ) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let binding = self.ensure_active_binding(
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                expected_layouts,
+            )?;
+            let ops = binding.mapped_view_ops.ok_or_else(|| {
+                format!(
+                    "binding package `{}:{}` does not expose mapped-view ops",
+                    binding.product.package_name, binding.product.product_name
+                )
+            })?;
+            let ok = unsafe { (ops.write_byte)(binding.active.instance, handle, index, value) };
+            if ok == 0 {
+                let err =
+                    read_library_last_error(binding.last_error_alloc, binding.owned_bytes_free)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "binding mapped-view write failed for `{}:{}` handle `{handle}` index `{index}`",
+                                binding.product.package_name, binding.product.product_name
+                            )
+                        });
+                return Err(err);
+            }
+            Ok(())
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                expected_layouts,
+                handle,
+                index,
+                value,
+            );
+            Err("native binding products currently require a Windows host".to_string())
+        }
+    }
+
     fn find_product_by_id(
         &self,
         package_id: &str,
@@ -692,7 +872,7 @@ impl RuntimeNativeProductCatalog {
         expected_callbacks: &[ArcanaCabiBindingSignature],
         expected_layouts: &[ArcanaCabiBindingLayout],
     ) -> Result<&mut ActiveBindingProduct, String> {
-        let matches = self
+        let exact_matches = self
             .products
             .iter()
             .filter(|product| {
@@ -700,6 +880,18 @@ impl RuntimeNativeProductCatalog {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let matches = if exact_matches.is_empty() {
+            self.products
+                .iter()
+                .filter(|product| {
+                    product.package_name == package_id
+                        && product.role == ArcanaCabiProductRole::Binding
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            exact_matches
+        };
         let product = match matches.as_slice() {
             [] => {
                 return Err(format!(
@@ -783,27 +975,21 @@ impl RuntimeNativeProductCatalog {
                                 metadata.symbol_name
                             )
                         })?;
-                    let proc = unsafe {
-                        windows_sys::Win32::System::LibraryLoader::GetProcAddress(
-                            library.module,
-                            symbol_name.as_ptr().cast(),
-                        )
-                    };
-                    let Some(proc) = proc else {
-                        return Err(format!(
+                    let call = unsafe {
+                        library
+                            .module
+                            .get::<ArcanaCabiBindingImportFn>(symbol_name.as_bytes_with_nul())
+                    }
+                    .map_err(|_| {
+                        format!(
                             "binding import `{}` is missing symbol `{}` in `{}:{}`",
                             metadata.name,
                             metadata.symbol_name,
                             product.package_name,
                             product.product_name
-                        ));
-                    };
-                    let call = unsafe {
-                        std::mem::transmute::<
-                            unsafe extern "system" fn() -> isize,
-                            ArcanaCabiBindingImportFn,
-                        >(proc)
-                    };
+                        )
+                    })?;
+                    let call = *call;
                     Ok((
                         metadata.name.clone(),
                         ActiveBindingImport {
@@ -882,6 +1068,7 @@ impl RuntimeNativeProductCatalog {
                     imports,
                     callback_registrations,
                     unregister_callback,
+                    mapped_view_ops: library.binding_mapped_view_ops,
                     last_error_alloc,
                     owned_bytes_free,
                     owned_str_free,
@@ -1369,6 +1556,7 @@ struct ActiveBindingProduct {
     imports: BTreeMap<String, ActiveBindingImport>,
     callback_registrations: Vec<ActiveBindingCallbackRegistration>,
     unregister_callback: ArcanaCabiBindingUnregisterCallbackFn,
+    mapped_view_ops: Option<ActiveBindingMappedViewOps>,
     last_error_alloc: ArcanaCabiLastErrorAllocFn,
     owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
     owned_str_free: ArcanaCabiOwnedStrFreeFn,
@@ -1399,6 +1587,14 @@ pub(crate) struct RuntimeBindingImportOutcome {
 struct ActiveBindingImport {
     metadata: ArcanaCabiBindingImport,
     call: ArcanaCabiBindingImportFn,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct ActiveBindingMappedViewOps {
+    len_bytes: ArcanaCabiBindingMappedViewLenBytesFn,
+    read_byte: ArcanaCabiBindingMappedViewReadByteFn,
+    write_byte: ArcanaCabiBindingMappedViewWriteByteFn,
 }
 
 #[cfg(windows)]
@@ -1443,7 +1639,7 @@ struct OpenPluginInstance {
 
 #[cfg(windows)]
 struct LoadedNativeLibrary {
-    module: windows_sys::Win32::Foundation::HMODULE,
+    module: Library,
     package_name: String,
     product_name: String,
     destroy_instance: ArcanaCabiDestroyInstanceFn,
@@ -1456,6 +1652,7 @@ struct LoadedNativeLibrary {
     binding_layouts: Vec<ArcanaCabiBindingLayout>,
     binding_register_callback: Option<ArcanaCabiBindingRegisterCallbackFn>,
     binding_unregister_callback: Option<ArcanaCabiBindingUnregisterCallbackFn>,
+    binding_mapped_view_ops: Option<ActiveBindingMappedViewOps>,
     last_error_alloc: Option<ArcanaCabiLastErrorAllocFn>,
     owned_bytes_free: Option<ArcanaCabiOwnedBytesFreeFn>,
     owned_str_free: Option<ArcanaCabiOwnedStrFreeFn>,
@@ -1464,8 +1661,6 @@ struct LoadedNativeLibrary {
 #[cfg(windows)]
 impl LoadedNativeLibrary {
     fn load(bundle_dir: &Path, product: &RuntimeNativeProductInfo) -> Result<Self, String> {
-        use std::os::windows::ffi::OsStrExt;
-
         let dll_path = bundle_dir.join(&product.file);
         if !dll_path.is_file() {
             native_product_probe(
@@ -1485,56 +1680,35 @@ impl LoadedNativeLibrary {
             ));
         }
 
-        let wide = dll_path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let module =
-            unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryW(wide.as_ptr()) };
-        if module.is_null() {
-            return Err(format!(
-                "failed to load native product library `{}`",
+        let module = unsafe { Library::new(&dll_path) }.map_err(|err| {
+            format!(
+                "failed to load native product library `{}`: {err}",
                 dll_path.display()
-            ));
-        }
-
-        let get_api_symbol = format!("{ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL}\0");
-        let proc = unsafe {
-            windows_sys::Win32::System::LibraryLoader::GetProcAddress(
-                module,
-                get_api_symbol.as_ptr(),
             )
-        };
-        let proc = match proc {
-            Some(proc) => proc,
-            None => {
-                unsafe {
-                    windows_sys::Win32::Foundation::FreeLibrary(module);
-                }
-                return Err(format!(
-                    "native product `{}` does not export `{ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL}`",
-                    dll_path.display()
-                ));
-            }
-        };
+        })?;
 
-        let get_api: unsafe extern "system" fn() -> *const ArcanaCabiProductApiV1 =
-            unsafe { std::mem::transmute(proc) };
+        let get_api_symbol = CString::new(ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL)
+            .expect("native product API symbol must not contain interior NUL bytes");
+        let get_api = unsafe {
+            module.get::<unsafe extern "system" fn() -> *const ArcanaCabiProductApiV1>(
+                get_api_symbol.as_bytes_with_nul(),
+            )
+        }
+        .map_err(|_| {
+            format!(
+                "native product `{}` does not export `{ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL}`",
+                dll_path.display()
+            )
+        })?;
+        let get_api = *get_api;
         let api_ptr = unsafe { get_api() };
         let api = unsafe { api_ptr.as_ref() }.ok_or_else(|| {
-            unsafe {
-                windows_sys::Win32::Foundation::FreeLibrary(module);
-            }
             format!(
                 "native product `{}` returned a null product descriptor",
                 dll_path.display()
             )
         })?;
         if api.descriptor_size < std::mem::size_of::<ArcanaCabiProductApiV1>() {
-            unsafe {
-                windows_sys::Win32::Foundation::FreeLibrary(module);
-            }
             return Err(format!(
                 "native product `{}` reported descriptor_size={} smaller than expected {}",
                 dll_path.display(),
@@ -1568,9 +1742,6 @@ impl LoadedNativeLibrary {
                     contract_id
                 ),
             );
-            unsafe {
-                windows_sys::Win32::Foundation::FreeLibrary(module);
-            }
             return Err(format!(
                 "native product descriptor mismatch for `{}`; bundle manifest says `{}:{}` role `{}` contract `{}`, descriptor says `{}:{}` role `{}` contract `{}`",
                 dll_path.display(),
@@ -1585,9 +1756,6 @@ impl LoadedNativeLibrary {
             ));
         }
         if api.contract_version != product.contract_version {
-            unsafe {
-                windows_sys::Win32::Foundation::FreeLibrary(module);
-            }
             return Err(format!(
                 "native product `{}` reports contract version `{}` but bundle manifest expected `{}`",
                 dll_path.display(),
@@ -1596,9 +1764,6 @@ impl LoadedNativeLibrary {
             ));
         }
         if api.role_ops.is_null() {
-            unsafe {
-                windows_sys::Win32::Foundation::FreeLibrary(module);
-            }
             return Err(format!(
                 "native product `{}` has null role_ops for role `{}`",
                 dll_path.display(),
@@ -1617,6 +1782,7 @@ impl LoadedNativeLibrary {
             binding_layouts,
             binding_register_callback,
             binding_unregister_callback,
+            binding_mapped_view_ops,
             last_error_alloc,
             owned_bytes_free,
             owned_str_free,
@@ -1624,9 +1790,6 @@ impl LoadedNativeLibrary {
             ArcanaCabiProductRole::Child => {
                 let child_ops = unsafe { &*(api.role_ops as *const ArcanaCabiChildOpsV1) };
                 if child_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
-                    unsafe {
-                        windows_sys::Win32::Foundation::FreeLibrary(module);
-                    }
                     return Err(format!(
                         "native child product `{}` reported instance ops size {} smaller than expected {}",
                         dll_path.display(),
@@ -1645,6 +1808,7 @@ impl LoadedNativeLibrary {
                     Vec::new(),
                     None,
                     None,
+                    None,
                     Some(child_ops.last_error_alloc),
                     Some(child_ops.owned_bytes_free),
                     None,
@@ -1653,9 +1817,6 @@ impl LoadedNativeLibrary {
             ArcanaCabiProductRole::Plugin => {
                 let plugin_ops = unsafe { &*(api.role_ops as *const ArcanaCabiPluginOpsV1) };
                 if plugin_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
-                    unsafe {
-                        windows_sys::Win32::Foundation::FreeLibrary(module);
-                    }
                     return Err(format!(
                         "native plugin product `{}` reported instance ops size {} smaller than expected {}",
                         dll_path.display(),
@@ -1674,6 +1835,7 @@ impl LoadedNativeLibrary {
                     Vec::new(),
                     None,
                     None,
+                    None,
                     Some(plugin_ops.last_error_alloc),
                     Some(plugin_ops.owned_bytes_free),
                     None,
@@ -1682,9 +1844,6 @@ impl LoadedNativeLibrary {
             ArcanaCabiProductRole::Binding => {
                 let binding_ops = unsafe { &*(api.role_ops as *const ArcanaCabiBindingOpsV1) };
                 if binding_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
-                    unsafe {
-                        windows_sys::Win32::Foundation::FreeLibrary(module);
-                    }
                     return Err(format!(
                         "native binding product `{}` reported instance ops size {} smaller than expected {}",
                         dll_path.display(),
@@ -1702,6 +1861,24 @@ impl LoadedNativeLibrary {
                 validate_binding_imports(&imports)?;
                 validate_binding_callbacks(&callbacks)?;
                 validate_binding_layouts(&layouts)?;
+                let mapped_view_ops = if binding_ops.mapped_view_ops.is_null() {
+                    None
+                } else {
+                    let mapped = unsafe { &*binding_ops.mapped_view_ops };
+                    if mapped.ops_size < std::mem::size_of::<ArcanaCabiBindingMappedViewOpsV1>() {
+                        return Err(format!(
+                            "native binding product `{}` reported mapped-view ops size {} smaller than expected {}",
+                            dll_path.display(),
+                            mapped.ops_size,
+                            std::mem::size_of::<ArcanaCabiBindingMappedViewOpsV1>()
+                        ));
+                    }
+                    Some(ActiveBindingMappedViewOps {
+                        len_bytes: mapped.len_bytes,
+                        read_byte: mapped.read_byte,
+                        write_byte: mapped.write_byte,
+                    })
+                };
                 (
                     binding_ops.base.create_instance,
                     binding_ops.base.destroy_instance,
@@ -1713,15 +1890,13 @@ impl LoadedNativeLibrary {
                     layouts,
                     Some(binding_ops.register_callback),
                     Some(binding_ops.unregister_callback),
+                    mapped_view_ops,
                     Some(binding_ops.last_error_alloc),
                     Some(binding_ops.owned_bytes_free),
                     Some(binding_ops.owned_str_free),
                 )
             }
             ArcanaCabiProductRole::Export => {
-                unsafe {
-                    windows_sys::Win32::Foundation::FreeLibrary(module);
-                }
                 return Err(format!(
                     "runtime native product loader does not support role `export` for `{}`",
                     dll_path.display()
@@ -1755,6 +1930,7 @@ impl LoadedNativeLibrary {
             binding_layouts,
             binding_register_callback,
             binding_unregister_callback,
+            binding_mapped_view_ops,
             last_error_alloc,
             owned_bytes_free,
             owned_str_free,
@@ -1896,15 +2072,6 @@ unsafe fn read_cabi_c_string(value: *const c_char, label: &str) -> Result<String
         .to_str()
         .map(|text| text.to_string())
         .map_err(|_| format!("{label} is not valid utf-8"))
-}
-
-#[cfg(windows)]
-impl Drop for LoadedNativeLibrary {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::FreeLibrary(self.module);
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -2565,8 +2732,8 @@ mod tests {
                 "toolchain = \"toolchain\"\n",
                 "support_files = [\"package-assets/abc123/runtime.txt\"]\n",
                 "\n[[package_assets]]\n",
-                "package_id = \"path:arcana_text\"\n",
-                "package_name = \"arcana_text\"\n",
+                "package_id = \"path:demo_assets\"\n",
+                "package_name = \"demo_assets\"\n",
                 "asset_root = \"package-assets/abc123\"\n",
             ),
         )
@@ -2575,7 +2742,7 @@ mod tests {
         let catalog = load_bundle_native_products(&dir).expect("catalog should load");
         assert_eq!(catalog.root_member(), Some("app"));
         assert_eq!(
-            catalog.package_asset_root("path:arcana_text"),
+            catalog.package_asset_root("path:demo_assets"),
             Some("package-assets/abc123")
         );
 

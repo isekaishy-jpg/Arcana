@@ -44,8 +44,8 @@ pub use executable::{
     ExecConstructDestination, ExecConstructLine, ExecConstructRegion, ExecDeferAction,
     ExecDynamicDispatch, ExecExpr, ExecFloatKind, ExecHeadedModifier, ExecHeaderAttachment,
     ExecMatchArm, ExecMatchPattern, ExecMemoryDetailLine, ExecMemorySpecDecl, ExecNamedBindingId,
-    ExecPhraseArg, ExecPhraseQualifierKind, ExecRecordRegion, ExecRecycleLine, ExecRecycleLineKind,
-    ExecStmt, ExecUnaryOp,
+    ExecPhraseArg, ExecPhraseQualifierKind, ExecProjectionFamily, ExecRecordRegion,
+    ExecRecycleLine, ExecRecycleLineKind, ExecStmt, ExecUnaryOp,
 };
 pub use routine_signature::{
     IrRoutineParam, IrRoutineProvenance, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
@@ -1358,7 +1358,12 @@ fn rewrite_expr_routine_keys(
             )
         }
         ExecExpr::Slice {
-            expr, start, end, ..
+            expr,
+            start,
+            end,
+            len,
+            stride,
+            ..
         } => {
             rewrite_expr_routine_keys(
                 package_display_names,
@@ -1386,6 +1391,26 @@ fn rewrite_expr_routine_keys(
                     routine_key_map,
                     current_package_id,
                     end,
+                )?;
+            }
+            if let Some(len) = len {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    len,
+                )?;
+            }
+            if let Some(stride) = stride {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    stride,
                 )?;
             }
             Ok(())
@@ -4735,13 +4760,23 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
         },
         HirExpr::Slice {
             expr,
+            family,
             start,
             end,
+            len,
+            stride,
             inclusive_end,
         } => ExecExpr::Slice {
             expr: Box::new(lower_exec_expr(expr)),
+            family: match family {
+                arcana_hir::HirProjectionFamily::Inferred => ExecProjectionFamily::Inferred,
+                arcana_hir::HirProjectionFamily::Contiguous => ExecProjectionFamily::Contiguous,
+                arcana_hir::HirProjectionFamily::Strided => ExecProjectionFamily::Strided,
+            },
             start: start.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
             end: end.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
+            len: len.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
+            stride: stride.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
             inclusive_end: *inclusive_end,
         },
         HirExpr::Range {
@@ -4911,15 +4946,29 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         },
         HirExpr::Slice {
             expr,
+            family,
             start,
             end,
+            len,
+            stride,
             inclusive_end,
         } => ExecExpr::Slice {
             expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+            family: match family {
+                arcana_hir::HirProjectionFamily::Inferred => ExecProjectionFamily::Inferred,
+                arcana_hir::HirProjectionFamily::Contiguous => ExecProjectionFamily::Contiguous,
+                arcana_hir::HirProjectionFamily::Strided => ExecProjectionFamily::Strided,
+            },
             start: start
                 .as_ref()
                 .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
             end: end
+                .as_ref()
+                .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
+            len: len
+                .as_ref()
+                .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
+            stride: stride
                 .as_ref()
                 .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
             inclusive_end: *inclusive_end,
@@ -7386,7 +7435,7 @@ mod tests {
                 .expect("root module should lower"),
                 lower_module_text(
                     "winspell.window",
-                    "import std.canvas\nexport record Window:\n    title: Text\n",
+                    "import std.text\nexport record Window:\n    title: Text\n",
                 )
                 .expect("nested module should lower"),
             ],
@@ -7419,7 +7468,7 @@ mod tests {
         assert!(
             ir.dependency_rows
                 .iter()
-                .any(|row| row.contains("std.canvas"))
+                .any(|row| row.contains("std.text"))
         );
     }
 

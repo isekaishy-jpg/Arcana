@@ -5,37 +5,37 @@ import arcana_text.shape.pipeline
 import arcana_text.shape.styles
 import arcana_text.shape.tokens
 import arcana_text.types
-import std.bytes
+import std.text
 import std.collections.list
-import std.fs
+import arcana_process.fs
 import std.option
-import std.path
+import arcana_process.path
 import std.text
 use std.option.Option
 
 fn layout_probe_flag_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "enable_text_fonts_probe" :: call
 
 fn layout_probe_log_path() -> Str:
-    return std.path.join :: (std.path.join :: (std.path.cwd :: :: call), "scratch" :: call), "text_layout_probe.log" :: call
+    return arcana_process.path.join :: (arcana_process.path.join :: (arcana_process.path.cwd :: :: call), "scratch" :: call), "text_layout_probe.log" :: call
 
 fn layout_probe_enabled() -> Bool:
-    return std.fs.is_file :: (layout_probe_flag_path :: :: call) :: call
+    return arcana_process.fs.is_file :: (layout_probe_flag_path :: :: call) :: call
 
 fn layout_probe_append(line: Str):
     if not (layout_probe_enabled :: :: call):
         return
-    let _ = std.fs.mkdir_all :: (std.path.parent :: (layout_probe_log_path :: :: call) :: call) :: call
-    let opened = std.fs.stream_open_write :: (layout_probe_log_path :: :: call), true :: call
+    let _ = arcana_process.fs.mkdir_all :: (arcana_process.path.parent :: (layout_probe_log_path :: :: call) :: call) :: call
+    let opened = arcana_process.fs.stream_open_write :: (layout_probe_log_path :: :: call), true :: call
     return match opened:
         std.result.Result.Ok(value) => layout_probe_append_ready :: value, line :: call
         std.result.Result.Err(_) => 0
 
-fn layout_probe_append_ready(take value: std.fs.FileStream, line: Str):
+fn layout_probe_append_ready(take value: arcana_winapi.process_handles.FileStream, line: Str):
     let mut stream = value
-    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
-    let _ = std.fs.stream_write :: stream, bytes :: call
-    let _ = std.fs.stream_close :: stream :: call
+    let bytes = std.text.bytes_from_str_utf8 :: (line + "\n") :: call
+    let _ = arcana_process.fs.stream_write :: stream, bytes :: call
+    let _ = arcana_process.fs.stream_close :: stream :: call
 
 record LayoutScratch:
     value: Int
@@ -1330,3 +1330,4 @@ impl LayoutSnapshot:
 
     fn height(read self: arcana_text.layout.LayoutSnapshot) -> Int:
         return self.size.1
+

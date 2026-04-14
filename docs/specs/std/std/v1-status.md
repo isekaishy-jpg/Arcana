@@ -14,58 +14,58 @@ Rules:
 ## Bootstrap-Required
 
 id: STD-ARGS
-classification: bootstrap-required
-why: command-line bootstrap and host-tool entrypoint arguments
-consumers: owned host-core tools, future owned compiler/tooling entrypoints
-current_source: mixed
-still_needs_rebuild: keep surface narrow and host-root safe under the rewrite runtime boundary
-update_note: keep argument access low-level; do not add parsing or CLI-framework helpers here
-promotion_condition: host-core runtime is rewrite-owned and the public surface matches `selfhost-host/v1-scope.md`
+classification: removed-from-std
+why: public host-core argument access now belongs to `arcana_process.args`
+consumers: owned host-core tools and future owned compiler/tooling entrypoints through `arcana_process`
+current_source: removed-from-std
+still_needs_rebuild: none in std; keep the active surface owned by `arcana_process`
+update_note: the old public std host-core lane is retired; low-level argument access remains public, but it is no longer a std responsibility
+promotion_condition: only revisit if a future explicit scope moves host-core back into std
 
 id: STD-ENV
-classification: bootstrap-required
-why: environment access for host tools and bootstrap flows
-consumers: host-tool and backend/runtime bootstrap lanes
-current_source: mixed
-still_needs_rebuild: preserve low-level environment lookups without growing policy helpers
-update_note: add only concrete bootstrap-needed lookups; keep higher-level config loading out of `std.env`
-promotion_condition: rewrite-owned host-core runtime satisfies documented env surface with no carried-only assumptions
+classification: removed-from-std
+why: public environment access now belongs to `arcana_process.env`
+consumers: host-tool and backend/runtime bootstrap lanes through `arcana_process`
+current_source: removed-from-std
+still_needs_rebuild: none in std; keep the active surface low-level in `arcana_process.env`
+update_note: std no longer owns public env access; higher-level config loading still stays out of the low-level host-core lane
+promotion_condition: only revisit if a future explicit scope moves host-core back into std
 
 id: STD-PATH
-classification: bootstrap-required
-why: workspace, artifact, and manifest path handling during bootstrap
-consumers: package/build runtime, owned host-core tools, future owned compiler/tooling flows
-current_source: mixed
-still_needs_rebuild: narrow convenience drift and align with approved host-core scope
-update_note: keep only path substrate helpers; `is_absolute`, `stem`, `with_ext`, `relative_to`, `canonicalize`, and `strip_prefix` are now ratified as explicit end-user baseline helpers, path policy helpers still do not belong in `std.path`, and path failures now travel through operation-local `Result[...]` returns instead of a shared error slot
-promotion_condition: public path surface matches approved host-core scope and rewrite-owned runtime behavior
+classification: removed-from-std
+why: public path handling now belongs to `arcana_process.path`
+consumers: package/build runtime, owned host-core tools, future owned compiler/tooling flows through `arcana_process`
+current_source: removed-from-std
+still_needs_rebuild: none in std; keep the active path surface aligned with approved host-core scope in `arcana_process.path`
+update_note: the public host-core path surface moved out of std; the approved helper set remains the same, but the owner is now `arcana_process`
+promotion_condition: only revisit if a future explicit scope moves host-core back into std
 
 id: STD-FS
-classification: bootstrap-required
-why: source loading, artifact writes, and host-tool IO during bootstrap
-consumers: package/build runtime, owned host-core tools, future owned compiler/tooling flows
-current_source: mixed
-still_needs_rebuild: narrow fallback-helper drift and align with approved host-core scope
-update_note: keep filesystem APIs substrate-level; the carried fallback wrappers `read_text_or`, `list_dir_or_empty`, `mkdir_all_or_false`, `write_text_or_false`, `read_bytes_or_empty`, and `write_bytes_or_false` were removed from `std.fs`, explicit end-user helpers such as `create_dir`, `remove_dir`, `copy_file`, `rename`, `file_size`, and `modified_unix_ms` are now part of the approved host-core baseline, stream APIs now use a source-declared opaque `FileStream` handle instead of raw `Int` ids, terminal success cases now use `Result[Unit, Str]` rather than `Result[Bool, Str]`, fallible operations carry operation-local `Result[...]` errors rather than a shared error slot, and `stream_close` is a consuming `take` operation
-promotion_condition: rewrite-owned host-core runtime satisfies approved fs surface and carried convenience drift is removed or explicitly ratified
+classification: removed-from-std
+why: public filesystem access now belongs to `arcana_process.fs`
+consumers: package/build runtime, owned host-core tools, future owned compiler/tooling flows through `arcana_process`
+current_source: removed-from-std
+still_needs_rebuild: none in std; keep filesystem APIs substrate-level under `arcana_process.fs`
+update_note: the public fs surface moved out of std; `FileStream` and the approved explicit helper set remain active under `arcana_process.fs`
+promotion_condition: only revisit if a future explicit scope moves host-core back into std
 
 id: STD-PROCESS
-classification: bootstrap-required
-why: host-tool execution status checks and controlled process capability gate
-consumers: owned host-core tools
-current_source: rewrite-owned
-still_needs_rebuild: keep the public surface contracted to approved status-only process execution unless new bootstrap need is documented
-update_note: `std.process` now includes explicit capture helpers for end-user tools, uses operation-local `Result[...]` failure transport, and must not re-expose compiler bootstrap escape hatches or drift into process-management framework policy
-promotion_condition: process surface remains aligned with host-core scope and any future addition is bootstrap-scoped and documented
+classification: removed-from-std
+why: public process execution now belongs to `arcana_process.process`
+consumers: owned host-core tools through `arcana_process`
+current_source: removed-from-std
+still_needs_rebuild: none in std; keep the active process surface narrow in `arcana_process.process`
+update_note: std no longer owns public process execution; the active low-level status/capture surface remains in `arcana_process.process`
+promotion_condition: only revisit if a future explicit scope moves host-core back into std
 
 id: STD-IO
-classification: bootstrap-required
-why: text output for tools, diagnostics, and showcase-side proof consumers
-consumers: compiler grimoires, host-tool examples, showcase examples
-current_source: mixed
-still_needs_rebuild: maintain low-level print semantics without turning `std.io` into a formatting framework
-update_note: the approved baseline now includes stdout/stderr output, flush hooks, explicit line input/output helpers, and operation-local `Result[...]` failure transport for input; higher-level logging and terminal UI policy should live in grimoires or tools, not `std.io`
-promotion_condition: rewrite-owned runtime provides stable low-level output semantics for bootstrap and showcase consumers
+classification: removed-from-std
+why: public host-core IO now belongs to `arcana_process.io`
+consumers: compiler grimoires, host-tool examples, showcase examples through `arcana_process`
+current_source: removed-from-std
+still_needs_rebuild: none in std; keep the active IO surface low-level in `arcana_process.io`
+update_note: the public std IO lane is retired; stdout/stderr output and line input remain available through `arcana_process.io`, not std
+promotion_condition: only revisit if a future explicit scope moves host-core back into std
 
 id: STD-CONFIG
 classification: bootstrap-required
@@ -127,7 +127,7 @@ why: memory phrases, views, and allocator/publication semantics are part of the 
 consumers: memory examples, compiler/runtime paths, `std.binary`, and grimoires such as `arcana_text`
 current_source: mixed
 still_needs_rebuild: preserve typed ownership/publication contract while hardening aliasing/runtime details under the approved family/view surface
-update_note: arena/frame/pool plus temp/session/ring/slab, executable memory phrases, explicit view types, borrowed-slice syntax, deterministic pool compaction/live-id behavior, current `seal` / `unseal` publication state for session/slab, and the explicit capability-trait layer (`ViewSource`, `EditViewSource`, `ContiguousBytes`, `ContiguousBytesEdit`, `Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) now sit on the rewrite backend; further allocator or borrow/resource-model expansion still goes through explicit scope/deferred docs
+update_note: arena/frame/pool plus temp/session/ring/slab, executable memory phrases, the builtin `View[Elem, Family]` surface (`Contiguous`, `Strided`, `Mapped`), borrowed-slice syntax, the owned payload families (`Bytes`, `ByteBuffer`, `Utf16`, `Utf16Buffer`), deterministic pool compaction/live-id behavior, current `seal` / `unseal` publication state for session/slab, and the allocator/publication capability layer (`Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) now sit on the rewrite backend; further allocator or borrow/resource-model expansion still goes through explicit scope/deferred docs
 promotion_condition: rewrite-owned runtime fully supports approved memory surface and ownership rules
 
 id: STD-CONCURRENT
@@ -151,65 +151,65 @@ promotion_condition: rewrite-owned runtime supports approved ECS/behavior surfac
 id: STD-TYPES-CORE
 classification: bootstrap-required
 why: shared low-level geometry/color/time/frame wrappers for app/media substrate and toolchain-facing helpers
-consumers: `std.canvas`, `std.time`, future Arcana-owned grimoire layers above the substrate
+consumers: `arcana_desktop`, `arcana_graphics`, `std.time`, future Arcana-owned grimoire layers above the substrate
 current_source: mixed
 still_needs_rebuild: keep types low-level and substrate-oriented
 update_note: new core types require concrete substrate consumers; gameplay/domain types do not automatically belong here
 promotion_condition: rewrite-owned substrate uses a small stable core-type layer with documented purpose
 
 id: STD-WINDOW
-classification: bootstrap-required
-why: raw window lifecycle/state/control substrate for desktop apps and showcases
-consumers: `grimoires/libs/arcana-desktop`, owned window/showcase proofs
-current_source: rewrite-owned
-still_needs_rebuild: keep the substrate low-level and continue expanding only where future grimoires prove shared need without inheriting framework policy
-update_note: keep only raw window substrate here; `open`/`open_cfg`/`open_in` are explicitly fallible (`Result[Window, Str]`), `close` is a consuming `take` operation with explicit `Result[Unit, Str]`, `alive` remains a lifecycle query rather than the input/event frame pump, the approved low-level surface now includes explicit title/visibility/decoration/resizable/topmost/cursor-visible state, min/max size constraints, transparency and theme override state, cursor icon/grab/position hooks, text-input enablement, monitor/theme queries, `request_redraw`, `request_attention`, and the matching config/settings records above the opaque `Window` handle; `std.canvas.open`/`alive` remain bootstrap compatibility wrappers, ergonomic desktop loops and policies belong in future Arcana-owned grimoire layers, and the current source-declared opaque `Window` handle is a bootstrap seam rather than a permanently ratified resource model
-promotion_condition: rewrite-owned app/runtime backend implements the approved low-level window surface
+classification: removed-from-std
+why: the public desktop shell now belongs to `arcana_desktop`
+consumers: `grimoires/libs/arcana-desktop`
+current_source: removed-from-std
+still_needs_rebuild: none in std; desktop shell work belongs in `arcana_desktop`
+update_note: any remaining std window code is migration debt only; the public owner is now `arcana_desktop`
+promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-INPUT
-classification: bootstrap-required
-why: raw keyboard/mouse polling and code lookup for desktop apps and showcases
-consumers: `grimoires/libs/arcana-desktop`, owned input/showcase proofs
-current_source: rewrite-owned
-still_needs_rebuild: keep timing semantics documented and resist drift into shortcut/action policy
-update_note: action mapping and shortcut policy belong in grimoires above `std.input`; edge-triggered and per-frame state now flows through the move-only source-declared opaque `AppFrame` handle produced by `std.events.pump(edit win)`, that frame-advance operation is an explicit window mutation rather than a read-only query, low-level named key/button lookup now includes the common modifier, navigation, function-key, numpad, punctuation, and auxiliary-mouse families needed by future grimoires, and the approved helper floor now includes logical key, physical key, location, text, and repeat accessors over key events without turning `std.input` into an action/router layer
-promotion_condition: rewrite-owned input substrate satisfies the approved low-level surface
+classification: removed-from-std
+why: public input handling now belongs to `arcana_desktop`
+consumers: `grimoires/libs/arcana-desktop`
+current_source: removed-from-std
+still_needs_rebuild: none in std; input semantics belong in `arcana_desktop`
+update_note: any remaining std input code is migration debt only; the public owner is now `arcana_desktop`
+promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-TEXT-INPUT
-classification: bootstrap-required
-why: low-level committed-text and IME-composition settings substrate needed by the desktop app-shell grimoire and future UI/text grimoires
+classification: removed-from-std
+why: public text-input handling now belongs to `arcana_desktop`
 consumers: `grimoires/libs/arcana-desktop`, future text/UI layers, showcase apps
-current_source: rewrite-owned
-still_needs_rebuild: keep the surface low-level and host-facing without growing editing, shortcut, or widget policy
-update_note: `std.text_input` is intentionally narrow: window-level enablement plus composition target/settings records only, layered on top of committed-text and composition events from `std.events`; rendering, composition UX, shortcut routing, and text editing remain grimoire-layer responsibilities
-promotion_condition: rewrite-owned runtime provides stable text-input settings behavior on supported hosts and higher-level text/UI policy remains outside std
+current_source: removed-from-std
+still_needs_rebuild: none in std; text-input semantics belong in `arcana_desktop`
+update_note: the public std text-input lane is retired; remaining text-input work lives under `arcana_desktop` and the backend grimoires it consumes
+promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-EVENTS
-classification: bootstrap-required
-why: typed event queue and frame-pump boundary for desktop consumers
-consumers: `grimoires/libs/arcana-desktop`, owned event/showcase proofs
-current_source: rewrite-owned
-still_needs_rebuild: keep deterministic event semantics documented while avoiding facade-level routing policy in std
-update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary, now includes low-level app resumed/suspended/about-to-wait plus wake notifications, redraw, committed text-input, text-composition start/update/commit/cancel, DPI/theme change, raw mouse-motion, and external file-drop events in addition to window-move and pointer-enter/leave coverage, and key events now carry low-level physical/logical/location/text/repeat metadata while `AppSession` plus `WakeHandle` provide the blocking multi-window app-shell substrate
-promotion_condition: rewrite-owned event substrate and pump semantics are documented and tested
+classification: removed-from-std
+why: typed desktop event flow now belongs to `arcana_desktop`
+consumers: `grimoires/libs/arcana-desktop`
+current_source: removed-from-std
+still_needs_rebuild: none in std; event routing belongs in `arcana_desktop`
+update_note: any remaining std events code is migration debt only; the public owner is now `arcana_desktop`
+promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-CLIPBOARD
-classification: bootstrap-required
-why: low-level clipboard substrate needed by the desktop app-shell grimoire and future UI/text grimoires
+classification: removed-from-std
+why: public clipboard handling now belongs to `arcana_desktop.clipboard`
 consumers: `grimoires/libs/arcana-desktop`, future text/UI layers, showcase apps
-current_source: rewrite-owned
-still_needs_rebuild: keep the surface low-level and host-facing without growing history, selection, or UI policy
-update_note: `std.clipboard` is intentionally narrow: text and raw bytes only, explicit `Result[...]` failure transport, and no framework policy; host implementations may differ under the same contract, but the public Arcana surface stays typed and low-level
-promotion_condition: rewrite-owned runtime provides stable clipboard read/write behavior on supported hosts and higher-level policies remain outside std
+current_source: removed-from-std
+still_needs_rebuild: none in std; clipboard semantics belong in `arcana_desktop`
+update_note: the public std clipboard lane is retired; the active contract is `arcana_desktop.clipboard`
+promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-CANVAS
-classification: bootstrap-required
-why: primitive render/text/image substrate for desktop apps and showcase proof
-consumers: `grimoires/libs/arcana-graphics`, `grimoires/libs/arcana-text`, owned window/showcase proofs
-current_source: carried
-still_needs_rebuild: backend/runtime ownership under the rewrite and explicit primitive-graphics contract
-update_note: keep canvas low-level; the approved independent-development baseline now includes line draw, filled circle draw, and default-font label measurement in addition to rect/text/image primitives, `open` stays as a bootstrap compatibility wrapper over `std.window.open`, `image_load` is now explicitly fallible (`Result[Image, Str]`), UI kits and richer scene/render abstractions belong in grimoires, and the current source-declared opaque `Image` handle is only a bootstrap seam until the rewrite-owned resource model is revisited
-promotion_condition: rewrite-owned app/runtime backend satisfies primitive render/text/image surface
+classification: removed-from-std
+why: the public software-present backend now belongs to `arcana_graphics.arcsb`
+consumers: `grimoires/libs/arcana-graphics`, `grimoires/libs/arcana-text`
+current_source: removed-from-std
+still_needs_rebuild: none in std; graphics backend work belongs in `arcana_graphics`
+update_note: the public std canvas lane is retired; the active low-level software-present backend is `arcana_graphics.arcsb`
+promotion_condition: only revisit if a future explicit scope restores a public std graphics lane
 
 id: STD-TIME
 classification: bootstrap-required
@@ -221,13 +221,13 @@ update_note: keep `std.time` low-level; fixed-step or app-loop policy stays out 
 promotion_condition: rewrite-owned runtime implements the documented monotonic timing surface and showcase consumers build above it
 
 id: STD-AUDIO
-classification: bootstrap-required
-why: low-level audio output/buffer/playback substrate needed to support a later first-party audio grimoire
+classification: removed-from-std
+why: the public low-level audio lane now belongs to `arcana_audio`
 consumers: `grimoires/libs/arcana-audio`, owned audio-smoke proofs
-current_source: rewrite-owned
-still_needs_rebuild: runtime/backend implementation of audio device/buffer/playback intrinsics
-update_note: keep `std.audio` substrate-level; `default_output`, `buffer_load_wav`, and `play_buffer(edit device, read buffer)` are explicitly fallible (`Result[...]`) acquisition/start operations, `output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`, the current bootstrap lane does not implicitly resample or remix so `play_buffer` requires the buffer sample rate/channel count to match the selected device config, output lifecycle/info hooks plus pause/resume/looping/gain/position playback control remain baseline, mixing/streaming policy and ergonomic playback helpers belong in grimoires, and the current source-declared opaque audio handles are bootstrap seams rather than long-term resource-model commitments
-promotion_condition: rewrite-owned runtime provides documented low-level audio support and the first audio grimoire builds above it
+current_source: removed-from-std
+still_needs_rebuild: none in std; low-level audio ownership now sits in `arcana_audio`
+update_note: the public std audio lane is retired; `AudioDevice`, `AudioBuffer`, and `AudioPlayback` remain active through `arcana_audio`, while higher-level playback policy stays in grimoires
+promotion_condition: only revisit if a future explicit scope restores a public std audio lane
 
 ## Transitional-Carried
 

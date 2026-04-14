@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = []
 runtime-runner = ["dep:arcana-runtime"]
+legacy-native-host-tests = []
 
 [dependencies]
 arcana-aot.workspace = true
@@ -18,15 +19,6 @@ toml.workspace = true
 
 [dev-dependencies]
 libloading.workspace = true
-
-[target.'cfg(windows)'.dev-dependencies]
-# Windows-only desktop/native-host test harness helpers.
-# This is not part of the package binding seam.
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_UI_Input_Ime",
-    "Win32_UI_WindowsAndMessaging",
-] }
 
 [[bin]]
 name = "arcana"

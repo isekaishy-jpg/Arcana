@@ -249,7 +249,7 @@ Core behavior:
 
 - `f :: a, b :: call` calls `f(a, b)`
 - `obj :: x :: method_name` dispatches method `method_name` on `obj`
-- `value :: :: std.io.print` dispatches `std.io.print(value)`
+- `value :: :: arcana_process.io.print` dispatches `arcana_process.io.print(value)`
 - `result_expr :: :: ?` applies try-propagation
 - `task_expr :: :: >>` awaits task value
 - `task_expr :: :: await` awaits task/thread value
@@ -298,7 +298,7 @@ Notes:
 - Integer overflow in `+ - * / %` and unary `-` is reported deterministically at runtime:
   `integer overflow in add|sub|mul|division|modulo|neg`.
 
-Historical note: the archived MeadowLang operator examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
+Historical note: the archived MeadowLang operator examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Collections (v0.9)
 
@@ -332,7 +332,7 @@ Notes:
 - Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
 - Exact recursive pair destructuring in `let` and `for` is part of the current pair-tuple baseline; parameter destructuring and tuple `match` patterns remain deferred.
 
-Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
+Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Collections Expansion (v0.10)
 
@@ -370,7 +370,7 @@ Notes:
 - Empty map literals are not supported yet; use `std.collections.map.new[K, V]()`.
 - Array literals are not part of v0.10 (use constructors).
 
-Historical note: archived MeadowLang array/map/`for` examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
+Historical note: archived MeadowLang array/map/`for` examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Library-Ready Language Additions (v0.13, current subset)
 
@@ -402,7 +402,7 @@ Notes:
 - Or-pattern binding capture (`A(x) | B(x)`) is not supported yet.
 - Trait dispatch remains static/monomorphized (no trait objects/dynamic dispatch).
 
-Historical note: the archived MeadowLang generic/trait proof examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
+Historical note: the archived MeadowLang generic/trait proof examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Iterator + ECS Trait Proof Slice (v0.27)
 
@@ -424,7 +424,7 @@ It does not freeze general ECS query syntax; broad query authoring remains outsi
 
 A std-style shelf layout now works in Grimoires using `impl` extension methods over kernel collection intrinsics.
 
-Current in-repo reference corpus for this direction lives primarily under `std/src` and `grimoires/owned/app/*`; the broader MeadowLang examples are now archived outside the repo. Key shelf-first surfaces include:
+Current in-repo reference corpus for this direction lives primarily under `std/src`, `grimoires/libs/*`, and `grimoires/arcana/*`; the broader MeadowLang examples are now archived outside the repo. Key shelf-first surfaces include:
 
 - `std.result` / `std.option` user enums
 - `std.collections.list` extension methods (`len`, `push`, `pop`, `try_pop_or`)
@@ -571,16 +571,16 @@ Public surface:
 - `slab :: :: unseal`
 - `slab :: :: is_sealed`
 - `slab :: :: live_ids`
-- explicit view types:
-  - `ReadView[T]`
-  - `EditView[T]`
-  - `ByteView`
-  - `ByteEditView`
-  - `StrView`
+- explicit view surface:
+  - `View[Elem, Family]`
+  - first-wave families:
+    - `Contiguous`
+    - `Strided`
+    - `Mapped`
 - explicit borrowed slices:
   - `&read x[a..b]`
   - `&edit x[a..b]`
-- `std.binary` provides explicit reader/writer helpers over byte views
+- `std.binary` provides explicit reader/writer helpers over `View[...]` and `Bytes`
 
 Runtime semantics:
 
@@ -627,8 +627,8 @@ Notes:
 - If a memory phrase needs more than 3 independent top-level inline inputs, group them explicitly into pair/record data. The 3-arg cap is intentional.
 - `std.memory` exposes allocator borrow APIs:
   - `borrow_read` / `borrow_edit` for `Arena`, `FrameArena`, `PoolArena`, `TempArena`, `SessionArena`, `RingBuffer`, and `Slab`.
-- `std.memory` also exposes explicit view adapters and publication-state operations:
-  - `ReadView[T]`, `EditView[T]`, `ByteView`, `ByteEditView`, `StrView`
+- `std.memory` also exposes the explicit `View[Elem, Family]` surface plus publication-state operations:
+  - `View[Elem, Contiguous]`, `View[Elem, Strided]`, `View[U8, Mapped]`
   - `seal` / `unseal` / `is_sealed` for `SessionArena` and `Slab`
 - `reset`/`remove` are compile-time rejected when live allocator borrows would be invalidated.
 
@@ -821,7 +821,7 @@ Arcana now has source-level opaque type declarations for trusted std-owned runti
 - v1 restriction:
   - opaque type declarations are currently allowed in package `std` and in packages that own an approved `binding` native product
 
-Current std-owned runtime handles such as `Window`, `Image`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `AppFrame` now live as source-declared opaque std types rather than Rust-only reserved builtin names.
+Current binding-owned opaque handle families such as `Window`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `FrameInput` now live as source-declared opaque types rather than Rust-only reserved builtin names.
 Binding-owning libraries such as `arcana_winapi` may also expose source-declared opaque handle types such as module handles, font catalogs, and hidden windows.
 
 ## Native Bindings (v0.18)
@@ -846,88 +846,17 @@ Rules:
 - They are not a replacement for `intrinsic fn`.
 - They are the generic library/native seam for OS binding grimoires such as `arcana_winapi`.
 
-## Canvas/Window/Input (v0.16 shelf-first)
+## Legacy Desktop Note
 
-Desktop APIs are now shelf-first through toolchain std modules:
+The old v0 desktop shell description has been retired from this document.
 
-- `std.canvas`:
-  - `open -> Result[Window, Str]`, `alive`, `fill`, `rect`, `label`, `present`, `rgb`
-  - `image_load -> Result[Image, Str]`, `image_size`, `blit`, `blit_scaled`, `blit_region`
-- `std.window`:
-  - `open -> Result[Window, Str]`, `alive`
-  - `size`, `resized`, `fullscreen`, `minimized`, `maximized`, `focused`
-  - `set_title`, `set_resizable`, `set_fullscreen`, `set_minimized`, `set_maximized`, `set_topmost`, `set_cursor_visible`, `close -> Result[Unit, Str]`
-- `std.input`:
-  - `key_code`
-  - `key_down`, `key_pressed`, `key_released` on `AppFrame`
-  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `AppFrame`
+Current rewrite authority for the desktop/runtime shell is:
 
-Recommended app-facing layer:
+- `arcana_desktop` for the public window/event/input/text-input/clipboard shell
+- `arcana_graphics.arcsb` for the low-level software-buffer graphics backend
+- the approved scopes and ledgers under `docs/specs/`
 
-- carried `winspell` and `spell_events` grimoires are first-party consumer/reference imports, not rewrite implementation authority
-- the rewrite still requires first-party window/input/canvas and primitive graphics/text support sufficient for real apps/showcases and eventual selfhost proof
-- low-level `std.time` and `std.audio` substrate are tracked as bootstrap-owned std surface in `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md` and `docs/specs/std/std/v1-status.md`
-- demo/showcase/game-specific helper logic belongs in showcase or app grimoires unless it is explicitly ratified as general-purpose std surface
-- `std.*` remains the low-level substrate; higher-level first-party grimoires are expected to be rebuilt for the rewrite architecture rather than copied mechanically from Meadow-era implementation layers
-
-Surface policy:
-
-- Direct legacy calls to `sigil_*`, `window_*`, `key_*`, `mouse_*` are hard errors.
-- The compiler now lowers desktop API calls through intrinsic bindings rather than owning semantics by callee-name dispatch.
-- `std.*` is reserved for toolchain std modules.
-
-Notes:
-
-- `Window`, `Image`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `AppFrame` are source-declared opaque std types, and creation/load boundaries are explicit `Result[...]` APIs rather than infallible handle producers.
-- `std.canvas.fill`, `std.canvas.rect`, `std.canvas.label`, and `std.canvas.present` require `edit win`.
-- `std.canvas.rgb` clamps channels to `0..255`.
-- `std.canvas.rect` rejects negative width/height at runtime.
-- Edge-triggered input state is advanced explicitly by `std.events.pump :: win :: call`, which requires `edit win` and returns `AppFrame` so per-frame input reads and drained events stay aligned at one public boundary.
-- Input/window/image APIs are main-thread-only.
-- `std.input.key_code` / `std.input.mouse_button_code` resolve string names at runtime.
-- Public typed event queue APIs are available through `std.events`.
-- `canvas.alive :: win :: call` is only a lifecycle query; it is not the input/event frame pump boundary.
-- `window.resized :: win :: call` is a per-frame edge flag.
-- `std.canvas.image_load` supports PNG-only in v0.12+.
-- Image blits use nearest-neighbor scaling and source-over alpha blending.
-
-- Platform/backend implementation details are intentionally outside this document.
-
-## Events + App Helpers (v0.17)
-
-New modules:
-
-- `std.events`
-- `std.ecs`
-
-`std.events` provides typed queue access sourced from the explicit frame pump boundary:
-
-- `std.events.poll(edit frame: AppFrame) -> Option[std.events.AppEvent]`
-- `std.events.drain(take frame: AppFrame) -> List[std.events.AppEvent]`
-- `std.events.pump(edit win) -> AppFrame`
-
-`std.events.poll` consumes one event from the move-only `AppFrame` produced by the explicit frame pump boundary, and `std.events.drain` consumes the remaining queue for that frame. `std.events.pump` is the single public frame-advance operation.
-
-`std.events.AppEvent` variants:
-
-- `WindowResized((Int, Int))`
-- `WindowCloseRequested`
-- `WindowFocused(Bool)`
-- `KeyDown(Int)` / `KeyUp(Int)`
-- `MouseDown(Int)` / `MouseUp(Int)`
-- `MouseMove((Int, Int))`
-- `MouseWheelY(Int)`
-
-Rewrite note:
-
-- `std.events` is part of the first-party app/runtime substrate required before selfhost.
-- `std.ecs` and `std.behaviors.step` remain first-party language/runtime surface.
-- `std.time` and `std.audio` are bootstrap-owned low-level substrate categories; higher-level loop and playback policy belongs in Arcana-owned grimoire layers.
-- `std.audio.default_output`, `std.audio.buffer_load_wav`, and `std.audio.play_buffer(edit device, read buffer)` are explicit `Result[...]` APIs.
-- `std.audio.output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`.
-- carried historical `std.app` fixed-step helpers are convenience corpus only and are not part of the current std surface.
-
-`std.ecs` currently provides scheduler-phase helpers for behavior/system stepping:
+Historical v0 details for the legacy std desktop shell remain archival context only and should not be read as current rewrite surface.
 
 - `step_startup()`
 - `step_fixed_update()`
@@ -967,7 +896,7 @@ Workspace/build notes:
 - Grimoire `[deps]` path dependencies are import-resolvable in compile/check/run flows (`import <dep>.*`).
 - Build/cache artifact layout is a toolchain detail and is not frozen here; current build artifacts are internal backend-contract output, not a public execution or bytecode format.
 
-Current in-repo app/showcase behavioral pressure comes from rewrite-owned `grimoires/owned/app/*`, `std/src`, conformance fixtures, and crate runtime tests. The broader MeadowLang showcase/app corpus is archived outside this repo.
+Current in-repo app/showcase behavioral pressure comes from rewrite-owned `grimoires/libs/*`, `grimoires/arcana/*`, `std/src`, conformance fixtures, and crate runtime tests. The broader MeadowLang showcase/app corpus is archived outside this repo.
 
 ## Concurrency / IO Surface (v0.17)
 
@@ -975,7 +904,7 @@ New shelf-first modules:
 
 - `std.concurrent`
 - `std.behaviors`
-- `std.io`
+- `arcana_process.io`
 
 Canonical surface:
 
@@ -986,12 +915,12 @@ Canonical surface:
 - `channel :: value :: send` / `channel :: :: recv`, `mutex :: :: pull` / `mutex :: value :: put`
 - `atomic :: :: load`, `atomic :: value :: store`, `atomic :: delta :: add`, ...
 - `phase :: :: std.behaviors.step`
-- `value :: :: std.io.print`
+- `value :: :: arcana_process.io.print`
 
 Surface policy:
 
 - Legacy concurrency/behavior call names are removed from compiler special handling; use `std.concurrent` + methods and `std.behaviors.step`.
-- Legacy call-name interception for `print` is removed; use `value :: :: std.io.print`.
+- Legacy call-name interception for `print` is removed; use `value :: :: arcana_process.io.print`.
 
 ## Concurrency + Behaviors (v0.4)
 
@@ -1016,7 +945,7 @@ Current behavior:
 - `weave` is executor-first in v0.4: it creates hot local tasks on the main-thread async runtime path; `split` remains the explicit OS-thread primitive
 - `task :: :: done` now advances progress across the reachable local await-graph (not just the top task), and reports completion status without blocking
 - `std.behaviors.step` executes metadata-driven scheduler groups with deterministic phase/group ordering
-- `std.canvas.*`, `std.window.*`, `std.input.*`, and `std.behaviors.step` are runtime-enforced as main-thread-only
+- the legacy desktop shell and `std.behaviors.step` are runtime-enforced as main-thread-only on that historical v0 lane
 
 
 ## Forewords (v1) and Comments
@@ -1100,14 +1029,13 @@ Comment conversion helper:
 
 ## Selfhost Host Platform v2
 
-Host/tooling substrate is available under `std.*`:
+Host/tooling substrate is available under `arcana_process.*` plus `std.text`:
 
-- `std.args`
-- `std.env`
-- `std.path`
-- `std.fs`
-- `std.process`
-- `std.bytes`
+- `arcana_process.args`
+- `arcana_process.env`
+- `arcana_process.path`
+- `arcana_process.fs`
+- `arcana_process.process`
 - `std.text`
 
 Policy:
@@ -1121,14 +1049,15 @@ Policy:
   - file execution -> parent directory of file
   - artifact execution -> current working directory
 - execution flows support app-argument pass-through via `--` and explicit host-root override via `--host-root <dir>`.
-- `std.process.exec_status(program, args)` requires explicit capability opt-in:
+- `arcana_process.process.exec_status(program, args)` requires explicit capability opt-in:
   - `--allow-process` on runnable execution flows
   - without the flag: `process execution is disabled; rerun with --allow-process`
-- `std.fs` includes binary file APIs: `read_bytes(path) -> Array[Int]` and `write_bytes(path, bytes)`.
-- `std.fs` includes streaming APIs with a typed `FileStream` handle:
+- `arcana_process.fs` includes binary file APIs: `read_bytes(path) -> Bytes` and `write_bytes(path, bytes)`.
+- `arcana_process.fs` includes streaming APIs with a typed `FileStream` handle:
+  - canonical handle path: `arcana_winapi.process_handles.FileStream`
   - `stream_open_read(path) -> Result[FileStream, Str]`
   - `stream_open_write(path, append) -> Result[FileStream, Str]`
-  - `stream_read(edit stream, max_bytes) -> Result[Array[Int], Str]`
+  - `stream_read(edit stream, max_bytes) -> Result[Bytes, Str]`
   - `stream_write(edit stream, bytes) -> Result[Int, Str]`
   - `stream_eof(read stream) -> Result[Bool, Str]`
   - `stream_close(take stream) -> Result[Unit, Str]`
@@ -1136,4 +1065,4 @@ Policy:
 Host-tool/bootstrap note:
 
 - The broader MeadowLang host/frontend bootstrap examples are now archived outside this repo.
-- Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
+- Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.

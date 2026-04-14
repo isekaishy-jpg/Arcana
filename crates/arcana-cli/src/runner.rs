@@ -287,9 +287,9 @@ mod tests {
         write_app_workspace(
             &dir,
             concat!(
-                "import std.fs\n",
+                "import arcana_process.fs\n",
                 "fn main() -> Int:\n",
-                "    if std.fs.exists :: \"app.exe\" :: call:\n",
+                "    if arcana_process.fs.exists :: \"app.exe\" :: call:\n",
                 "        return 0\n",
                 "    return 9\n",
             ),

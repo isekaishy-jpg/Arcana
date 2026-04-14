@@ -2,6 +2,7 @@ name = "arcana_desktop"
 kind = "lib"
 
 [deps]
+arcana_winapi = { path = "../../arcana/winapi" }
 std = { path = "../../../std" }
 
 [native.products.default]

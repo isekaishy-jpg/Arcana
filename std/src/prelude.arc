@@ -3,17 +3,10 @@ reexport std.option
 reexport std.collections.list
 reexport std.collections.array
 reexport std.collections.map
-reexport std.canvas
-reexport std.window
-reexport std.input
-reexport std.events
 reexport std.time
-reexport std.audio
 reexport std.ecs
 reexport std.concurrent
 reexport std.behaviors
-reexport std.io
-reexport std.bytes
 reexport std.text
 reexport std.types
 reexport std.memory

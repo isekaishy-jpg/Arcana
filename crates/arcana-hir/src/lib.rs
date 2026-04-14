@@ -873,6 +873,23 @@ pub enum HirBinaryOp {
     Mod,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirProjectionFamily {
+    Inferred,
+    Contiguous,
+    Strided,
+}
+
+impl HirProjectionFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inferred => "inferred",
+            Self::Contiguous => "contiguous",
+            Self::Strided => "strided",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirExpr {
     Path {
@@ -951,8 +968,11 @@ pub enum HirExpr {
     },
     Slice {
         expr: Box<HirExpr>,
+        family: HirProjectionFamily,
         start: Option<Box<HirExpr>>,
         end: Option<Box<HirExpr>>,
+        len: Option<Box<HirExpr>>,
+        stride: Option<Box<HirExpr>>,
         inclusive_end: bool,
     },
     Range {
@@ -1681,6 +1701,14 @@ fn canonical_ambient_type_root(path: &[String]) -> Option<&'static str> {
             "Set" => Some("std.collections.set.Set"),
             "Option" => Some("std.option.Option"),
             "Result" => Some("std.result.Result"),
+            "Bytes" => Some("Bytes"),
+            "ByteBuffer" => Some("ByteBuffer"),
+            "Utf16" => Some("Utf16"),
+            "Utf16Buffer" => Some("Utf16Buffer"),
+            "View" => Some("View"),
+            "Contiguous" => Some("Contiguous"),
+            "Strided" => Some("Strided"),
+            "Mapped" => Some("Mapped"),
             "Arena" => Some("std.memory.Arena"),
             "ArenaId" => Some("std.memory.ArenaId"),
             "FrameArena" => Some("std.memory.FrameArena"),
@@ -1695,11 +1723,6 @@ fn canonical_ambient_type_root(path: &[String]) -> Option<&'static str> {
             "RingId" => Some("std.memory.RingId"),
             "Slab" => Some("std.memory.Slab"),
             "SlabId" => Some("std.memory.SlabId"),
-            "ReadView" => Some("std.memory.ReadView"),
-            "EditView" => Some("std.memory.EditView"),
-            "ByteView" => Some("std.memory.ByteView"),
-            "ByteEditView" => Some("std.memory.ByteEditView"),
-            "StrView" => Some("std.memory.StrView"),
             "Task" => Some("std.concurrent.Task"),
             "Thread" => Some("std.concurrent.Thread"),
             "Channel" => Some("std.concurrent.Channel"),
@@ -2230,51 +2253,56 @@ fn infer_slice_hir_type<L: HirLocalTypeLookup>(
     locals: &L,
     expr: &HirExpr,
 ) -> Option<HirType> {
-    let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
-    match &hir_strip_reference_type(&base_ty).kind {
-        HirTypeKind::Apply { base, args }
-            if hir_path_matches_any(
-                base,
-                &[&["List"], &["std", "collections", "list", "List"]],
-            ) =>
-        {
-            Some(ambient_apply_hir_type(
-                &["List"],
-                vec![
-                    args.first()
-                        .cloned()
-                        .unwrap_or_else(|| builtin_hir_type("_")),
-                ],
-            ))
-        }
-        HirTypeKind::Apply { base, args }
-            if hir_path_matches_any(
-                base,
-                &[&["Array"], &["std", "collections", "array", "Array"]],
-            ) =>
-        {
-            Some(ambient_apply_hir_type(
-                &["Array"],
-                vec![
-                    args.first()
-                        .cloned()
-                        .unwrap_or_else(|| builtin_hir_type("_")),
-                ],
-            ))
-        }
-        HirTypeKind::Apply { .. } => Some(base_ty),
-        _ => Some(base_ty),
-    }
+    infer_projection_hir_type(
+        workspace,
+        resolved_module,
+        locals,
+        expr,
+        HirProjectionFamily::Contiguous,
+        false,
+    )
 }
 
-fn infer_borrowed_slice_hir_type<L: HirLocalTypeLookup>(
+fn infer_projection_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     expr: &HirExpr,
+    family: HirProjectionFamily,
     mutable: bool,
 ) -> Option<HirType> {
+    let _mutable = mutable;
     let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+    if matches!(family, HirProjectionFamily::Strided) {
+        return match &hir_strip_reference_type(&base_ty).kind {
+            HirTypeKind::Apply { base, args } if hir_path_matches_any(base, &[&["View"]]) => {
+                let elem = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| builtin_hir_type("_"));
+                Some(ambient_apply_hir_type(
+                    &["View"],
+                    vec![elem, ambient_path_hir_type(&["Strided"])],
+                ))
+            }
+            HirTypeKind::Apply { base, args }
+                if hir_path_matches_any(
+                    base,
+                    &[&["RingBuffer"], &["std", "memory", "RingBuffer"]],
+                ) =>
+            {
+                let elem = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| builtin_hir_type("_"));
+                Some(ambient_apply_hir_type(
+                    &["View"],
+                    vec![elem, ambient_path_hir_type(&["Strided"])],
+                ))
+            }
+            _ => None,
+        };
+    }
     match &hir_strip_reference_type(&base_ty).kind {
         HirTypeKind::Apply { base, args }
             if hir_path_matches_any(
@@ -2287,55 +2315,63 @@ fn infer_borrowed_slice_hir_type<L: HirLocalTypeLookup>(
                 .cloned()
                 .unwrap_or_else(|| builtin_hir_type("_"));
             Some(ambient_apply_hir_type(
-                &[if mutable { "EditView" } else { "ReadView" }],
-                vec![elem],
+                &["View"],
+                vec![elem, ambient_path_hir_type(&["Contiguous"])],
             ))
         }
-        HirTypeKind::Apply { base, args }
-            if hir_path_matches_any(base, &[&["ReadView"], &["std", "memory", "ReadView"]]) =>
+        HirTypeKind::Path(path)
+            if hir_path_matches_any(path, &[&["Bytes"], &["ByteBuffer"]]) =>
         {
-            let elem = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| builtin_hir_type("_"));
-            Some(ambient_apply_hir_type(&["ReadView"], vec![elem]))
-        }
-        HirTypeKind::Apply { base, args }
-            if hir_path_matches_any(base, &[&["EditView"], &["std", "memory", "EditView"]]) =>
-        {
-            let elem = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| builtin_hir_type("_"));
             Some(ambient_apply_hir_type(
-                &[if mutable { "EditView" } else { "ReadView" }],
-                vec![elem],
+                &["View"],
+                vec![
+                    builtin_hir_type("U8"),
+                    ambient_path_hir_type(&["Contiguous"]),
+                ],
             ))
         }
         HirTypeKind::Path(path)
-            if hir_path_matches_any(path, &[&["ByteView"], &["std", "memory", "ByteView"]]) =>
+            if hir_path_matches_any(path, &[&["Utf16"], &["Utf16Buffer"]]) =>
         {
-            Some(ambient_path_hir_type(&["ByteView"]))
+            Some(ambient_apply_hir_type(
+                &["View"],
+                vec![
+                    builtin_hir_type("U16"),
+                    ambient_path_hir_type(&["Contiguous"]),
+                ],
+            ))
         }
-        HirTypeKind::Path(path)
-            if hir_path_matches_any(
-                path,
-                &[&["ByteEditView"], &["std", "memory", "ByteEditView"]],
-            ) =>
+        HirTypeKind::Apply { base, args } if hir_path_matches_any(base, &[&["View"]]) =>
         {
-            Some(ambient_path_hir_type(&[if mutable {
-                "ByteEditView"
-            } else {
-                "ByteView"
-            }]))
+            let elem = args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| builtin_hir_type("_"));
+            let family = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| ambient_path_hir_type(&["Contiguous"]));
+            Some(ambient_apply_hir_type(&["View"], vec![elem, family]))
         }
+        HirTypeKind::Path(path) if hir_path_matches_any(path, &[&["Str"]]) => Some(
+            ambient_apply_hir_type(
+                &["View"],
+                vec![
+                    builtin_hir_type("U8"),
+                    ambient_path_hir_type(&["Contiguous"]),
+                ],
+            ),
+        ),
         HirTypeKind::Path(path)
-            if hir_path_matches_any(
-                path,
-                &[&["Str"], &["StrView"], &["std", "memory", "StrView"]],
-            ) =>
+            if hir_path_matches_any(path, &[&["std", "memory", "View"]]) =>
         {
-            Some(ambient_path_hir_type(&["StrView"]))
+            Some(ambient_apply_hir_type(
+                &["View"],
+                vec![
+                    builtin_hir_type("_"),
+                    ambient_path_hir_type(&["Contiguous"]),
+                ],
+            ))
         }
         _ => None,
     }
@@ -2532,13 +2568,16 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             ) =>
         {
             if let HirExpr::Slice {
-                expr: slice_base, ..
+                expr: slice_base,
+                family,
+                ..
             } = expr.as_ref()
-                && let Some(view_ty) = infer_borrowed_slice_hir_type(
+                && let Some(view_ty) = infer_projection_hir_type(
                     workspace,
                     resolved_module,
                     locals,
                     slice_base,
+                    *family,
                     matches!(op, HirUnaryOp::CapabilityEdit),
                 )
             {
@@ -2761,8 +2800,19 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::Index { expr, .. } => {
             infer_index_hir_type(workspace, resolved_module, locals, expr)
         }
-        HirExpr::Slice { expr, .. } => {
-            infer_slice_hir_type(workspace, resolved_module, locals, expr)
+        HirExpr::Slice { expr, family, .. } => {
+            if matches!(family, HirProjectionFamily::Strided) {
+                infer_projection_hir_type(
+                    workspace,
+                    resolved_module,
+                    locals,
+                    expr,
+                    *family,
+                    false,
+                )
+            } else {
+                infer_slice_hir_type(workspace, resolved_module, locals, expr)
+            }
         }
         HirExpr::Match { arms, .. } => {
             let inferred = arms
@@ -4798,6 +4848,14 @@ fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
     }
 }
 
+fn lower_projection_family(family: arcana_syntax::ProjectionFamily) -> HirProjectionFamily {
+    match family {
+        arcana_syntax::ProjectionFamily::Inferred => HirProjectionFamily::Inferred,
+        arcana_syntax::ProjectionFamily::Contiguous => HirProjectionFamily::Contiguous,
+        arcana_syntax::ProjectionFamily::Strided => HirProjectionFamily::Strided,
+    }
+}
+
 fn lower_assign_target(target: &arcana_syntax::AssignTarget) -> HirAssignTarget {
     match target {
         arcana_syntax::AssignTarget::Name { text } => HirAssignTarget::Name { text: text.clone() },
@@ -4958,13 +5016,19 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         },
         ParsedExpr::Slice {
             expr,
+            family,
             start,
             end,
+            len,
+            stride,
             inclusive_end,
         } => HirExpr::Slice {
             expr: Box::new(lower_expr(expr)),
+            family: lower_projection_family(*family),
             start: start.as_ref().map(|expr| Box::new(lower_expr(expr))),
             end: end.as_ref().map(|expr| Box::new(lower_expr(expr))),
+            len: len.as_ref().map(|expr| Box::new(lower_expr(expr))),
+            stride: stride.as_ref().map(|expr| Box::new(lower_expr(expr))),
             inclusive_end: *inclusive_end,
         },
         ParsedExpr::Range {
@@ -5363,12 +5427,12 @@ mod tests {
     #[test]
     fn lower_module_text_preserves_public_surface() {
         let module = lower_module_text(
-            "std.io",
+            "arcana_process.io",
             "import std.result\nreexport std.result\nexport fn print() -> Int:\n    return 0\nfn helper() -> Int:\n    return 1\n",
         )
         .expect("lowering should pass");
 
-        assert_eq!(module.module_id, "std.io");
+        assert_eq!(module.module_id, "arcana_process.io");
         assert_eq!(module.directives[0].kind, HirDirectiveKind::Import);
         assert_eq!(module.directives[1].kind, HirDirectiveKind::Reexport);
         assert!(module.has_symbol("print"));
@@ -6586,7 +6650,7 @@ mod tests {
         .expect("lowering should pass");
         let window = lower_module_text(
             "winspell.window",
-            "import std.canvas\nuse std.result.Result\nfn helper() -> Int:\n    return 0\n",
+            "import std.text\nuse std.result.Result\nfn helper() -> Int:\n    return 0\n",
         )
         .expect("lowering should pass");
 
@@ -6771,7 +6835,7 @@ mod tests {
         .expect("lowering should pass");
         let window = lower_module_text(
             "winspell.window",
-            "import std.canvas\nfn helper() -> Int:\n    return 0\n",
+            "import std.text\nfn helper() -> Int:\n    return 0\n",
         )
         .expect("lowering should pass");
         let summary = build_package_summary("winspell", vec![book, window]);
@@ -6822,14 +6886,14 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
-                    .expect("std.io should lower"),
+                lower_module_text("arcana_process.io", "export fn print() -> Int:\n    return 0\n")
+                    .expect("arcana_process.io should lower"),
             ],
         );
         let std_layout = build_package_layout(
             &std_summary,
             BTreeMap::from([(
-                "std.io".to_string(),
+                "arcana_process.io".to_string(),
                 Path::new("C:/repo/std/src/io.arc").to_path_buf(),
             )]),
             BTreeMap::new(),
@@ -6848,7 +6912,7 @@ mod tests {
             vec![
                 lower_module_text(
                     "app",
-                    "import std.io\nuse std.io as io\nuse std.io.print\nexport fn main() -> Int:\n    return 0\n",
+                    "import arcana_process.io\nuse arcana_process.io as io\nuse arcana_process.io.print\nexport fn main() -> Int:\n    return 0\n",
                 )
                 .expect("app should lower"),
             ],
@@ -6884,7 +6948,7 @@ mod tests {
             super::HirResolvedTarget::Module {
                 package_id: "std".to_string(),
                 package_name: "std".to_string(),
-                module_id: "std.io".to_string(),
+                module_id: "arcana_process.io".to_string(),
             }
         );
         assert_eq!(
@@ -6895,7 +6959,7 @@ mod tests {
             super::HirResolvedTarget::Symbol {
                 package_id: "std".to_string(),
                 package_name: "std".to_string(),
-                module_id: "std.io".to_string(),
+                module_id: "arcana_process.io".to_string(),
                 symbol_name: "print".to_string(),
             }
         );
@@ -7079,8 +7143,8 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
-                    .expect("std.io should lower"),
+                lower_module_text("arcana_process.io", "export fn print() -> Int:\n    return 0\n")
+                    .expect("arcana_process.io should lower"),
                 lower_module_text("std.text", "export fn len() -> Int:\n    return 0\n")
                     .expect("std.text should lower"),
             ],
@@ -7089,7 +7153,7 @@ mod tests {
             &std_summary,
             BTreeMap::from([
                 (
-                    "std.io".to_string(),
+                    "arcana_process.io".to_string(),
                     Path::new("C:/repo/std/src/io.arc").to_path_buf(),
                 ),
                 (
@@ -7113,7 +7177,7 @@ mod tests {
             vec![
                 lower_module_text(
                     "app",
-                    "use std.io as io\nuse std.text as io\nfn main() -> Int:\n    return 0\n",
+                    "use arcana_process.io as io\nuse std.text as io\nfn main() -> Int:\n    return 0\n",
                 )
                 .expect("app should lower"),
             ],
@@ -7148,14 +7212,14 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
-                    .expect("std.io should lower"),
+                lower_module_text("arcana_process.io", "export fn print() -> Int:\n    return 0\n")
+                    .expect("arcana_process.io should lower"),
             ],
         );
         let std_layout = build_package_layout(
             &std_summary,
             BTreeMap::from([(
-                "std.io".to_string(),
+                "arcana_process.io".to_string(),
                 Path::new("C:/repo/std/src/io.arc").to_path_buf(),
             )]),
             BTreeMap::new(),
@@ -7174,7 +7238,7 @@ mod tests {
             vec![
                 lower_module_text(
                     "app",
-                    "import std.io\nuse std.io as io\nfn main() -> Int:\n    return 0\n",
+                    "import arcana_process.io\nuse arcana_process.io as io\nfn main() -> Int:\n    return 0\n",
                 )
                 .expect("app should lower"),
             ],

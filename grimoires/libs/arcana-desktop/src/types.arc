@@ -1,15 +1,5 @@
 import std.option
 
-export opaque type Window as move, boundary_unsafe
-export opaque type FrameInput as move, boundary_unsafe
-export opaque type Session as move, boundary_unsafe
-export opaque type WakeHandle as copy, boundary_unsafe
-
-lang window_handle = Window
-lang app_frame_handle = FrameInput
-lang app_session_handle = Session
-lang wake_handle = WakeHandle
-
 export record WindowId:
     value: Int
 
@@ -261,10 +251,10 @@ export record TargetedEvent:
     event: arcana_desktop.types.WindowEvent
 
 export record RuntimeContext:
-    session: arcana_desktop.types.Session
-    wake: arcana_desktop.types.WakeHandle
+    session: arcana_winapi.desktop_handles.Session
+    wake: arcana_winapi.desktop_handles.WakeHandle
     main_window_id: arcana_desktop.types.WindowId
-    main_window: arcana_desktop.types.Window
+    main_window: arcana_winapi.desktop_handles.Window
 
 export record RunControl:
     exit_requested: Bool
@@ -276,3 +266,6 @@ export record AppContext:
     control: arcana_desktop.types.RunControl
     current_window_id: std.option.Option[arcana_desktop.types.WindowId]
     current_is_main_window: Bool
+
+
+
