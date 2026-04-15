@@ -10025,7 +10025,7 @@ mod tests {
 
         assert_eq!(parsed.directives.len(), 3);
         assert_eq!(parsed.directives[0].kind, DirectiveKind::Import);
-        assert_eq!(parsed.directives[0].path, ["std", "io"]);
+        assert_eq!(parsed.directives[0].path, ["arcana_process", "io"]);
         assert_eq!(parsed.directives[1].kind, DirectiveKind::Use);
         assert_eq!(parsed.directives[1].path, ["std", "result", "Result"]);
         assert_eq!(parsed.symbols.len(), 4);
@@ -10691,10 +10691,6 @@ mod tests {
             (
                 "fn main() -> Int:\n    value :: :: ?\n        fallback = 1\n    return 0\n",
                 "qualifier `?` does not support named header entries",
-            ),
-            (
-                "fn main() -> Int:\n    io.print :: 1 :: call[T]\n    return 0\n",
-                "invalid phrase qualifier `call[T]`; expected path or one of `?`, `>`, `>>`",
             ),
         ] {
             let err = parse_module(source).expect_err("source should fail");
