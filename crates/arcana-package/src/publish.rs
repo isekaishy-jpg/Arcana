@@ -8,7 +8,7 @@ use crate::{
     DEFAULT_REGISTRY_NAME, DependencySource, DependencySourceSpec, ForewordAdapterProductSpec,
     LOCAL_REGISTRY_METADATA_FILE, LOCAL_REGISTRY_SNAPSHOT_DIR, NativeProductSpec, PackageResult,
     SemverVersion, WorkspaceGraph, WorkspaceMember, load_workspace_graph,
-    local_registry_package_dir,
+    local_registry_package_dir, walk_directory_files,
 };
 
 pub fn publish_workspace_member(
@@ -393,15 +393,7 @@ fn collect_snapshot_paths(member: &WorkspaceMember) -> PackageResult<Vec<String>
 }
 
 fn collect_relative_files(dir: &Path, root: &Path, out: &mut Vec<String>) -> PackageResult<()> {
-    for entry in
-        fs::read_dir(dir).map_err(|e| format!("failed to read `{}`: {e}", dir.display()))?
-    {
-        let entry = entry.map_err(|e| format!("failed to read directory entry: {e}"))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_relative_files(&path, root, out)?;
-            continue;
-        }
+    for path in walk_directory_files(dir)? {
         let relative = path
             .strip_prefix(root)
             .map_err(|e| format!("failed to relativize `{}`: {e}", path.display()))?;

@@ -12,7 +12,10 @@ use arcana_hir::{
 use arcana_syntax::is_builtin_type_name;
 use sha2::{Digest, Sha256};
 
-use crate::{PackageResult, WorkspaceGraph, WorkspaceMember, workspace_target_output_root};
+use crate::{
+    PackageResult, WorkspaceGraph, WorkspaceMember, walk_directory_files,
+    workspace_target_output_root,
+};
 
 fn quote_fingerprint_text(text: impl ToString) -> String {
     let escaped = text.to_string().replace('\\', "\\\\").replace('|', "\\|");
@@ -327,42 +330,16 @@ fn render_member_package_asset_rows(
         return Ok(Vec::new());
     }
     let mut rows = Vec::new();
-    collect_member_package_asset_rows(&assets_dir, &assets_dir, member, cache, &mut rows)?;
-    rows.sort();
-    Ok(rows)
-}
-
-fn collect_member_package_asset_rows(
-    dir: &Path,
-    root: &Path,
-    member: &WorkspaceMember,
-    cache: &mut PackageAssetFingerprintCache,
-    out: &mut Vec<String>,
-) -> PackageResult<()> {
-    let mut entries = fs::read_dir(dir)
-        .map_err(|e| format!("failed to read asset directory `{}`: {e}", dir.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            format!(
-                "failed to read asset directory entry `{}`: {e}",
-                dir.display()
-            )
-        })?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_member_package_asset_rows(&path, root, member, cache, out)?;
-            continue;
-        }
+    for path in walk_directory_files(&assets_dir)? {
         let relative = path
-            .strip_prefix(root)
+            .strip_prefix(&assets_dir)
             .map_err(|e| format!("failed to relativize asset `{}`: {e}", path.display()))?
             .to_string_lossy()
             .replace('\\', "/");
-        out.push(cache.asset_row(member, &path, &relative)?);
+        rows.push(cache.asset_row(member, &path, &relative)?);
     }
-    Ok(())
+    rows.sort();
+    Ok(rows)
 }
 
 struct PackageAssetFingerprintCache {

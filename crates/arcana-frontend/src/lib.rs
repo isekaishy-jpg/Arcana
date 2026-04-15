@@ -378,20 +378,49 @@ struct AdapterCatalogEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct AdapterArtifactSidecarDigest {
+    file_name: String,
+    digest: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct AdapterArtifactIdentity {
     product_name: String,
     product_path: String,
+    product_sidecars: Vec<AdapterArtifactSidecarDigest>,
+    runner_token: Option<String>,
     runner: Option<String>,
+    runner_sidecars: Vec<AdapterArtifactSidecarDigest>,
     args: Vec<String>,
     product_digest: Option<String>,
     runner_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ResolvedAdapterRunnerProgram {
+    token: String,
+    source_program: String,
+    digest: Option<String>,
+    sidecars: Vec<AdapterArtifactSidecarDigest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterSourceArtifactIdentity {
+    product_source_path: PathBuf,
+    product_digest: Option<String>,
+    product_sidecars: Vec<AdapterArtifactSidecarDigest>,
+    runner: Option<ResolvedAdapterRunnerProgram>,
+    args: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 struct MaterializedForewordAdapterArtifact {
     product_program: String,
     product_arg_path: String,
+    product_sidecars: Vec<AdapterArtifactSidecarDigest>,
+    runner_token: Option<String>,
     runner_program: Option<String>,
+    runner_sidecars: Vec<AdapterArtifactSidecarDigest>,
     args: Vec<String>,
     product_digest: Option<String>,
     runner_digest: Option<String>,
@@ -5851,7 +5880,7 @@ fn external_process_path_string(path: &Path) -> String {
     external_process_path(path).to_string_lossy().to_string()
 }
 
-fn resolve_adapter_runner_program(provider_package: &HirWorkspacePackage, runner: &str) -> String {
+fn fallback_adapter_runner_program(provider_package: &HirWorkspacePackage, runner: &str) -> String {
     let runner_path = Path::new(runner);
     if runner_path.is_absolute() || runner_path.components().count() == 1 {
         external_process_path_string(runner_path)
@@ -5860,28 +5889,151 @@ fn resolve_adapter_runner_program(provider_package: &HirWorkspacePackage, runner
     }
 }
 
+fn resolve_bare_adapter_runner_on_path(program: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let has_explicit_extension = Path::new(program).extension().is_some();
+    #[cfg(windows)]
+    let extensions = if has_explicit_extension {
+        vec![String::new()]
+    } else {
+        std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|item| !item.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty())
+            .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()])
+    };
+    for dir in std::env::split_paths(&path_var) {
+        #[cfg(windows)]
+        {
+            for extension in &extensions {
+                let candidate_name = if extension.is_empty() {
+                    program.to_string()
+                } else {
+                    format!("{program}{extension}")
+                };
+                let candidate = dir.join(candidate_name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let candidate = dir.join(program);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn collect_adapter_sidecar_digests(
+    source: &Path,
+) -> Result<Vec<AdapterArtifactSidecarDigest>, String> {
+    let Some(parent) = source.parent() else {
+        return Ok(Vec::new());
+    };
+    let Some(stem) = source.file_stem() else {
+        return Ok(Vec::new());
+    };
+    let mut entries = fs::read_dir(parent)
+        .map_err(|err| {
+            format!(
+                "failed to enumerate foreword adapter sidecars in `{}`: {err}",
+                parent.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            format!(
+                "failed to inspect foreword adapter sidecar in `{}`: {err}",
+                parent.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let sidecar = entry.path();
+            if sidecar == source || sidecar.file_stem() != Some(stem) || !sidecar.is_file() {
+                return None;
+            }
+            Some((entry.file_name().to_string_lossy().to_string(), sidecar))
+        })
+        .map(|(file_name, sidecar)| {
+            Ok(AdapterArtifactSidecarDigest {
+                file_name,
+                digest: digest_path_contents(&sidecar).ok_or_else(|| {
+                    format!(
+                        "failed to hash foreword adapter sidecar `{}`",
+                        sidecar.display()
+                    )
+                })?,
+            })
+        })
+        .collect()
+}
+
+fn resolve_adapter_runner_program(
+    provider_package: &HirWorkspacePackage,
+    runner: &str,
+) -> Result<ResolvedAdapterRunnerProgram, String> {
+    let runner_path = Path::new(runner);
+    let source_path = if runner_path.is_absolute() {
+        runner_path.to_path_buf()
+    } else if runner.contains('/') || runner.contains('\\') {
+        provider_package.root_dir.join(runner_path)
+    } else {
+        resolve_bare_adapter_runner_on_path(runner).ok_or_else(|| {
+            format!(
+                "failed to resolve foreword adapter runner `{runner}` on PATH from `{}`",
+                provider_package.root_dir.display()
+            )
+        })?
+    };
+    Ok(ResolvedAdapterRunnerProgram {
+        token: runner.to_string(),
+        source_program: external_process_path_string(&source_path),
+        digest: digest_path_contents(&source_path),
+        sidecars: collect_adapter_sidecar_digests(&source_path)?,
+    })
+}
+
+fn build_adapter_source_identity(
+    provider_package: &HirWorkspacePackage,
+    product: &arcana_hir::HirForewordAdapterProduct,
+) -> Result<AdapterSourceArtifactIdentity, String> {
+    let product_source_path = provider_package.root_dir.join(&product.path);
+    Ok(AdapterSourceArtifactIdentity {
+        product_source_path: product_source_path.clone(),
+        product_digest: digest_path_contents(&product_source_path),
+        product_sidecars: collect_adapter_sidecar_digests(&product_source_path)?,
+        runner: product
+            .runner
+            .as_ref()
+            .map(|runner| resolve_adapter_runner_program(provider_package, runner))
+            .transpose()?,
+        args: product.args.clone(),
+    })
+}
+
 fn materialized_foreword_adapter_root(
     provider_package: &HirWorkspacePackage,
     product: &arcana_hir::HirForewordAdapterProduct,
+    source_identity: &AdapterSourceArtifactIdentity,
 ) -> PathBuf {
-    let product_path = provider_package.root_dir.join(&product.path);
-    let runner = product
-        .runner
-        .as_ref()
-        .map(|runner| resolve_adapter_runner_program(provider_package, runner));
     let seed = hash_json_hex(&(
         &provider_package.package_id,
         &product.name,
         &product.path,
-        &product.args,
-        runner.as_ref(),
-        digest_path_contents(&product_path),
-        runner.as_ref().and_then(|program| {
-            let path = Path::new(program);
-            (path.is_absolute() || program.contains(std::path::MAIN_SEPARATOR))
-                .then(|| digest_path_contents(path))
-                .flatten()
-        }),
+        source_identity,
     ));
     provider_package
         .root_dir
@@ -5941,44 +6093,93 @@ fn copy_adapter_artifact_if_needed(source: &Path, target: &Path) -> Result<(), S
     Ok(())
 }
 
-fn copy_adapter_sidecars_if_present(source: &Path, target: &Path) -> Result<(), String> {
+fn sync_adapter_sidecars(
+    source: &Path,
+    target: &Path,
+) -> Result<Vec<AdapterArtifactSidecarDigest>, String> {
     let Some(parent) = source.parent() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let Some(stem) = source.file_stem() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    for entry in fs::read_dir(parent).map_err(|err| {
-        format!(
-            "failed to enumerate foreword adapter sidecars in `{}`: {err}",
-            parent.display()
-        )
-    })? {
-        let entry = entry.map_err(|err| {
+    let target_parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let target_stem = target.file_stem().unwrap_or(stem);
+    let mut source_entries = fs::read_dir(parent)
+        .map_err(|err| {
+            format!(
+                "failed to enumerate foreword adapter sidecars in `{}`: {err}",
+                parent.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
             format!(
                 "failed to inspect foreword adapter sidecar in `{}`: {err}",
                 parent.display()
             )
         })?;
+    source_entries.sort_by_key(|entry| entry.file_name());
+    let mut source_file_names = BTreeSet::new();
+    let mut copied = Vec::new();
+    for entry in source_entries {
         let sidecar = entry.path();
         if sidecar == source || sidecar.file_stem() != Some(stem) || !sidecar.is_file() {
             continue;
         }
-        let sidecar_target = target
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(entry.file_name());
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        source_file_names.insert(file_name.clone());
+        let sidecar_target = target_parent.join(&file_name);
         copy_adapter_artifact_if_needed(&sidecar, &sidecar_target)?;
+        copied.push(AdapterArtifactSidecarDigest {
+            file_name,
+            digest: digest_path_contents(&sidecar_target).ok_or_else(|| {
+                format!(
+                    "failed to hash materialized foreword adapter sidecar `{}`",
+                    sidecar_target.display()
+                )
+            })?,
+        });
     }
-    Ok(())
+    copied.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    for entry in fs::read_dir(target_parent).map_err(|err| {
+        format!(
+            "failed to enumerate materialized foreword adapter sidecars in `{}`: {err}",
+            target_parent.display()
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to inspect materialized foreword adapter sidecar in `{}`: {err}",
+                target_parent.display()
+            )
+        })?;
+        let sidecar = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if sidecar == target
+            || sidecar.file_stem() != Some(target_stem)
+            || !sidecar.is_file()
+            || source_file_names.contains(&file_name)
+        {
+            continue;
+        }
+        fs::remove_file(&sidecar).map_err(|err| {
+            format!(
+                "failed to remove stale materialized foreword adapter sidecar `{}`: {err}",
+                sidecar.display()
+            )
+        })?;
+    }
+    Ok(copied)
 }
 
 fn materialize_foreword_adapter_artifact(
     provider_package: &HirWorkspacePackage,
     product: &arcana_hir::HirForewordAdapterProduct,
 ) -> Result<MaterializedForewordAdapterArtifact, String> {
-    let root = materialized_foreword_adapter_root(provider_package, product);
-    let source_product_path = provider_package.root_dir.join(&product.path);
+    let source_identity = build_adapter_source_identity(provider_package, product)?;
+    let root = materialized_foreword_adapter_root(provider_package, product, &source_identity);
+    let source_product_path = source_identity.product_source_path.clone();
     let product_file_name = source_product_path
         .file_name()
         .ok_or_else(|| {
@@ -5990,37 +6191,38 @@ fn materialize_foreword_adapter_artifact(
         .to_owned();
     let staged_product_path = root.join(product_file_name);
     copy_adapter_artifact_if_needed(&source_product_path, &staged_product_path)?;
-    copy_adapter_sidecars_if_present(&source_product_path, &staged_product_path)?;
+    let product_sidecars = sync_adapter_sidecars(&source_product_path, &staged_product_path)?;
 
-    let (runner_program, runner_digest) = if let Some(runner) = &product.runner {
-        let resolved_runner = resolve_adapter_runner_program(provider_package, runner);
-        let runner_path = Path::new(&resolved_runner);
-        if runner_path.is_absolute() || resolved_runner.contains(std::path::MAIN_SEPARATOR) {
+    let (runner_token, runner_program, runner_sidecars, runner_digest) =
+        if let Some(runner) = &source_identity.runner {
+            let runner_path = Path::new(&runner.source_program);
             let runner_file_name = runner_path.file_name().ok_or_else(|| {
                 format!(
-                    "foreword adapter `{}` has invalid runner path `{resolved_runner}`",
-                    product.name
+                    "foreword adapter `{}` has invalid runner path `{}`",
+                    product.name, runner.source_program
                 )
             })?;
             let staged_runner_path = root.join(runner_file_name);
             copy_adapter_artifact_if_needed(runner_path, &staged_runner_path)?;
-            copy_adapter_sidecars_if_present(runner_path, &staged_runner_path)?;
+            let runner_sidecars = sync_adapter_sidecars(runner_path, &staged_runner_path)?;
             (
+                Some(runner.token.clone()),
                 Some(external_process_path_string(&staged_runner_path)),
+                runner_sidecars,
                 digest_path_contents(&staged_runner_path),
             )
         } else {
-            (Some(resolved_runner), None)
-        }
-    } else {
-        (None, None)
-    };
+            (None, None, Vec::new(), None)
+        };
 
     Ok(MaterializedForewordAdapterArtifact {
         product_program: external_process_path_string(&staged_product_path),
         product_arg_path: external_process_path_string(&staged_product_path),
+        product_sidecars,
+        runner_token,
         runner_program,
-        args: product.args.clone(),
+        runner_sidecars,
+        args: source_identity.args,
         product_digest: digest_path_contents(&staged_product_path),
         runner_digest,
     })
@@ -6030,6 +6232,7 @@ fn build_adapter_artifact_identity(
     provider_package: &HirWorkspacePackage,
     product: &arcana_hir::HirForewordAdapterProduct,
 ) -> AdapterArtifactIdentity {
+    let source_identity = build_adapter_source_identity(provider_package, product).ok();
     let materialized = materialize_foreword_adapter_artifact(provider_package, product)
         .unwrap_or_else(|_| MaterializedForewordAdapterArtifact {
             product_program: external_process_path_string(
@@ -6038,24 +6241,46 @@ fn build_adapter_artifact_identity(
             product_arg_path: external_process_path_string(
                 &provider_package.root_dir.join(&product.path),
             ),
-            runner_program: product
-                .runner
+            product_sidecars: source_identity
                 .as_ref()
-                .map(|runner| resolve_adapter_runner_program(provider_package, runner)),
-            args: product.args.clone(),
-            product_digest: digest_path_contents(&provider_package.root_dir.join(&product.path)),
-            runner_digest: product.runner.as_ref().and_then(|runner| {
-                let program = resolve_adapter_runner_program(provider_package, runner);
-                let path = Path::new(&program);
-                (path.is_absolute() || program.contains(std::path::MAIN_SEPARATOR))
-                    .then(|| digest_path_contents(path))
-                    .flatten()
-            }),
+                .map(|identity| identity.product_sidecars.clone())
+                .unwrap_or_default(),
+            runner_token: product.runner.clone(),
+            runner_program: source_identity
+                .as_ref()
+                .and_then(|identity| identity.runner.as_ref())
+                .map(|runner| runner.source_program.clone())
+                .or_else(|| {
+                    product
+                        .runner
+                        .as_ref()
+                        .map(|runner| fallback_adapter_runner_program(provider_package, runner))
+                }),
+            runner_sidecars: source_identity
+                .as_ref()
+                .and_then(|identity| identity.runner.as_ref())
+                .map(|runner| runner.sidecars.clone())
+                .unwrap_or_default(),
+            args: source_identity
+                .as_ref()
+                .map(|identity| identity.args.clone())
+                .unwrap_or_else(|| product.args.clone()),
+            product_digest: source_identity
+                .as_ref()
+                .and_then(|identity| identity.product_digest.clone())
+                .or_else(|| digest_path_contents(&provider_package.root_dir.join(&product.path))),
+            runner_digest: source_identity
+                .as_ref()
+                .and_then(|identity| identity.runner.as_ref())
+                .and_then(|runner| runner.digest.clone()),
         });
     AdapterArtifactIdentity {
         product_name: product.name.clone(),
         product_path: materialized.product_arg_path,
+        product_sidecars: materialized.product_sidecars,
+        runner_token: materialized.runner_token,
         runner: materialized.runner_program,
+        runner_sidecars: materialized.runner_sidecars,
         args: materialized.args,
         product_digest: materialized.product_digest,
         runner_digest: materialized.runner_digest,
@@ -12129,15 +12354,50 @@ fn validate_symbol_surface_types(
                 if let Some(resolved_object) =
                     lookup_symbol_path(workspace, resolved_module, &object.type_path)
                 {
-                    let object_resolved_module = resolved_workspace
-                        .package(resolved_object.package_name)
-                        .and_then(|package| package.module(resolved_object.module_id))
-                        .unwrap_or(resolved_module);
-                    let object_module_path = workspace
-                        .package(resolved_object.package_name)
+                    let Some(object_package) =
+                        resolved_workspace.package_by_id(resolved_object.package_id)
+                    else {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: object.span.line,
+                            column: object.span.column,
+                            message: format!(
+                                "owner object `{}` resolved to missing package `{}`",
+                                object.local_name, resolved_object.package_id
+                            ),
+                        });
+                        continue;
+                    };
+                    let Some(object_resolved_module) =
+                        object_package.module(resolved_object.module_id)
+                    else {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: object.span.line,
+                            column: object.span.column,
+                            message: format!(
+                                "owner object `{}` resolved to missing module `{}`",
+                                object.local_name, resolved_object.module_id
+                            ),
+                        });
+                        continue;
+                    };
+                    let Some(object_module_path) = workspace
+                        .package_by_id(resolved_object.package_id)
                         .and_then(|package| package.module_path(resolved_object.module_id))
                         .cloned()
-                        .unwrap_or_else(|| module_path.to_path_buf());
+                    else {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: object.span.line,
+                            column: object.span.column,
+                            message: format!(
+                                "owner object `{}` resolved to missing module path for `{}`",
+                                object.local_name, resolved_object.module_id
+                            ),
+                        });
+                        continue;
+                    };
                     if resolved_object.symbol.kind != HirSymbolKind::Object {
                         diagnostics.push(Diagnostic {
                             path: module_path.to_path_buf(),
@@ -12580,10 +12840,12 @@ fn collect_owner_activation_context_types(
         else {
             continue;
         };
-        let object_resolved_module = resolved_workspace
-            .package(resolved_object.package_name)
+        let Some(object_resolved_module) = resolved_workspace
+            .package_by_id(resolved_object.package_id)
             .and_then(|package| package.module(resolved_object.module_id))
-            .unwrap_or(resolved_module);
+        else {
+            continue;
+        };
         let HirSymbolBody::Object { methods, .. } = &resolved_object.symbol.body else {
             continue;
         };
@@ -20029,10 +20291,14 @@ mod tests {
         let root = test_temp_dir("arcana-frontend-tests", "adapter_cache_key");
         let product_path = root.join("forewords").join("rewrite.sh");
         let runner_path = root.join("forewords").join("runner.sh");
+        let product_sidecar = root.join("forewords").join("rewrite.json");
+        let runner_sidecar = root.join("forewords").join("runner.json");
         fs::create_dir_all(product_path.parent().expect("product parent"))
             .expect("product dir should be creatable");
         fs::write(&product_path, "#!/bin/sh\nprintf '{}'\n").expect("product should write");
         fs::write(&runner_path, "#!/bin/sh\nexec \"$@\"\n").expect("runner should write");
+        fs::write(&product_sidecar, "{\"version\":1}\n").expect("product sidecar should write");
+        fs::write(&runner_sidecar, "{\"runner\":1}\n").expect("runner sidecar should write");
 
         let package = arcana_hir::HirWorkspacePackage {
             package_id: "app.pkg".to_string(),
@@ -20213,6 +20479,36 @@ mod tests {
         );
         assert_ne!(base_key, changed_artifact_key);
 
+        fs::write(&product_sidecar, "{\"version\":2}\n").expect("product sidecar should update");
+        let changed_sidecar_artifact = build_adapter_artifact_identity(&package, &base_product);
+        let changed_sidecar_key = build_foreword_adapter_cache_key(
+            &package,
+            &export,
+            &handler,
+            &base_product,
+            &target,
+            &["label=\"entry\"".to_string()],
+            &visible_catalog,
+            true,
+            &changed_sidecar_artifact,
+        );
+        assert_ne!(base_key, changed_sidecar_key);
+
+        fs::remove_file(&runner_sidecar).expect("runner sidecar should delete");
+        let deleted_sidecar_artifact = build_adapter_artifact_identity(&package, &base_product);
+        let deleted_sidecar_key = build_foreword_adapter_cache_key(
+            &package,
+            &export,
+            &handler,
+            &base_product,
+            &target,
+            &["label=\"entry\"".to_string()],
+            &visible_catalog,
+            true,
+            &deleted_sidecar_artifact,
+        );
+        assert_ne!(changed_sidecar_key, deleted_sidecar_key);
+
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
@@ -20284,6 +20580,37 @@ mod tests {
         let materialized = materialize_foreword_adapter_artifact(&package, &product)
             .expect("adapter artifact should materialize");
         assert_eq!(identity.product_path, materialized.product_arg_path);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn build_adapter_artifact_identity_resolves_bare_runner_via_path() {
+        let root = test_temp_dir("arcana-frontend-tests", "materialized_adapter_bare_runner");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &root,
+            "materialized_identity",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let (package, mut product, _) = make_adapter_request_fixture(&root, &adapter_rel_path);
+        let runner_name = if cfg!(windows) { "cmd" } else { "sh" };
+        product.runner = Some(runner_name.to_string());
+
+        let identity = build_adapter_artifact_identity(&package, &product);
+        assert_eq!(identity.runner_token.as_deref(), Some(runner_name));
+        let runner_path = identity
+            .runner
+            .as_deref()
+            .expect("bare runner should resolve to a materialized program");
+        assert!(
+            runner_path.contains(".arcana"),
+            "resolved runner should be staged under package cache: {runner_path}"
+        );
+        assert!(
+            Path::new(runner_path).is_file(),
+            "materialized runner should exist at {runner_path}"
+        );
+        assert!(identity.runner_digest.is_some());
+
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
@@ -24360,7 +24687,10 @@ mod tests {
             artifact: AdapterArtifactIdentity {
                 product_name: "tool-forewords".to_string(),
                 product_path: relative_product_path.to_string(),
+                product_sidecars: Vec::new(),
+                runner_token: None,
                 runner: None,
+                runner_sidecars: Vec::new(),
                 args: Vec::new(),
                 product_digest: None,
                 runner_digest: None,

@@ -32,7 +32,7 @@ use crate::{
     ARTIFACT_DIR, BuildOutputKey, BuildTarget, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
     LockNativeProductEntry, LockTargetEntry, Lockfile, NativeProductProducer, NativeProductSpec,
     PackageResult, WorkspaceGraph, collect_validated_support_file_paths,
-    render_workspace_output_path, workspace_target_output_root,
+    render_workspace_output_path, walk_directory_files, workspace_target_output_root,
 };
 use sha2::{Digest, Sha256};
 
@@ -1277,44 +1277,19 @@ fn collect_member_package_asset_files(
         return Ok(Vec::new());
     }
     let mut files = Vec::new();
-    collect_member_package_asset_files_from_dir(member, &assets_dir, &assets_dir, &mut files)?;
-    Ok(files)
-}
-
-fn collect_member_package_asset_files_from_dir(
-    member: &crate::WorkspaceMember,
-    dir: &Path,
-    assets_root: &Path,
-    out: &mut Vec<AotEmissionFile>,
-) -> PackageResult<()> {
-    let mut entries = fs::read_dir(dir)
-        .map_err(|e| format!("failed to read asset directory `{}`: {e}", dir.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            format!(
-                "failed to read asset directory entry `{}`: {e}",
-                dir.display()
-            )
-        })?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_member_package_asset_files_from_dir(member, &path, assets_root, out)?;
-            continue;
-        }
+    for path in walk_directory_files(&assets_dir)? {
         let relative = path
-            .strip_prefix(assets_root)
+            .strip_prefix(&assets_dir)
             .map_err(|e| format!("failed to relativize asset `{}`: {e}", path.display()))?;
         let relative = relative.to_string_lossy().replace('\\', "/");
         let bytes = fs::read(&path)
             .map_err(|e| format!("failed to read asset file `{}`: {e}", path.display()))?;
-        out.push(AotEmissionFile {
+        files.push(AotEmissionFile {
             relative_path: format!("{}/{}", package_asset_bundle_dir(member), relative),
             bytes,
         });
     }
-    Ok(())
+    Ok(files)
 }
 
 pub(crate) fn package_asset_bundle_dir(member: &crate::WorkspaceMember) -> String {

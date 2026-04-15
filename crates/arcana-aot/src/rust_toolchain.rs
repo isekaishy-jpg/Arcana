@@ -299,7 +299,7 @@ fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> Result<(), Str
     entries.sort_by_key(|entry| entry.path());
     for entry in entries {
         let entry_path = entry.path();
-        let metadata = entry.metadata().map_err(|e| {
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|e| {
             format!(
                 "failed to read metadata for `{}`: {e}",
                 entry_path.display()
@@ -309,7 +309,9 @@ fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> Result<(), Str
         if name == "target" || name == ".git" {
             continue;
         }
-        if metadata.is_dir() {
+        if metadata.file_type().is_symlink() || fingerprint_dir_is_reparse_point(&metadata) {
+            hasher.update(format!("link:{}\n", entry_path.display()).as_bytes());
+        } else if metadata.is_dir() {
             hasher.update(format!("dir:{}\n", entry_path.display()).as_bytes());
             fingerprint_tree_contents(&entry_path, hasher)?;
         } else if metadata.is_file() {
@@ -317,6 +319,20 @@ fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn fingerprint_dir_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn fingerprint_dir_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn fingerprint_path_contents(path: &Path, hasher: &mut Sha256) -> Result<(), String> {

@@ -26,7 +26,7 @@ pub fn visible_package_root_for_module<'a>(
         .and_then(|dependency_id| workspace.package_by_id(dependency_id))
 }
 
-pub fn visible_method_package_names_for_module(
+pub fn visible_method_package_ids_for_module(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
 ) -> BTreeSet<String> {
@@ -35,11 +35,11 @@ pub fn visible_method_package_names_for_module(
     else {
         return visible;
     };
-    visible.insert(current_package.summary.package_name.clone());
-    if workspace.package("std").is_some() {
-        visible.insert("std".to_string());
+    visible.insert(current_package.package_id.clone());
+    if let Some(std_package) = workspace.package("std") {
+        visible.insert(std_package.package_id.clone());
     }
-    visible.extend(current_package.direct_dep_packages.values().cloned());
+    visible.extend(current_package.direct_dep_ids.values().cloned());
     visible
 }
 
@@ -53,16 +53,16 @@ fn resolved_use_target_binding_name(target: &ResolvedUseTarget) -> &str {
 }
 
 fn symbol_visible_from_package_boundary(
-    current_package_name: &str,
-    target_package_name: &str,
+    current_package_id: &str,
+    target_package_id: &str,
     symbol: &HirSymbol,
 ) -> bool {
-    current_package_name == target_package_name || symbol.exported
+    current_package_id == target_package_id || symbol.exported
 }
 
 pub(crate) fn visible_symbol_refs_in_module_for_package<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package_id: &str,
     module_id: &str,
     symbol_name: &str,
@@ -80,8 +80,8 @@ pub(crate) fn visible_symbol_refs_in_module_for_package<'a>(
         .filter(|(_, symbol)| {
             symbol.name == symbol_name
                 && symbol_visible_from_package_boundary(
-                    current_package_name,
-                    &package.summary.package_name,
+                    current_package_id,
+                    &package.package_id,
                     symbol,
                 )
         })
@@ -97,14 +97,14 @@ pub(crate) fn visible_symbol_refs_in_module_for_package<'a>(
 
 fn first_visible_symbol_in_module_for_package<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package_id: &str,
     module_id: &str,
     symbol_name: &str,
 ) -> Option<HirResolvedSymbolRef<'a>> {
     visible_symbol_refs_in_module_for_package(
         workspace,
-        current_package_name,
+        current_package_id,
         package_id,
         module_id,
         symbol_name,
@@ -115,7 +115,7 @@ fn first_visible_symbol_in_module_for_package<'a>(
 
 fn lookup_package_symbol_path_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package: &'a HirWorkspacePackage,
     path: &[String],
 ) -> Option<HirResolvedSymbolRef<'a>> {
@@ -130,7 +130,7 @@ fn lookup_package_symbol_path_filtered<'a>(
     }?;
     first_visible_symbol_in_module_for_package(
         workspace,
-        current_package_name,
+        current_package_id,
         &package.package_id,
         &module.module_id,
         symbol_name,
@@ -138,16 +138,16 @@ fn lookup_package_symbol_path_filtered<'a>(
 }
 
 fn shackle_decl_visible_from_package_boundary(
-    current_package_name: &str,
-    target_package_name: &str,
+    current_package_id: &str,
+    target_package_id: &str,
     decl: &HirShackleDecl,
 ) -> bool {
-    current_package_name == target_package_name || decl.exported
+    current_package_id == target_package_id || decl.exported
 }
 
 fn first_visible_shackle_decl_in_module_for_package<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package_id: &str,
     module_id: &str,
     decl_name: &str,
@@ -161,8 +161,8 @@ fn first_visible_shackle_decl_in_module_for_package<'a>(
         .find(|(_, decl)| {
             decl.name == decl_name
                 && shackle_decl_visible_from_package_boundary(
-                    current_package_name,
-                    &package.summary.package_name,
+                    current_package_id,
+                    &package.package_id,
                     decl,
                 )
         })
@@ -177,7 +177,7 @@ fn first_visible_shackle_decl_in_module_for_package<'a>(
 
 fn lookup_package_shackle_decl_path_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package: &'a HirWorkspacePackage,
     path: &[String],
 ) -> Option<HirResolvedShackleDeclRef<'a>> {
@@ -192,7 +192,7 @@ fn lookup_package_shackle_decl_path_filtered<'a>(
     }?;
     first_visible_shackle_decl_in_module_for_package(
         workspace,
-        current_package_name,
+        current_package_id,
         &package.package_id,
         &module.module_id,
         decl_name,
@@ -201,7 +201,7 @@ fn lookup_package_shackle_decl_path_filtered<'a>(
 
 fn lookup_module_shackle_decl_path_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package: &'a HirWorkspacePackage,
     module: &'a HirModuleSummary,
     path: &[String],
@@ -212,7 +212,7 @@ fn lookup_module_shackle_decl_path_filtered<'a>(
     if path.len() == 1 {
         return first_visible_shackle_decl_in_module_for_package(
             workspace,
-            current_package_name,
+            current_package_id,
             &package.package_id,
             &module.module_id,
             &path[0],
@@ -230,7 +230,7 @@ fn lookup_module_shackle_decl_path_filtered<'a>(
     let target_module = package.resolve_relative_module(&target_relative)?;
     first_visible_shackle_decl_in_module_for_package(
         workspace,
-        current_package_name,
+        current_package_id,
         &package.package_id,
         &target_module.module_id,
         decl_name,
@@ -239,7 +239,7 @@ fn lookup_module_shackle_decl_path_filtered<'a>(
 
 fn lookup_module_symbol_path_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     package: &'a HirWorkspacePackage,
     module: &'a HirModuleSummary,
     path: &[String],
@@ -250,7 +250,7 @@ fn lookup_module_symbol_path_filtered<'a>(
     if path.len() == 1 {
         return first_visible_symbol_in_module_for_package(
             workspace,
-            current_package_name,
+            current_package_id,
             &package.package_id,
             &module.module_id,
             &path[0],
@@ -268,7 +268,7 @@ fn lookup_module_symbol_path_filtered<'a>(
     let target_module = package.resolve_relative_module(&target_relative)?;
     first_visible_symbol_in_module_for_package(
         workspace,
-        current_package_name,
+        current_package_id,
         &package.package_id,
         &target_module.module_id,
         symbol_name,
@@ -277,7 +277,7 @@ fn lookup_module_symbol_path_filtered<'a>(
 
 fn lookup_target_symbol_tail_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     target: &'a HirResolvedTarget,
     tail: &[String],
 ) -> Option<HirResolvedSymbolRef<'a>> {
@@ -293,7 +293,7 @@ fn lookup_target_symbol_tail_filtered<'a>(
             }
             first_visible_symbol_in_module_for_package(
                 workspace,
-                current_package_name,
+                current_package_id,
                 package_id,
                 module_id,
                 symbol_name,
@@ -306,20 +306,14 @@ fn lookup_target_symbol_tail_filtered<'a>(
         } => {
             let package = workspace.package_by_id(package_id)?;
             let module = package.module(module_id)?;
-            lookup_module_symbol_path_filtered(
-                workspace,
-                current_package_name,
-                package,
-                module,
-                tail,
-            )
+            lookup_module_symbol_path_filtered(workspace, current_package_id, package, module, tail)
         }
     }
 }
 
 fn lookup_symbol_tail_in_resolved_use_target<'a>(
     workspace: &'a HirWorkspaceSummary,
-    current_package_name: &str,
+    current_package_id: &str,
     target: &ResolvedUseTarget,
     tail: &[String],
 ) -> Option<HirResolvedSymbolRef<'a>> {
@@ -335,7 +329,7 @@ fn lookup_symbol_tail_in_resolved_use_target<'a>(
             }
             first_visible_symbol_in_module_for_package(
                 workspace,
-                current_package_name,
+                current_package_id,
                 package_id,
                 module_id,
                 symbol_name,
@@ -348,13 +342,7 @@ fn lookup_symbol_tail_in_resolved_use_target<'a>(
         } => {
             let package = workspace.package_by_id(package_id)?;
             let module = package.module(module_id)?;
-            lookup_module_symbol_path_filtered(
-                workspace,
-                current_package_name,
-                package,
-                module,
-                tail,
-            )
+            lookup_module_symbol_path_filtered(workspace, current_package_id, package, module, tail)
         }
     }
 }
@@ -366,7 +354,7 @@ fn lookup_symbol_path_via_module_directives<'a>(
     path: &[String],
 ) -> Option<HirResolvedSymbolRef<'a>> {
     let first = path.first()?;
-    let current_package_name = package.summary.package_name.as_str();
+    let current_package_id = package.package_id.as_str();
     for directive in &module.directives {
         match directive.kind {
             HirDirectiveKind::Import => {
@@ -383,7 +371,7 @@ fn lookup_symbol_path_via_module_directives<'a>(
                 let target_module = dependency.module(&module_id)?;
                 return lookup_module_symbol_path_filtered(
                     workspace,
-                    current_package_name,
+                    current_package_id,
                     dependency,
                     target_module,
                     &path[1..],
@@ -400,7 +388,7 @@ fn lookup_symbol_path_via_module_directives<'a>(
                 }
                 return lookup_symbol_tail_in_resolved_use_target(
                     workspace,
-                    current_package_name,
+                    current_package_id,
                     &target,
                     &path[1..],
                 );
@@ -417,11 +405,11 @@ pub(crate) fn lookup_symbol_path_in_module_context<'a>(
     path: &[String],
 ) -> Option<HirResolvedSymbolRef<'a>> {
     let first = path.first()?;
-    let current_package_name = package.summary.package_name.as_str();
+    let current_package_id = package.package_id.as_str();
     if first == &package.summary.package_name {
         return lookup_package_symbol_path_filtered(
             workspace,
-            current_package_name,
+            current_package_id,
             package,
             &path[1..],
         );
@@ -430,7 +418,7 @@ pub(crate) fn lookup_symbol_path_in_module_context<'a>(
         return workspace.package("std").and_then(|std_package| {
             lookup_package_symbol_path_filtered(
                 workspace,
-                current_package_name,
+                current_package_id,
                 std_package,
                 &path[1..],
             )
@@ -444,16 +432,16 @@ pub(crate) fn lookup_symbol_path_in_module_context<'a>(
             .and_then(|dependency| {
                 lookup_package_symbol_path_filtered(
                     workspace,
-                    current_package_name,
+                    current_package_id,
                     dependency,
                     &path[1..],
                 )
             });
     }
-    lookup_module_symbol_path_filtered(workspace, current_package_name, package, module, path)
+    lookup_module_symbol_path_filtered(workspace, current_package_id, package, module, path)
         .or_else(|| lookup_symbol_path_via_module_directives(workspace, package, module, path))
         .or_else(|| {
-            lookup_package_symbol_path_filtered(workspace, current_package_name, package, path)
+            lookup_package_symbol_path_filtered(workspace, current_package_id, package, path)
         })
 }
 
@@ -466,15 +454,10 @@ pub fn lookup_symbol_path<'a>(
         return None;
     }
     let current_package = current_workspace_package_for_module(workspace, resolved_module)?;
-    let current_package_name = current_package.summary.package_name.as_str();
+    let current_package_id = current_package.package_id.as_str();
     if path.len() == 1 {
         return resolved_module.bindings.get(&path[0]).and_then(|binding| {
-            lookup_target_symbol_tail_filtered(
-                workspace,
-                current_package_name,
-                &binding.target,
-                &[],
-            )
+            lookup_target_symbol_tail_filtered(workspace, current_package_id, &binding.target, &[])
         });
     }
 
@@ -482,7 +465,7 @@ pub fn lookup_symbol_path<'a>(
     if let Some(binding) = resolved_module.bindings.get(first) {
         return lookup_target_symbol_tail_filtered(
             workspace,
-            current_package_name,
+            current_package_id,
             &binding.target,
             &path[1..],
         );
@@ -493,7 +476,7 @@ pub fn lookup_symbol_path<'a>(
     if let Some(package) = visible_package_root_for_module(workspace, resolved_module, first) {
         return lookup_package_symbol_path_filtered(
             workspace,
-            current_package_name,
+            current_package_id,
             package,
             &path[1..],
         );
@@ -501,13 +484,13 @@ pub fn lookup_symbol_path<'a>(
 
     lookup_module_symbol_path_filtered(
         workspace,
-        current_package_name,
+        current_package_id,
         current_package,
         current_module,
         path,
     )
     .or_else(|| {
-        lookup_package_symbol_path_filtered(workspace, current_package_name, current_package, path)
+        lookup_package_symbol_path_filtered(workspace, current_package_id, current_package, path)
     })
 }
 
@@ -520,7 +503,7 @@ pub fn lookup_shackle_decl_path<'a>(
         return None;
     }
     let current_package = current_workspace_package_for_module(workspace, resolved_module)?;
-    let current_package_name = current_package.summary.package_name.as_str();
+    let current_package_id = current_package.package_id.as_str();
     let current_module = current_package.module(&resolved_module.module_id)?;
 
     if path.len() >= 2
@@ -528,7 +511,7 @@ pub fn lookup_shackle_decl_path<'a>(
     {
         return lookup_package_shackle_decl_path_filtered(
             workspace,
-            current_package_name,
+            current_package_id,
             package,
             &path[1..],
         );
@@ -536,7 +519,7 @@ pub fn lookup_shackle_decl_path<'a>(
 
     lookup_module_shackle_decl_path_filtered(
         workspace,
-        current_package_name,
+        current_package_id,
         current_package,
         current_module,
         path,
@@ -544,7 +527,7 @@ pub fn lookup_shackle_decl_path<'a>(
     .or_else(|| {
         lookup_package_shackle_decl_path_filtered(
             workspace,
-            current_package_name,
+            current_package_id,
             current_package,
             path,
         )
@@ -570,7 +553,7 @@ pub fn impl_target_is_public_from_package(
     else {
         return false;
     };
-    symbol_ref.package_name != package.summary.package_name || symbol_ref.symbol.exported
+    symbol_ref.package_id != package.package_id || symbol_ref.symbol.exported
 }
 
 fn object_declared_receiver_type(module_id: &str, symbol: &HirSymbol) -> HirType {
@@ -627,17 +610,17 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
         current_module,
         hir_strip_reference_type(wanted),
     );
-    let visible_packages = visible_method_package_names_for_module(workspace, resolved_module);
-    let current_package_name = current_workspace_package_for_module(workspace, resolved_module)
-        .map(|package| package.summary.package_name.as_str());
+    let visible_package_ids = visible_method_package_ids_for_module(workspace, resolved_module);
+    let current_package_id = current_workspace_package_for_module(workspace, resolved_module)
+        .map(|package| package.package_id.as_str());
     let mut candidates = Vec::new();
     let mut seen_routines = BTreeSet::new();
     for package in workspace.packages.values() {
-        if !visible_packages.contains(&package.summary.package_name) {
+        if !visible_package_ids.contains(&package.package_id) {
             continue;
         }
-        let foreign_package = current_package_name
-            .map(|name| name != package.summary.package_name)
+        let foreign_package = current_package_id
+            .map(|id| id != package.package_id)
             .unwrap_or(false);
         for module in &package.summary.modules {
             for (symbol_index, symbol) in module.symbols.iter().enumerate() {

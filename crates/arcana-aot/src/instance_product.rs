@@ -1020,7 +1020,7 @@ fn render_binding_mapped_view_support(
             "            .map_err(|_| format!(\"binding mapped-view len handle `{handle}` does not fit Int\"))?;\n",
             "        let value = binding_mapped_view_len_bytes_impl(instance, handle)?;\n",
             "        if binding_tag(&value)? != ArcanaCabiBindingValueTag::Int {\n",
-            "            let _ = release_binding_output_value(value, binding_owned_bytes_free, binding_owned_str_free);\n",
+            "            let _ = unsafe { release_binding_output_value(value, binding_owned_bytes_free, binding_owned_str_free) };\n",
             "            return Err(\"binding mapped-view len must return Int\".to_string());\n",
             "        }\n",
             "        let len = unsafe { value.payload.int_value };\n",
@@ -1054,7 +1054,7 @@ fn render_binding_mapped_view_support(
             "            .map_err(|_| format!(\"binding mapped-view read-byte index `{index}` does not fit Int\"))?;\n",
             "        let value = binding_mapped_view_read_byte_impl(instance, handle, index)?;\n",
             "        if binding_tag(&value)? != ArcanaCabiBindingValueTag::Int {\n",
-            "            let _ = release_binding_output_value(value, binding_owned_bytes_free, binding_owned_str_free);\n",
+            "            let _ = unsafe { release_binding_output_value(value, binding_owned_bytes_free, binding_owned_str_free) };\n",
             "            return Err(\"binding mapped-view read-byte must return Int\".to_string());\n",
             "        }\n",
             "        let byte = unsafe { value.payload.int_value };\n",
@@ -1086,7 +1086,7 @@ fn render_binding_mapped_view_support(
             "        let value = i64::from(value);\n",
             "        let result = binding_mapped_view_write_byte_impl(instance, handle, index, value)?;\n",
             "        if binding_tag(&result)? != ArcanaCabiBindingValueTag::Unit {\n",
-            "            let _ = release_binding_output_value(result, binding_owned_bytes_free, binding_owned_str_free);\n",
+            "            let _ = unsafe { release_binding_output_value(result, binding_owned_bytes_free, binding_owned_str_free) };\n",
             "            return Err(\"binding mapped-view write-byte must return Unit\".to_string());\n",
             "        }\n",
             "        Ok(())\n",
@@ -2176,13 +2176,13 @@ fn render_binding_runtime_support(
         "    };\n",
         "    if ok == 0 {\n",
         "        for value in write_backs {\n",
-        "            let _ = release_binding_output_value(value, callback.owned_bytes_free, callback.owned_str_free);\n",
+        "            let _ = unsafe { release_binding_output_value(value, callback.owned_bytes_free, callback.owned_str_free) };\n",
         "        }\n",
-        "        let _ = release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free);\n",
+        "        let _ = unsafe { release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free) };\n",
         "        return Err(format!(\"registered `{callback_name}` callback returned failure\"));\n",
         "    }\n",
         "    for value in write_backs {\n",
-        "        let _ = release_binding_output_value(value, callback.owned_bytes_free, callback.owned_str_free);\n",
+        "        let _ = unsafe { release_binding_output_value(value, callback.owned_bytes_free, callback.owned_str_free) };\n",
         "    }\n",
         "    Ok(out)\n",
         "}\n\n",
@@ -2198,7 +2198,7 @@ fn render_binding_runtime_support(
         "            .get(callback_name)\n",
         "            .copied()\n",
         "            .ok_or_else(|| format!(\"no registered `{callback_name}` callback is active\"))?;\n",
-        "        let _ = release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free);\n",
+        "        let _ = unsafe { release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free) };\n",
         "        return Err(format!(\"registered `{callback_name}` callback returned a non-Int result\"));\n",
         "    }\n",
         "    Ok(unsafe { out.payload.int_value })\n",
@@ -3467,7 +3467,7 @@ mod tests {
         assert!(lib_rs.contains("is not declared by this product"));
         assert!(lib_rs.contains("is already registered"));
         assert!(lib_rs.contains(
-            "release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free)"
+            "unsafe { release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free) }"
         ));
         assert!(lib_rs.contains("\"binding\\0\""));
     }

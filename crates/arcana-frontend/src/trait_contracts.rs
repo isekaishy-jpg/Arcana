@@ -4,7 +4,7 @@ use arcana_hir::{
     HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedSymbolRef, HirResolvedWorkspace,
     HirSymbolKind, HirTraitRef, HirType, HirTypeBindingScope, HirTypeSubstitutions,
     HirWorkspaceSummary, current_workspace_package_for_module, impl_target_is_public_from_package,
-    lookup_symbol_path, substitute_hir_type, visible_method_package_names_for_module,
+    lookup_symbol_path, substitute_hir_type, visible_method_package_ids_for_module,
 };
 
 use crate::semantic_types::SemanticArena;
@@ -46,23 +46,23 @@ pub(crate) fn workspace_has_trait_impl(
     expected_target_type: &HirType,
     scope: &TypeScope,
 ) -> bool {
-    let visible_packages = visible_method_package_names_for_module(workspace, resolved_module);
-    let current_package_name = current_workspace_package_for_module(workspace, resolved_module)
-        .map(|package| package.summary.package_name.as_str());
+    let visible_package_ids = visible_method_package_ids_for_module(workspace, resolved_module);
+    let current_package_id = current_workspace_package_for_module(workspace, resolved_module)
+        .map(|package| package.package_id.as_str());
     let mut semantics = SemanticArena::default();
     let expected_trait_id =
         semantics.trait_ref_id_for_hir(workspace, resolved_module, scope, expected_trait_ref);
     let expected_target_id =
         semantics.type_id_for_hir(workspace, resolved_module, scope, expected_target_type);
     for package in workspace.packages.values() {
-        if !visible_packages.contains(&package.summary.package_name) {
+        if !visible_package_ids.contains(&package.package_id) {
             continue;
         }
         let Some(resolved_package) = resolved_workspace.package_by_id(&package.package_id) else {
             continue;
         };
-        let foreign_package = current_package_name
-            .map(|name| name != package.summary.package_name)
+        let foreign_package = current_package_id
+            .map(|id| id != package.package_id)
             .unwrap_or(false);
         for module in &package.summary.modules {
             let Some(resolved_module) = resolved_package.module(&module.module_id) else {

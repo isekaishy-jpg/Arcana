@@ -415,11 +415,13 @@ pub(super) fn execute_runtime_native_binding_import(
         &outcome,
     )
     .inspect_err(|_err| {
-        let _ = release_binding_output_value(
-            outcome.result,
-            outcome.owned_bytes_free,
-            outcome.owned_str_free,
-        );
+        let _ = unsafe {
+            release_binding_output_value(
+                outcome.result,
+                outcome.owned_bytes_free,
+                outcome.owned_str_free,
+            )
+        };
     })?;
     let value = runtime_value_from_binding_cabi_output(
         &plan.binding_layouts,
@@ -1046,58 +1048,47 @@ pub(super) fn runtime_value_from_binding_input(
         }
         (ArcanaCabiBindingType::Str, ArcanaCabiBindingValueTag::Str) => {
             let view: ArcanaViewV1 = unsafe { value.payload.view_value };
-            let bytes = runtime_binding_input_bytes_view(
-                view.ptr.cast(),
-                view.len,
-                "native binding string arg",
-            )?;
+            let bytes =
+                unsafe { copy_binding_input_view_bytes(view, "native binding string arg") }?;
             Ok(RuntimeValue::Str(
-                std::str::from_utf8(bytes)
+                std::str::from_utf8(&bytes)
                     .map_err(|err| format!("native binding string arg is not utf-8: {err}"))?
                     .to_string(),
             ))
         }
         (ArcanaCabiBindingType::Bytes, ArcanaCabiBindingValueTag::Bytes) => {
             let view: ArcanaViewV1 = unsafe { value.payload.view_value };
-            let bytes =
-                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding bytes arg")?;
-            Ok(RuntimeValue::Bytes(bytes.to_vec()))
+            let bytes = unsafe { copy_binding_input_view_bytes(view, "native binding bytes arg") }?;
+            Ok(RuntimeValue::Bytes(bytes))
         }
         (ArcanaCabiBindingType::ByteBuffer, ArcanaCabiBindingValueTag::Bytes) => {
             let view: ArcanaViewV1 = unsafe { value.payload.view_value };
-            let bytes = runtime_binding_input_bytes_view(
-                view.ptr,
-                view.len,
-                "native binding byte buffer arg",
-            )?;
-            Ok(RuntimeValue::ByteBuffer(bytes.to_vec()))
+            let bytes =
+                unsafe { copy_binding_input_view_bytes(view, "native binding byte buffer arg") }?;
+            Ok(RuntimeValue::ByteBuffer(bytes))
         }
         (ArcanaCabiBindingType::Utf16, ArcanaCabiBindingValueTag::Bytes) => {
             let view: ArcanaViewV1 = unsafe { value.payload.view_value };
-            let bytes =
-                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding utf16 arg")?;
+            let bytes = unsafe { copy_binding_input_view_bytes(view, "native binding utf16 arg") }?;
             Ok(RuntimeValue::Utf16(runtime_utf16_units_from_binding_bytes(
-                bytes,
+                &bytes,
                 "native binding utf16 arg",
             )?))
         }
         (ArcanaCabiBindingType::Utf16Buffer, ArcanaCabiBindingValueTag::Bytes) => {
             let view: ArcanaViewV1 = unsafe { value.payload.view_value };
-            let bytes = runtime_binding_input_bytes_view(
-                view.ptr,
-                view.len,
-                "native binding utf16 buffer arg",
-            )?;
+            let bytes =
+                unsafe { copy_binding_input_view_bytes(view, "native binding utf16 buffer arg") }?;
             Ok(RuntimeValue::Utf16Buffer(
-                runtime_utf16_units_from_binding_bytes(bytes, "native binding utf16 buffer arg")?,
+                runtime_utf16_units_from_binding_bytes(&bytes, "native binding utf16 buffer arg")?,
             ))
         }
         (ArcanaCabiBindingType::Unit, ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
         (ArcanaCabiBindingType::Named(layout_id), ArcanaCabiBindingValueTag::Layout) => {
             let view: ArcanaViewV1 = unsafe { value.payload.view_value };
             let bytes =
-                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding layout arg")?;
-            runtime_binding_decode_layout_value(layouts, layout_id, bytes)
+                unsafe { copy_binding_input_view_bytes(view, "native binding layout arg") }?;
+            runtime_binding_decode_layout_value(layouts, layout_id, &bytes)
         }
         (ArcanaCabiBindingType::Named(_), ArcanaCabiBindingValueTag::Opaque) => Ok(
             RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
@@ -1379,12 +1370,12 @@ pub(super) fn runtime_value_from_binding_cabi_output(
         }
         (ArcanaCabiBindingType::Str, ArcanaCabiBindingValueTag::Str) => {
             let owned = unsafe { value.payload.owned_str_value };
-            let text = clone_owned_binding_str(owned, owned_str_free)?;
+            let text = unsafe { clone_owned_binding_str(owned, owned_str_free) }?;
             Ok(RuntimeValue::Str(text))
         }
         (ArcanaCabiBindingType::Bytes, ArcanaCabiBindingValueTag::Bytes) => {
             let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
+            let bytes = unsafe { clone_owned_binding_bytes(owned, owned_bytes_free) }?;
             Ok(RuntimeValue::Array(
                 bytes
                     .into_iter()
@@ -1394,19 +1385,19 @@ pub(super) fn runtime_value_from_binding_cabi_output(
         }
         (ArcanaCabiBindingType::ByteBuffer, ArcanaCabiBindingValueTag::Bytes) => {
             let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
+            let bytes = unsafe { clone_owned_binding_bytes(owned, owned_bytes_free) }?;
             Ok(RuntimeValue::ByteBuffer(bytes))
         }
         (ArcanaCabiBindingType::Utf16, ArcanaCabiBindingValueTag::Bytes) => {
             let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
+            let bytes = unsafe { clone_owned_binding_bytes(owned, owned_bytes_free) }?;
             Ok(RuntimeValue::Utf16(runtime_utf16_units_from_binding_bytes(
                 &bytes, label,
             )?))
         }
         (ArcanaCabiBindingType::Utf16Buffer, ArcanaCabiBindingValueTag::Bytes) => {
             let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
+            let bytes = unsafe { clone_owned_binding_bytes(owned, owned_bytes_free) }?;
             Ok(RuntimeValue::Utf16Buffer(
                 runtime_utf16_units_from_binding_bytes(&bytes, label)?,
             ))
@@ -1414,7 +1405,7 @@ pub(super) fn runtime_value_from_binding_cabi_output(
         (ArcanaCabiBindingType::Unit, ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
         (ArcanaCabiBindingType::Named(layout_id), ArcanaCabiBindingValueTag::Layout) => {
             let owned = unsafe { value.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
+            let bytes = unsafe { clone_owned_binding_bytes(owned, owned_bytes_free) }?;
             runtime_binding_decode_layout_value(layouts, layout_id, &bytes)
         }
         (ArcanaCabiBindingType::Named(_), ArcanaCabiBindingValueTag::Opaque) => Ok(
@@ -1426,7 +1417,7 @@ pub(super) fn runtime_value_from_binding_cabi_output(
         ),
         (ArcanaCabiBindingType::View(view_type), ArcanaCabiBindingValueTag::View) => {
             let view = unsafe { value.payload.view_value };
-            let bytes = clone_binding_view_bytes(view, owned_bytes_free)?;
+            let bytes = unsafe { clone_binding_view_bytes(view, owned_bytes_free) }?;
             runtime_runtime_value_from_binding_view_bytes(
                 layouts,
                 view_type,
@@ -1441,11 +1432,13 @@ pub(super) fn runtime_value_from_binding_cabi_output(
             runtime_binding_runtime_value_from_scalar_tag(ty, actual, value)
         }
         (_, ArcanaCabiBindingValueTag::Str) => {
-            let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
+            let _ =
+                unsafe { release_binding_output_value(*value, owned_bytes_free, owned_str_free) };
             Err(format!("{label} expected `{expected_type}`, got tag `Str`"))
         }
         (_, ArcanaCabiBindingValueTag::Bytes | ArcanaCabiBindingValueTag::Layout) => {
-            let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
+            let _ =
+                unsafe { release_binding_output_value(*value, owned_bytes_free, owned_str_free) };
             Err(format!(
                 "{label} expected `{expected_type}`, got tag `{actual:?}`"
             ))
@@ -2165,20 +2158,6 @@ pub(super) fn runtime_binding_expect_float(
         ParsedFloatKind::F32 => f64::from(value as f32),
         ParsedFloatKind::F64 => value,
     })
-}
-
-pub(super) fn runtime_binding_input_bytes_view<'a>(
-    ptr: *const u8,
-    len: usize,
-    label: &str,
-) -> Result<&'a [u8], String> {
-    if ptr.is_null() {
-        if len == 0 {
-            return Ok(&[]);
-        }
-        return Err(format!("{label} returned null data with len {len}"));
-    }
-    Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
 }
 
 pub(super) fn runtime_utf16_units_to_binding_bytes(units: &[u16]) -> Vec<u8> {
@@ -2904,10 +2883,12 @@ pub(super) fn runtime_release_binding_values(
     values: impl IntoIterator<Item = ArcanaCabiBindingValueV1>,
 ) {
     for value in values {
-        let _ = release_binding_output_value(
-            value,
-            runtime_binding_owned_bytes_free,
-            runtime_binding_owned_str_free,
-        );
+        let _ = unsafe {
+            release_binding_output_value(
+                value,
+                runtime_binding_owned_bytes_free,
+                runtime_binding_owned_str_free,
+            )
+        };
     }
 }

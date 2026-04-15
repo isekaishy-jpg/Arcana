@@ -8,7 +8,7 @@ use arcana_package::{
     BuildDisposition, BuildTarget, GrimoireKind, WorkspaceGraph, default_non_release_bundle_dir,
     distribution_bundle_is_ready, execute_build_with_context_and_progress, load_workspace_graph,
     plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
-    read_lockfile, stage_distribution_bundle, write_lockfile,
+    read_cached_output_metadata, read_lockfile, stage_distribution_bundle, write_lockfile,
 };
 
 use crate::build_context::{build_execution_context_for_target, render_build_progress};
@@ -110,8 +110,15 @@ pub(crate) fn prepare_run_workspace(
                     format!("invalid built artifact path `{}`", artifact_path.display())
                 })?
                 .to_string();
+            let bundle_metadata =
+                read_cached_output_metadata(&artifact_path, &BuildTarget::WindowsExe)?;
             if status.disposition() != BuildDisposition::CacheHit
-                || !distribution_bundle_is_ready(&bundle_dir, &root_file_name)
+                || !distribution_bundle_is_ready(
+                    &bundle_dir,
+                    &root_file_name,
+                    &bundle_metadata.artifact_hash,
+                    &bundle_metadata.toolchain,
+                )
             {
                 let bundle = stage_distribution_bundle(
                     &graph,

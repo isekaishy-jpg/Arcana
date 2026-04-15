@@ -7,7 +7,7 @@ pub mod type_surface;
 pub use lookup::{
     current_workspace_package_for_module, impl_target_is_public_from_package,
     lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lookup_symbol_path,
-    visible_method_package_names_for_module, visible_package_root_for_module,
+    visible_method_package_ids_for_module, visible_package_root_for_module,
 };
 pub(crate) use lookup::{
     lookup_symbol_path_in_module_context, visible_symbol_refs_in_module_for_package,
@@ -2735,7 +2735,7 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
                         placeholder_binding_scope_for_type(&candidate.declared_receiver_hir);
                     let mut substitutions = HirTypeSubstitutions::new();
                     let package = workspace
-                        .package(candidate.package_name)
+                        .package_by_id(candidate.package_id)
                         .expect("candidate package");
                     let module = package
                         .module(candidate.module_id)

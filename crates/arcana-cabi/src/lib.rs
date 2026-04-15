@@ -1638,7 +1638,11 @@ pub fn compare_binding_layouts(
     Ok(())
 }
 
-pub fn clone_owned_binding_bytes(
+/// # Safety
+///
+/// `owned` must describe a valid, readable allocation for `owned.len` bytes, and `free`
+/// must be the correct deallocator for that allocation.
+pub unsafe fn clone_owned_binding_bytes(
     owned: ArcanaOwnedBytes,
     free: ArcanaCabiOwnedBytesFreeFn,
 ) -> Result<Vec<u8>, String> {
@@ -1658,17 +1662,23 @@ pub fn clone_owned_binding_bytes(
     Ok(bytes)
 }
 
-pub fn clone_owned_binding_str(
+/// # Safety
+///
+/// `owned` must describe a valid UTF-8 allocation for `owned.len` bytes, and `free`
+/// must be the correct deallocator for that allocation.
+pub unsafe fn clone_owned_binding_str(
     owned: ArcanaOwnedStr,
     free: ArcanaCabiOwnedStrFreeFn,
 ) -> Result<String, String> {
-    let bytes = clone_owned_binding_bytes(
-        ArcanaOwnedBytes {
-            ptr: owned.ptr,
-            len: owned.len,
-        },
-        free as ArcanaCabiOwnedBytesFreeFn,
-    )?;
+    let bytes = unsafe {
+        clone_owned_binding_bytes(
+            ArcanaOwnedBytes {
+                ptr: owned.ptr,
+                len: owned.len,
+            },
+            free as ArcanaCabiOwnedBytesFreeFn,
+        )
+    }?;
     String::from_utf8(bytes).map_err(|err| format!("native binding string is not utf-8: {err}"))
 }
 
@@ -1692,7 +1702,11 @@ pub fn view_total_bytes(view: ArcanaViewV1) -> Result<usize, String> {
         .ok_or_else(|| "native binding view byte span overflowed usize".to_string())
 }
 
-pub fn clone_binding_view_bytes(
+/// # Safety
+///
+/// `view` must describe a valid readable byte span computed by `view_total_bytes`, and
+/// `free` must be the correct deallocator for that backing allocation.
+pub unsafe fn clone_binding_view_bytes(
     view: ArcanaViewV1,
     free: ArcanaCabiOwnedBytesFreeFn,
 ) -> Result<Vec<u8>, String> {
@@ -1701,10 +1715,14 @@ pub fn clone_binding_view_bytes(
         ptr: view.ptr.cast_mut(),
         len: total,
     };
-    clone_owned_binding_bytes(owned, free)
+    unsafe { clone_owned_binding_bytes(owned, free) }
 }
 
-pub fn release_binding_output_value(
+/// # Safety
+///
+/// `value` must carry a payload matching its tag, and any owned payload/free-function pair
+/// must originate from the corresponding binding transport contract.
+pub unsafe fn release_binding_output_value(
     value: ArcanaCabiBindingValueV1,
     owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
     owned_str_free: ArcanaCabiOwnedStrFreeFn,
@@ -1756,6 +1774,34 @@ pub fn release_binding_output_value(
         | ArcanaCabiBindingValueTag::Opaque
         | ArcanaCabiBindingValueTag::Unit => Ok(()),
     }
+}
+
+/// # Safety
+///
+/// `ptr` must be readable for `len` bytes for the duration of the copy.
+pub unsafe fn copy_binding_input_bytes(
+    ptr: *const u8,
+    len: usize,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if ptr.is_null() {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(format!("{label} returned null data with len {len}"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
+}
+
+/// # Safety
+///
+/// `view.ptr` must be readable for the byte span computed by `view_total_bytes(view)`.
+pub unsafe fn copy_binding_input_view_bytes(
+    view: ArcanaViewV1,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let total = view_total_bytes(view)?;
+    unsafe { copy_binding_input_bytes(view.ptr, total, label) }
 }
 
 pub fn render_c_value_type_defs() -> String {
@@ -2173,21 +2219,25 @@ mod tests {
             .expect_err("non-edit write-back must fail");
         assert!(err.contains("must be Unit"), "{err}");
 
-        release_binding_output_value(slots[1], test_free_owned_bytes, test_free_owned_str)
-            .expect("int slot should release");
+        unsafe {
+            release_binding_output_value(slots[1], test_free_owned_bytes, test_free_owned_str)
+        }
+        .expect("int slot should release");
     }
 
     #[test]
     fn owned_buffer_helpers_round_trip_strings_and_bytes() {
         let bytes = into_owned_bytes(vec![1, 2, 3]);
         assert_eq!(
-            clone_owned_binding_bytes(bytes, test_free_owned_bytes).expect("bytes should clone"),
+            unsafe { clone_owned_binding_bytes(bytes, test_free_owned_bytes) }
+                .expect("bytes should clone"),
             vec![1, 2, 3]
         );
 
         let text = into_owned_str("arcana".to_string());
         assert_eq!(
-            clone_owned_binding_str(text, test_free_owned_str).expect("str should clone"),
+            unsafe { clone_owned_binding_str(text, test_free_owned_str) }
+                .expect("str should clone"),
             "arcana"
         );
 
@@ -2224,7 +2274,7 @@ mod tests {
                 .expect("view span should compute"),
             4
         );
-        release_binding_output_value(value, test_free_owned_bytes, test_free_owned_str)
+        unsafe { release_binding_output_value(value, test_free_owned_bytes, test_free_owned_str) }
             .expect("view payload should release");
     }
 
@@ -2264,18 +2314,16 @@ mod tests {
         };
         assert_eq!(ok, 1);
         assert_eq!(
-            clone_owned_binding_bytes(
-                unsafe { result.payload.owned_bytes_value },
-                test_free_owned_bytes,
-            )
+            unsafe {
+                clone_owned_binding_bytes(result.payload.owned_bytes_value, test_free_owned_bytes)
+            }
             .expect("result bytes should clone"),
             b"callback"
         );
         assert_eq!(
-            clone_owned_binding_str(
-                unsafe { write_backs[1].payload.owned_str_value },
-                test_free_owned_str,
-            )
+            unsafe {
+                clone_owned_binding_str(write_backs[1].payload.owned_str_value, test_free_owned_str)
+            }
             .expect("write-back str should clone"),
             "edited"
         );

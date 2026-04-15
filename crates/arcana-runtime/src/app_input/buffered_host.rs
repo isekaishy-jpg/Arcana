@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Debug)]
+pub(crate) struct BufferedHostStream {
+    path: String,
+    file: fs::File,
+    readable: bool,
+    writable: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct BufferedHost {
     pub stdout: Vec<String>,
@@ -18,6 +26,8 @@ pub struct BufferedHost {
     pub monotonic_step_ms: i64,
     pub monotonic_step_ns: i64,
     pub sleep_log_ms: Vec<i64>,
+    pub(crate) next_stream_handle: u64,
+    pub(crate) streams: BTreeMap<u64, BufferedHostStream>,
 }
 
 impl BufferedHost {
@@ -133,6 +143,18 @@ impl BufferedHost {
             )
         })
     }
+
+    fn next_stream_handle(&mut self) -> u64 {
+        let handle = self.next_stream_handle.max(1);
+        self.next_stream_handle = handle + 1;
+        handle
+    }
+
+    fn stream_mut(&mut self, handle: u64) -> Result<&mut BufferedHostStream, String> {
+        self.streams
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
+    }
 }
 
 impl RuntimeCoreHost for BufferedHost {
@@ -219,5 +241,121 @@ impl RuntimeCoreHost for BufferedHost {
 
     fn runtime_path_canonicalize(&self, path: &str) -> Result<String, String> {
         self.path_canonicalize(path)
+    }
+
+    fn runtime_fs_stream_open_read(&mut self, path: &str) -> Result<u64, String> {
+        let resolved = self.resolve_fs_path(path)?;
+        let file = fs::File::open(&resolved).map_err(|err| {
+            format!(
+                "failed to open `{}` for reading: {err}",
+                runtime_path_string(&resolved)
+            )
+        })?;
+        let handle = self.next_stream_handle();
+        self.streams.insert(
+            handle,
+            BufferedHostStream {
+                path: runtime_path_string(&resolved),
+                file,
+                readable: true,
+                writable: false,
+            },
+        );
+        Ok(handle)
+    }
+
+    fn runtime_fs_stream_open_write(&mut self, path: &str, append: bool) -> Result<u64, String> {
+        let resolved = self.resolve_fs_path(path)?;
+        if let Some(parent) = resolved.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+            })?;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.create(true).write(true);
+        if append {
+            options.append(true);
+        } else {
+            options.truncate(true);
+        }
+        let file = options.open(&resolved).map_err(|err| {
+            format!(
+                "failed to open `{}` for writing: {err}",
+                runtime_path_string(&resolved)
+            )
+        })?;
+        let handle = self.next_stream_handle();
+        self.streams.insert(
+            handle,
+            BufferedHostStream {
+                path: runtime_path_string(&resolved),
+                file,
+                readable: false,
+                writable: true,
+            },
+        );
+        Ok(handle)
+    }
+
+    fn runtime_fs_stream_read(&mut self, handle: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let stream = self.stream_mut(handle)?;
+        if !stream.readable {
+            return Err(format!(
+                "FileStream `{}` is not opened for reading",
+                stream.path
+            ));
+        }
+        use std::io::Read;
+        let mut buffer = vec![0u8; max_bytes];
+        let read = stream
+            .file
+            .read(&mut buffer)
+            .map_err(|err| format!("failed to read from FileStream `{}`: {err}", stream.path))?;
+        buffer.truncate(read);
+        Ok(buffer)
+    }
+
+    fn runtime_fs_stream_write(&mut self, handle: u64, bytes: &[u8]) -> Result<usize, String> {
+        let stream = self.stream_mut(handle)?;
+        if !stream.writable {
+            return Err(format!(
+                "FileStream `{}` is not opened for writing",
+                stream.path
+            ));
+        }
+        use std::io::Write;
+        stream
+            .file
+            .write_all(bytes)
+            .map_err(|err| format!("failed to write to FileStream `{}`: {err}", stream.path))?;
+        Ok(bytes.len())
+    }
+
+    fn runtime_fs_stream_eof(&mut self, handle: u64) -> Result<bool, String> {
+        let stream = self.stream_mut(handle)?;
+        if !stream.readable {
+            return Err(format!(
+                "FileStream `{}` is not opened for reading",
+                stream.path
+            ));
+        }
+        use std::io::Seek;
+        let cursor = stream
+            .file
+            .stream_position()
+            .map_err(|err| format!("failed to inspect FileStream `{}`: {err}", stream.path))?;
+        let len = stream
+            .file
+            .metadata()
+            .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
+            .len();
+        Ok(cursor >= len)
+    }
+
+    fn runtime_fs_stream_close(&mut self, handle: u64) -> Result<(), String> {
+        self.streams
+            .remove(&handle)
+            .map(|_| ())
+            .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
     }
 }

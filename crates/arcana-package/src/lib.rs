@@ -30,6 +30,7 @@ pub use build::{
     plan_package_build_for_target_with_context, prepare_build, prepare_build_from_workspace,
     render_build_summary, render_lockfile, write_lockfile,
 };
+pub use build_identity::read_cached_output_metadata;
 pub use distribution::{
     DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,
     default_distribution_dir_for_build, default_non_release_bundle_dir,
@@ -111,14 +112,32 @@ where
 {
     let mut validated = Vec::new();
     let mut seen_paths = BTreeSet::new();
+    let mut seen_identities = BTreeMap::<String, String>::new();
     for relative_path in paths {
         validate_support_file_relative_path(relative_path)?;
         if !seen_paths.insert(relative_path) {
             return Err(format!("duplicate support file path `{relative_path}`"));
         }
+        let identity = support_file_identity_key(relative_path);
+        if let Some(existing) = seen_identities.insert(identity, relative_path.to_string())
+            && existing != relative_path
+        {
+            return Err(format!(
+                "support file path `{relative_path}` collides with `{existing}` under Windows bundle path semantics"
+            ));
+        }
         validated.push(relative_path.to_string());
     }
     Ok(validated)
+}
+
+pub(crate) fn support_file_identity_key(relative_path: &str) -> String {
+    let normalized = relative_path.replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
 }
 
 pub(crate) fn validate_support_file_relative_path(relative_path: &str) -> PackageResult<()> {
@@ -140,6 +159,87 @@ pub(crate) fn validate_support_file_relative_path(relative_path: &str) -> Packag
         return Err(format!("invalid support file path `{relative_path}`"));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_directory_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_directory_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn can_recurse_into_directory(metadata: &fs::Metadata) -> bool {
+    metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && !metadata_is_directory_reparse_point(metadata)
+}
+
+fn normalized_directory_identity(path: &Path) -> String {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = normalize_output_path(&canonical)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+pub(crate) fn walk_directory_files(root: &Path) -> PackageResult<Vec<PathBuf>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let root_metadata = fs::symlink_metadata(root).map_err(|e| {
+        format!(
+            "failed to read directory metadata `{}`: {e}",
+            root.display()
+        )
+    })?;
+    if !can_recurse_into_directory(&root_metadata) {
+        return Ok(Vec::new());
+    }
+
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    let mut visited = BTreeSet::new();
+    let mut files = Vec::new();
+
+    while let Some(dir) = pending.pop_front() {
+        let dir_identity = normalized_directory_identity(&dir);
+        if !visited.insert(dir_identity) {
+            continue;
+        }
+        let mut entries = fs::read_dir(&dir)
+            .map_err(|e| format!("failed to read directory `{}`: {e}", dir.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                format!(
+                    "failed to enumerate directory entry under `{}`: {e}",
+                    dir.display()
+                )
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|e| format!("failed to read metadata for `{}`: {e}", path.display()))?;
+            if can_recurse_into_directory(&metadata) {
+                pending.push_back(path);
+            } else if metadata.is_file() {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -6802,5 +6902,14 @@ toolchain = \"future-toolchain\"\n"
             ],
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collect_validated_support_file_paths_rejects_case_only_collisions() {
+        let err = collect_validated_support_file_paths(["bin/helper.dll", "bin/HELPER.dll"])
+            .expect_err("case-only Windows support path collisions should fail");
+        assert!(err.contains("collides"), "{err}");
+        assert!(err.contains("helper.dll"), "{err}");
     }
 }

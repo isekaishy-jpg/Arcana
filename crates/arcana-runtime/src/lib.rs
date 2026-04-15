@@ -20,9 +20,9 @@ use arcana_cabi::{
     ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiBindingViewType,
     ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode,
     ArcanaCabiViewFamily, ArcanaViewV1, binding_write_back_slots, clone_binding_view_bytes,
-    clone_owned_binding_bytes, clone_owned_binding_str, contiguous_u8_view, into_owned_bytes,
-    into_owned_str, raw_view, release_binding_output_value, validate_binding_transport_type,
-    view_total_bytes,
+    clone_owned_binding_bytes, clone_owned_binding_str, contiguous_u8_view,
+    copy_binding_input_view_bytes, into_owned_bytes, into_owned_str, raw_view,
+    release_binding_output_value, validate_binding_transport_type, view_total_bytes,
 };
 
 use arcana_ir::{
@@ -941,6 +941,30 @@ pub trait RuntimeCoreHost {
             .map(|real| runtime_path_string(&normalize_lexical_path(&real)))
             .map_err(|err| format!("failed to canonicalize `{path}`: {err}"))
     }
+    fn runtime_fs_stream_open_read(&mut self, path: &str) -> Result<u64, String> {
+        let _ = path;
+        Err("runtime core host fs stream_open_read is not implemented".to_string())
+    }
+    fn runtime_fs_stream_open_write(&mut self, path: &str, append: bool) -> Result<u64, String> {
+        let _ = (path, append);
+        Err("runtime core host fs stream_open_write is not implemented".to_string())
+    }
+    fn runtime_fs_stream_read(&mut self, handle: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let _ = (handle, max_bytes);
+        Err("runtime core host fs stream_read is not implemented".to_string())
+    }
+    fn runtime_fs_stream_write(&mut self, handle: u64, bytes: &[u8]) -> Result<usize, String> {
+        let _ = (handle, bytes);
+        Err("runtime core host fs stream_write is not implemented".to_string())
+    }
+    fn runtime_fs_stream_eof(&mut self, handle: u64) -> Result<bool, String> {
+        let _ = handle;
+        Err("runtime core host fs stream_eof is not implemented".to_string())
+    }
+    fn runtime_fs_stream_close(&mut self, handle: u64) -> Result<(), String> {
+        let _ = handle;
+        Err("runtime core host fs stream_close is not implemented".to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -950,15 +974,6 @@ struct RuntimeProcessCapture {
     stderr: Vec<u8>,
     stdout_utf8: bool,
     stderr_utf8: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeProcessFileStreamState {
-    path: String,
-    readable: bool,
-    writable: bool,
-    append: bool,
-    cursor: u64,
 }
 
 fn runtime_memory_strategy_from_name(name: &str) -> Result<RuntimeMemoryStrategy, String> {
@@ -1191,8 +1206,6 @@ pub struct RuntimeExecutionState {
     atomic_ints: BTreeMap<RuntimeAtomicIntHandle, i64>,
     next_atomic_bool_handle: u64,
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
-    next_process_stream_handle: u64,
-    process_file_streams: BTreeMap<u64, RuntimeProcessFileStreamState>,
     exported_descriptor_counts: BTreeMap<RuntimeExportedDescriptorTarget, usize>,
 }
 
@@ -5603,49 +5616,6 @@ fn expect_process_file_stream_handle(value: RuntimeValue, context: &str) -> Resu
     Ok(binding.handle)
 }
 
-fn insert_runtime_process_file_stream(
-    state: &mut RuntimeExecutionState,
-    path: &Path,
-    readable: bool,
-    writable: bool,
-    append: bool,
-    cursor: u64,
-) -> u64 {
-    let handle = state.next_process_stream_handle.max(1);
-    state.next_process_stream_handle = handle + 1;
-    state.process_file_streams.insert(
-        handle,
-        RuntimeProcessFileStreamState {
-            path: runtime_path_string(path),
-            readable,
-            writable,
-            append,
-            cursor,
-        },
-    );
-    handle
-}
-
-fn runtime_process_file_stream_ref(
-    state: &RuntimeExecutionState,
-    handle: u64,
-) -> Result<&RuntimeProcessFileStreamState, String> {
-    state
-        .process_file_streams
-        .get(&handle)
-        .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
-}
-
-fn runtime_process_file_stream_mut(
-    state: &mut RuntimeExecutionState,
-    handle: u64,
-) -> Result<&mut RuntimeProcessFileStreamState, String> {
-    state
-        .process_file_streams
-        .get_mut(&handle)
-        .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
-}
-
 fn bind_runtime_direct_call_args(
     callable: &[String],
     call_args: &[RuntimeCallArg],
@@ -6334,19 +6304,15 @@ fn try_execute_arcana_owned_api_call(
                 host,
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                fs::File::open(&resolved).map_err(|err| {
-                    format!(
-                        "failed to open `{}` for reading: {err}",
-                        runtime_path_string(&resolved)
-                    )
-                })?;
-                Ok(resolved)
-            }) {
-                Ok(resolved) => {
-                    let handle =
-                        insert_runtime_process_file_stream(state, &resolved, true, false, false, 0);
-                    ok_variant(runtime_process_file_stream_value(handle))
+            match host.runtime_fs_stream_open_read(&path) {
+                Ok(handle) => {
+                    if handle == 0 {
+                        err_variant(
+                            "runtime core host returned invalid FileStream handle `0`".to_string(),
+                        )
+                    } else {
+                        ok_variant(runtime_process_file_stream_value(handle))
+                    }
                 }
                 Err(err) => err_variant(err),
             }
@@ -6365,41 +6331,15 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
             let append = expect_bool(args[1].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                if let Some(parent) = resolved.parent() {
-                    fs::create_dir_all(parent).map_err(|err| {
-                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-                    })?;
-                }
-                let mut options = fs::OpenOptions::new();
-                options.create(true).write(true);
-                if append {
-                    options.append(true);
-                } else {
-                    options.truncate(true);
-                }
-                let file = options.open(&resolved).map_err(|err| {
-                    format!(
-                        "failed to open `{}` for writing: {err}",
-                        runtime_path_string(&resolved)
-                    )
-                })?;
-                let cursor = if append {
-                    file.metadata()
-                        .map_err(|err| {
-                            format!("failed to stat `{}`: {err}", runtime_path_string(&resolved))
-                        })?
-                        .len()
-                } else {
-                    0
-                };
-                Ok((resolved, cursor))
-            }) {
-                Ok((resolved, cursor)) => {
-                    let handle = insert_runtime_process_file_stream(
-                        state, &resolved, false, true, append, cursor,
-                    );
-                    ok_variant(runtime_process_file_stream_value(handle))
+            match host.runtime_fs_stream_open_write(&path, append) {
+                Ok(handle) => {
+                    if handle == 0 {
+                        err_variant(
+                            "runtime core host returned invalid FileStream handle `0`".to_string(),
+                        )
+                    } else {
+                        ok_variant(runtime_process_file_stream_value(handle))
+                    }
                 }
                 Err(err) => err_variant(err),
             }
@@ -6425,30 +6365,7 @@ fn try_execute_arcana_owned_api_call(
                 if max_bytes < 0 {
                     return Err("fs_stream_read max_bytes must be non-negative".to_string());
                 }
-                let stream = runtime_process_file_stream_mut(state, handle)?;
-                if !stream.readable {
-                    return Err(format!(
-                        "FileStream `{}` is not opened for reading",
-                        stream.path
-                    ));
-                }
-                let path = PathBuf::from(&stream.path);
-                let mut file = fs::File::open(&path).map_err(|err| {
-                    format!(
-                        "failed to open `{}` for reading: {err}",
-                        runtime_path_string(&path)
-                    )
-                })?;
-                use std::io::{Read, Seek, SeekFrom};
-                file.seek(SeekFrom::Start(stream.cursor))
-                    .map_err(|err| format!("failed to seek FileStream `{}`: {err}", stream.path))?;
-                let mut buffer = vec![0u8; max_bytes as usize];
-                let read = file.read(&mut buffer).map_err(|err| {
-                    format!("failed to read from FileStream `{}`: {err}", stream.path)
-                })?;
-                stream.cursor += read as u64;
-                buffer.truncate(read);
-                Ok(buffer)
+                host.runtime_fs_stream_read(handle, max_bytes as usize)
             })();
             match result {
                 Ok(bytes) => ok_variant(RuntimeValue::Bytes(bytes)),
@@ -6473,44 +6390,12 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let bytes = expect_byte_array(args[1].value.clone(), key.as_str())?;
             let result = (|| -> Result<i64, String> {
-                let stream = runtime_process_file_stream_mut(state, handle)?;
-                if !stream.writable {
-                    return Err(format!(
-                        "FileStream `{}` is not opened for writing",
-                        stream.path
-                    ));
-                }
-                let path = PathBuf::from(&stream.path);
-                let mut options = fs::OpenOptions::new();
-                options.write(true);
-                if stream.append {
-                    options.create(true).append(true);
-                }
-                let mut file = options.open(&path).map_err(|err| {
-                    format!(
-                        "failed to open `{}` for writing: {err}",
-                        runtime_path_string(&path)
-                    )
-                })?;
-                use std::io::{Seek, SeekFrom, Write};
-                if !stream.append {
-                    file.seek(SeekFrom::Start(stream.cursor)).map_err(|err| {
-                        format!("failed to seek FileStream `{}`: {err}", stream.path)
-                    })?;
-                }
-                file.write_all(&bytes).map_err(|err| {
-                    format!("failed to write to FileStream `{}`: {err}", stream.path)
-                })?;
-                stream.cursor = if stream.append {
-                    file.metadata()
-                        .map_err(|err| {
-                            format!("failed to stat FileStream `{}`: {err}", stream.path)
-                        })?
-                        .len()
-                } else {
-                    stream.cursor + bytes.len() as u64
-                };
-                Ok(bytes.len() as i64)
+                host.runtime_fs_stream_write(handle, &bytes)
+                    .and_then(|written| {
+                        i64::try_from(written).map_err(|_| {
+                            "fs_stream_write wrote byte count that does not fit Int".to_string()
+                        })
+                    })
             })();
             match result {
                 Ok(written) => ok_variant(RuntimeValue::Int(written)),
@@ -6533,19 +6418,7 @@ fn try_execute_arcana_owned_api_call(
                 args[0].value.clone(),
                 "arcana_process.fs.stream_eof",
             )?;
-            let result = (|| -> Result<bool, String> {
-                let stream = runtime_process_file_stream_ref(state, handle)?;
-                if !stream.readable {
-                    return Err(format!(
-                        "FileStream `{}` is not opened for reading",
-                        stream.path
-                    ));
-                }
-                let len = fs::metadata(PathBuf::from(&stream.path))
-                    .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
-                    .len();
-                Ok(stream.cursor >= len)
-            })();
+            let result = (|| -> Result<bool, String> { host.runtime_fs_stream_eof(handle) })();
             match result {
                 Ok(value) => ok_variant(RuntimeValue::Bool(value)),
                 Err(err) => err_variant(err),
@@ -6567,9 +6440,9 @@ fn try_execute_arcana_owned_api_call(
                 args[0].value.clone(),
                 "arcana_process.fs.stream_close",
             )?;
-            match state.process_file_streams.remove(&handle) {
-                Some(_) => ok_variant(RuntimeValue::Unit),
-                None => err_variant(format!("invalid FileStream handle `{handle}`")),
+            match host.runtime_fs_stream_close(handle) {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
             }
         }
         "arcana_process.fs.list_dir" => {

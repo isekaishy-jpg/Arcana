@@ -626,17 +626,21 @@ impl RuntimeNativeProductCatalog {
             if let Err(err) =
                 validate_binding_write_backs(&import.metadata.params, &out_write_backs)
             {
-                let _ = release_binding_output_value(
-                    out_result,
-                    binding.owned_bytes_free,
-                    binding.owned_str_free,
-                );
-                for value in out_write_backs {
-                    let _ = release_binding_output_value(
-                        value,
+                let _ = unsafe {
+                    release_binding_output_value(
+                        out_result,
                         binding.owned_bytes_free,
                         binding.owned_str_free,
-                    );
+                    )
+                };
+                for value in out_write_backs {
+                    let _ = unsafe {
+                        release_binding_output_value(
+                            value,
+                            binding.owned_bytes_free,
+                            binding.owned_str_free,
+                        )
+                    };
                 }
                 return Err(format!(
                     "binding import `{}:{}` returned invalid write-backs: {err}",
@@ -1947,14 +1951,36 @@ impl LoadedNativeLibrary {
 }
 
 #[cfg(windows)]
+const RUNTIME_MAX_BINDING_DESCRIPTOR_COUNT: usize = 65_536;
+
+#[cfg(windows)]
+unsafe fn read_descriptor_slice<'a, T>(
+    entries: *const T,
+    count: usize,
+    label: &str,
+) -> Result<&'a [T], String> {
+    if count == 0 {
+        return Ok(&[]);
+    }
+    if entries.is_null() {
+        return Err(format!(
+            "{label} pointer cannot be null when count is {count}"
+        ));
+    }
+    if count > RUNTIME_MAX_BINDING_DESCRIPTOR_COUNT {
+        return Err(format!(
+            "{label} count {count} exceeds runtime limit {RUNTIME_MAX_BINDING_DESCRIPTOR_COUNT}"
+        ));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(entries, count) })
+}
+
+#[cfg(windows)]
 unsafe fn read_binding_imports(
     entries: *const ArcanaCabiBindingImportEntryV1,
     count: usize,
 ) -> Result<Vec<ArcanaCabiBindingImport>, String> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let slice = unsafe { std::slice::from_raw_parts(entries, count) };
+    let slice = unsafe { read_descriptor_slice(entries, count, "binding import entries") }?;
     slice
         .iter()
         .map(|entry| {
@@ -1977,10 +2003,7 @@ unsafe fn read_binding_callbacks(
     entries: *const ArcanaCabiBindingCallbackEntryV1,
     count: usize,
 ) -> Result<Vec<ArcanaCabiBindingCallback>, String> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let slice = unsafe { std::slice::from_raw_parts(entries, count) };
+    let slice = unsafe { read_descriptor_slice(entries, count, "binding callback entries") }?;
     slice
         .iter()
         .map(|entry| {
@@ -2000,10 +2023,7 @@ unsafe fn read_binding_params(
     entries: *const arcana_cabi::ArcanaCabiExportParamV1,
     count: usize,
 ) -> Result<Vec<ArcanaCabiBindingParam>, String> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let slice = unsafe { std::slice::from_raw_parts(entries, count) };
+    let slice = unsafe { read_descriptor_slice(entries, count, "binding param entries") }?;
     slice
         .iter()
         .map(|entry| {
@@ -2036,10 +2056,7 @@ unsafe fn read_binding_layouts(
     entries: *const ArcanaCabiBindingLayoutEntryV1,
     count: usize,
 ) -> Result<Vec<ArcanaCabiBindingLayout>, String> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let slice = unsafe { std::slice::from_raw_parts(entries, count) };
+    let slice = unsafe { read_descriptor_slice(entries, count, "binding layout entries") }?;
     slice
         .iter()
         .map(|entry| {

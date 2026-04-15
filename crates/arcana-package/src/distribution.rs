@@ -34,8 +34,8 @@ use crate::build::{BuildStatus, package_asset_bundle_dir, selected_native_produc
 use crate::build_identity::read_cached_output_metadata;
 use crate::{
     BuildOutputKey, BuildTarget, NativeProductProducer, PackageResult, WorkspaceGraph,
-    WorkspaceMember, collect_validated_support_file_paths, repo_root,
-    validate_support_file_relative_path, workspace_distribution_output_root,
+    WorkspaceMember, collect_validated_support_file_paths, repo_root, support_file_identity_key,
+    validate_support_file_relative_path, walk_directory_files, workspace_distribution_output_root,
     workspace_target_output_root,
 };
 
@@ -59,7 +59,34 @@ pub struct DistributionBundle {
     pub manifest_text: String,
 }
 
-pub fn distribution_bundle_is_ready(bundle_dir: &Path, expected_root_artifact: &str) -> bool {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DistributionSupportFileMetadata {
+    path: String,
+    length: u64,
+    hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedDistributionManifest {
+    format: String,
+    member: String,
+    target: String,
+    product: Option<String>,
+    root_artifact: String,
+    artifact_hash: String,
+    toolchain: String,
+    support_files: Vec<String>,
+    root_artifact_length: Option<u64>,
+    root_artifact_hash: Option<String>,
+    support_file_meta: BTreeMap<String, DistributionSupportFileMetadata>,
+}
+
+pub fn distribution_bundle_is_ready(
+    bundle_dir: &Path,
+    expected_root_artifact: &str,
+    expected_artifact_hash: &str,
+    expected_toolchain: &str,
+) -> bool {
     let root_artifact_path = bundle_dir.join(expected_root_artifact);
     let manifest_path = bundle_dir.join(DISTRIBUTION_MANIFEST_FILE);
     let manifest_text = if manifest_path.is_file() {
@@ -73,28 +100,49 @@ pub fn distribution_bundle_is_ready(bundle_dir: &Path, expected_root_artifact: &
             _ => return false,
         }
     };
-    if validate_distribution_manifest_text(&manifest_text).is_err() {
-        return false;
-    }
-    let Ok(value) = manifest_text.parse::<toml::Value>() else {
+    let Ok(manifest) = parse_distribution_manifest_text(&manifest_text) else {
         return false;
     };
-    let Some(table) = value.as_table() else {
-        return false;
-    };
-    if table.get("root_artifact").and_then(toml::Value::as_str) != Some(expected_root_artifact) {
+    if manifest.root_artifact != expected_root_artifact
+        || manifest.artifact_hash != expected_artifact_hash
+        || manifest.toolchain != expected_toolchain
+    {
         return false;
     }
     if !root_artifact_path.is_file() {
         return false;
     }
-    let Some(support_files) = table.get("support_files").and_then(toml::Value::as_array) else {
+    if let Some(expected_length) = manifest.root_artifact_length
+        && fs::metadata(&root_artifact_path)
+            .map(|metadata| metadata.len() != expected_length)
+            .unwrap_or(true)
+    {
         return false;
-    };
-    support_files.iter().all(|value| {
-        value
-            .as_str()
-            .is_some_and(|path| bundle_dir.join(path).exists())
+    }
+    if let Some(expected_hash) = &manifest.root_artifact_hash
+        && compute_file_sha256(&root_artifact_path)
+            .map(|actual| actual != *expected_hash)
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    if manifest.support_files.len() != manifest.support_file_meta.len() {
+        return false;
+    }
+    manifest.support_files.iter().all(|path| {
+        let Some(expected_meta) = manifest.support_file_meta.get(path) else {
+            return false;
+        };
+        let support_path = bundle_dir.join(path);
+        let Ok(metadata) = fs::metadata(&support_path) else {
+            return false;
+        };
+        if metadata.len() != expected_meta.length {
+            return false;
+        }
+        compute_file_sha256(&support_path)
+            .map(|actual| actual == expected_meta.hash)
+            .unwrap_or(false)
     })
 }
 
@@ -315,6 +363,13 @@ pub(crate) fn append_internal_native_bundle_support(
         emission.target.format(),
         root_artifact,
         &support_paths,
+        emission
+            .root_artifact_bytes
+            .as_ref()
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0),
+        "",
+        &[],
         "",
         "",
         closure.as_deref(),
@@ -441,7 +496,17 @@ pub fn stage_distribution_bundle_for_build(
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid built artifact path `{}`", source_root.display()))?
         .to_string();
-    reset_distribution_dir(bundle_dir, &root_file_name)?;
+    let manifest_member = graph
+        .member_by_id(&resolved_member)
+        .map(|member| member.name.as_str())
+        .unwrap_or(member);
+    reset_distribution_dir(
+        bundle_dir,
+        manifest_member,
+        build_key.target_ref(),
+        build_key.product(),
+        &root_file_name,
+    )?;
     let root_native_product = distribution_root_native_product(
         graph,
         &resolved_member,
@@ -452,10 +517,6 @@ pub fn stage_distribution_bundle_for_build(
     let staged_native_products =
         stage_native_dependency_products(graph, &resolved_member, build_key, bundle_dir)?;
     let _native_cleanup = NativeBundleCleanupGuard::from_files(&staged_native_products.files);
-    let manifest_member = graph
-        .member_by_id(&resolved_member)
-        .map(|member| member.name.as_str())
-        .unwrap_or(member);
     let mut support_files = metadata
         .support_files
         .iter()
@@ -468,7 +529,11 @@ pub fn stage_distribution_bundle_for_build(
             .iter()
             .map(|file| file.relative_path.clone()),
     );
-    if support_files.iter().any(|path| path == &root_file_name) {
+    let root_file_identity = support_file_identity_key(&root_file_name);
+    if support_files
+        .iter()
+        .any(|path| support_file_identity_key(path) == root_file_identity)
+    {
         return Err(format!(
             "bundle support files for `{member}` build `{}` include root artifact path `{root_file_name}`",
             build_key.storage_key()
@@ -476,6 +541,16 @@ pub fn stage_distribution_bundle_for_build(
     }
     let support_files =
         collect_validated_support_file_paths(support_files.iter().map(String::as_str))?;
+    let root_artifact_length = fs::metadata(&source_root)
+        .map_err(|e| {
+            format!(
+                "failed to read root artifact metadata `{}`: {e}",
+                source_root.display()
+            )
+        })?
+        .len();
+    let root_artifact_hash = compute_file_sha256(&source_root)?;
+    let mut support_file_meta = Vec::new();
 
     copy_distribution_file(&source_root, &bundle_dir.join(&root_file_name))?;
     for relative_path in metadata
@@ -487,11 +562,20 @@ pub fn stage_distribution_bundle_for_build(
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(relative_path);
+        support_file_meta.push(distribution_support_file_metadata(
+            relative_path,
+            &source_path,
+        )?);
         copy_distribution_file(&source_path, &bundle_dir.join(relative_path))?;
     }
     for file in &staged_native_products.files {
+        support_file_meta.push(distribution_support_file_metadata(
+            &file.relative_path,
+            &file.source_path,
+        )?);
         copy_distribution_file(&file.source_path, &bundle_dir.join(&file.relative_path))?;
     }
+    support_file_meta.sort_by(|left, right| left.path.cmp(&right.path));
 
     let manifest_text = render_distribution_manifest(
         manifest_member,
@@ -499,6 +583,9 @@ pub fn stage_distribution_bundle_for_build(
         &metadata.target_format,
         &root_file_name,
         &support_files,
+        root_artifact_length,
+        &root_artifact_hash,
+        &support_file_meta,
         &metadata.artifact_hash,
         &metadata.toolchain,
         metadata.native_product_closure.as_deref(),
@@ -611,7 +698,7 @@ fn stage_native_dependency_products(
         });
         for file in resolved_files {
             if let Some(existing) = seen_paths.insert(
-                file.relative_path.clone(),
+                support_file_identity_key(&file.relative_path),
                 format!("{}:{}", member.name, product.name),
             ) {
                 native_product_probe(
@@ -701,26 +788,7 @@ fn member_has_package_assets(member: &WorkspaceMember) -> PackageResult<bool> {
     if !assets_dir.is_dir() {
         return Ok(false);
     }
-    let mut pending = VecDeque::from([assets_dir]);
-    while let Some(dir) = pending.pop_front() {
-        for entry in fs::read_dir(&dir)
-            .map_err(|e| format!("failed to read asset directory `{}`: {e}", dir.display()))?
-        {
-            let entry = entry.map_err(|e| {
-                format!(
-                    "failed to read asset directory entry `{}`: {e}",
-                    dir.display()
-                )
-            })?;
-            let path = entry.path();
-            if path.is_dir() {
-                pending.push_back(path);
-            } else {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    Ok(!walk_directory_files(&assets_dir)?.is_empty())
 }
 
 pub(crate) fn native_product_closure_digest(
@@ -1506,6 +1574,20 @@ fn rust_cdylib_inputs_fingerprint(crate_dir: &Path) -> PackageResult<String> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+#[cfg(windows)]
+fn fingerprint_dir_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn fingerprint_dir_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> PackageResult<()> {
     if !path.exists() {
         hasher.update(format!("missing:{}\n", path.display()).as_bytes());
@@ -1528,7 +1610,7 @@ fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> PackageResult<
     entries.sort_by_key(|entry| entry.path());
     for entry in entries {
         let entry_path = entry.path();
-        let metadata = entry.metadata().map_err(|e| {
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|e| {
             format!(
                 "failed to read metadata for `{}`: {e}",
                 entry_path.display()
@@ -1538,7 +1620,9 @@ fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> PackageResult<
         if name == "target" || name == ".git" {
             continue;
         }
-        if metadata.is_dir() {
+        if metadata.file_type().is_symlink() || fingerprint_dir_is_reparse_point(&metadata) {
+            hasher.update(format!("link:{}\n", entry_path.display()).as_bytes());
+        } else if metadata.is_dir() {
             hasher.update(format!("dir:{}\n", entry_path.display()).as_bytes());
             fingerprint_tree_contents(&entry_path, hasher)?;
         } else if metadata.is_file() {
@@ -1790,7 +1874,13 @@ fn copy_distribution_file(source: &Path, destination: &Path) -> PackageResult<()
     })
 }
 
-fn reset_distribution_dir(bundle_dir: &Path, expected_root_artifact: &str) -> PackageResult<()> {
+fn reset_distribution_dir(
+    bundle_dir: &Path,
+    expected_member: &str,
+    expected_target: &BuildTarget,
+    expected_product: Option<&str>,
+    expected_root_artifact: &str,
+) -> PackageResult<()> {
     if !bundle_dir.exists() {
         return fs::create_dir_all(bundle_dir).map_err(|e| {
             format!(
@@ -1808,7 +1898,13 @@ fn reset_distribution_dir(bundle_dir: &Path, expected_root_artifact: &str) -> Pa
     if directory_is_empty(bundle_dir)? {
         return Ok(());
     }
-    validate_managed_distribution_dir(bundle_dir, expected_root_artifact)?;
+    validate_managed_distribution_dir(
+        bundle_dir,
+        expected_member,
+        expected_target,
+        expected_product,
+        expected_root_artifact,
+    )?;
     clear_distribution_dir_contents(bundle_dir)
 }
 
@@ -1824,6 +1920,9 @@ fn directory_is_empty(dir: &Path) -> PackageResult<bool> {
 
 fn validate_managed_distribution_dir(
     bundle_dir: &Path,
+    expected_member: &str,
+    expected_target: &BuildTarget,
+    expected_product: Option<&str>,
     expected_root_artifact: &str,
 ) -> PackageResult<()> {
     let manifest_path = bundle_dir.join(DISTRIBUTION_MANIFEST_FILE);
@@ -1834,26 +1933,42 @@ fn validate_managed_distribution_dir(
                 manifest_path.display()
             )
         })?;
-        validate_distribution_manifest_text(&manifest_text).map_err(|e| {
+        let manifest = parse_distribution_manifest_text(&manifest_text).map_err(|e| {
             format!(
                 "refusing to overwrite unmanaged distribution directory `{}` because `{}` is not an `{DISTRIBUTION_BUNDLE_FORMAT}` manifest: {e}",
                 bundle_dir.display(),
                 manifest_path.display()
             )
         })?;
+        validate_distribution_identity(
+            &manifest,
+            expected_member,
+            expected_target,
+            expected_product,
+            expected_root_artifact,
+            bundle_dir,
+        )?;
         return Ok(());
     }
     let root_artifact_path = bundle_dir.join(expected_root_artifact);
     if root_artifact_path.is_file()
         && let Some(manifest_text) = read_embedded_distribution_manifest(&root_artifact_path)?
     {
-        validate_distribution_manifest_text(&manifest_text).map_err(|e| {
-                format!(
-                    "refusing to overwrite unmanaged distribution directory `{}` because embedded distribution metadata in `{}` is invalid: {e}",
-                    bundle_dir.display(),
-                    root_artifact_path.display()
-                )
-            })?;
+        let manifest = parse_distribution_manifest_text(&manifest_text).map_err(|e| {
+            format!(
+                "refusing to overwrite unmanaged distribution directory `{}` because embedded distribution metadata in `{}` is invalid: {e}",
+                bundle_dir.display(),
+                root_artifact_path.display()
+            )
+        })?;
+        validate_distribution_identity(
+            &manifest,
+            expected_member,
+            expected_target,
+            expected_product,
+            expected_root_artifact,
+            bundle_dir,
+        )?;
         return Ok(());
     }
     Err(format!(
@@ -1898,6 +2013,9 @@ fn render_distribution_manifest(
     target_format: &str,
     root_artifact: &str,
     support_files: &[String],
+    root_artifact_length: u64,
+    root_artifact_hash: &str,
+    support_file_meta: &[DistributionSupportFileMetadata],
     artifact_hash: &str,
     toolchain: &str,
     native_product_closure: Option<&str>,
@@ -1912,6 +2030,23 @@ fn render_distribution_manifest(
         .map(|file| format!("\"{}\"", escape_toml(file)))
         .collect::<Vec<_>>()
         .join(", ");
+    let support_file_meta = support_file_meta
+        .iter()
+        .map(|file| {
+            format!(
+                concat!(
+                    "[[support_file_meta]]\n",
+                    "path = \"{}\"\n",
+                    "length = {}\n",
+                    "hash = \"{}\"\n",
+                ),
+                escape_toml(&file.path),
+                file.length,
+                escape_toml(&file.hash),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
     let mut rendered = format!(
         concat!(
             "format = \"{}\"\n",
@@ -1921,7 +2056,9 @@ fn render_distribution_manifest(
             "root_artifact = \"{}\"\n",
             "artifact_hash = \"{}\"\n",
             "toolchain = \"{}\"\n",
-            "support_files = [{}]\n"
+            "support_files = [{}]\n",
+            "root_artifact_length = {}\n",
+            "root_artifact_hash = \"{}\"\n",
         ),
         DISTRIBUTION_BUNDLE_FORMAT,
         escape_toml(member),
@@ -1931,10 +2068,13 @@ fn render_distribution_manifest(
         escape_toml(artifact_hash),
         escape_toml(toolchain),
         support_files,
+        root_artifact_length,
+        escape_toml(root_artifact_hash),
     );
     if let Some(product) = build_key.product() {
         rendered.push_str(&format!("product = \"{}\"\n", escape_toml(product)));
     }
+    rendered.push_str(&support_file_meta);
     if let Some(closure) = native_product_closure {
         rendered.push_str(&format!(
             "native_product_closure = \"{}\"\n",
@@ -2198,16 +2338,177 @@ fn validate_distribution_manifest_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn hash_native_bundle_file(file: &NativeBundleFile) -> PackageResult<String> {
-    let bytes = fs::read(&file.source_path).map_err(|e| {
-        format!(
-            "failed to read native bundle file `{}` for hashing: {e}",
-            file.source_path.display()
-        )
-    })?;
+fn parse_distribution_manifest_text(text: &str) -> Result<ParsedDistributionManifest, String> {
+    validate_distribution_manifest_text(text)?;
+    let value = text
+        .parse::<toml::Value>()
+        .map_err(|e| format!("failed to parse distribution manifest: {e}"))?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| "distribution manifest root must be a table".to_string())?;
+    let format = table
+        .get("format")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let member = table
+        .get("member")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "distribution manifest is missing `member`".to_string())?
+        .to_string();
+    let target = table
+        .get("target")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "distribution manifest is missing `target`".to_string())?
+        .to_string();
+    let root_artifact = table
+        .get("root_artifact")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "distribution manifest is missing `root_artifact`".to_string())?
+        .to_string();
+    let artifact_hash = table
+        .get("artifact_hash")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "distribution manifest is missing `artifact_hash`".to_string())?
+        .to_string();
+    let toolchain = table
+        .get("toolchain")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| "distribution manifest is missing `toolchain`".to_string())?
+        .to_string();
+    let support_files = table
+        .get("support_files")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "distribution manifest is missing `support_files`".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| "distribution support file entries must be strings".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let support_files =
+        collect_validated_support_file_paths(support_files.iter().map(String::as_str))
+            .map_err(|e| format!("distribution manifest has invalid support file metadata: {e}"))?;
+    let mut support_file_meta = BTreeMap::new();
+    if let Some(items) = table
+        .get("support_file_meta")
+        .and_then(toml::Value::as_array)
+    {
+        for item in items {
+            let item = item.as_table().ok_or_else(|| {
+                "distribution `support_file_meta` entries must be tables".to_string()
+            })?;
+            let path = item
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    "distribution `support_file_meta` entries are missing `path`".to_string()
+                })?
+                .to_string();
+            validate_support_file_relative_path(&path)?;
+            let length = item
+                .get("length")
+                .and_then(toml::Value::as_integer)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    format!("distribution support file `{path}` is missing valid `length` metadata")
+                })?;
+            let hash = item
+                .get("hash")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    format!("distribution support file `{path}` is missing `hash` metadata")
+                })?
+                .to_string();
+            support_file_meta.insert(
+                path.clone(),
+                DistributionSupportFileMetadata { path, length, hash },
+            );
+        }
+    }
+    Ok(ParsedDistributionManifest {
+        format,
+        member,
+        target,
+        product: table
+            .get("product")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string),
+        root_artifact,
+        artifact_hash,
+        toolchain,
+        support_files,
+        root_artifact_length: table
+            .get("root_artifact_length")
+            .and_then(toml::Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok()),
+        root_artifact_hash: table
+            .get("root_artifact_hash")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string),
+        support_file_meta,
+    })
+}
+
+fn validate_distribution_identity(
+    manifest: &ParsedDistributionManifest,
+    expected_member: &str,
+    expected_target: &BuildTarget,
+    expected_product: Option<&str>,
+    expected_root_artifact: &str,
+    bundle_dir: &Path,
+) -> PackageResult<()> {
+    if manifest.member != expected_member
+        || manifest.target != expected_target.key()
+        || manifest.product.as_deref() != expected_product
+        || manifest.root_artifact != expected_root_artifact
+    {
+        return Err(format!(
+            "refusing to overwrite unmanaged distribution directory `{}` because it belongs to `{}` target `{}` product `{}` root artifact `{}`",
+            bundle_dir.display(),
+            manifest.member,
+            manifest.target,
+            manifest.product.as_deref().unwrap_or("<none>"),
+            manifest.root_artifact
+        ));
+    }
+    Ok(())
+}
+
+fn compute_file_sha256(path: &Path) -> PackageResult<String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("failed to read `{}` for hashing: {e}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn distribution_support_file_metadata(
+    relative_path: &str,
+    source_path: &Path,
+) -> PackageResult<DistributionSupportFileMetadata> {
+    let metadata = fs::metadata(source_path).map_err(|e| {
+        format!(
+            "failed to read staged support metadata `{}`: {e}",
+            source_path.display()
+        )
+    })?;
+    Ok(DistributionSupportFileMetadata {
+        path: relative_path.to_string(),
+        length: metadata.len(),
+        hash: compute_file_sha256(source_path)?,
+    })
+}
+
+fn hash_native_bundle_file(file: &NativeBundleFile) -> PackageResult<String> {
+    compute_file_sha256(&file.source_path).map_err(|e| {
+        format!(
+            "failed to hash native bundle file `{}`: {e}",
+            file.source_path.display()
+        )
+    })
 }
 
 fn escape_toml(text: &str) -> String {
@@ -2553,5 +2854,119 @@ mod tests {
         .expect_err("undeclared sidecar dependency should fail");
         assert!(err.contains("helper.dll"), "{err}");
         assert!(err.contains("mystery.dll"), "{err}");
+    }
+
+    #[test]
+    fn distribution_bundle_readiness_rejects_changed_support_file() {
+        let dir = temp_workspace_dir("bundle_readiness_support_change");
+        let bundle_dir = dir.join("bundle");
+        let root_artifact = bundle_dir.join("app.exe");
+        let support_path = bundle_dir.join("bin").join("helper.dll");
+        write_file(&root_artifact, "root-bytes");
+        write_file(&support_path, "support-bytes");
+
+        let build_key = BuildOutputKey::target(BuildTarget::windows_exe());
+        let support_meta = vec![
+            distribution_support_file_metadata("bin/helper.dll", &support_path)
+                .expect("support metadata should build"),
+        ];
+        let manifest = render_distribution_manifest(
+            "app",
+            &build_key,
+            "arcana-aot-windows-exe-v1",
+            "app.exe",
+            &["bin/helper.dll".to_string()],
+            fs::metadata(&root_artifact)
+                .expect("root metadata should read")
+                .len(),
+            &compute_file_sha256(&root_artifact).expect("root hash should compute"),
+            &support_meta,
+            "artifact-hash",
+            "toolchain",
+            None,
+            None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
+        write_file(&bundle_dir.join(DISTRIBUTION_MANIFEST_FILE), &manifest);
+        assert!(distribution_bundle_is_ready(
+            &bundle_dir,
+            "app.exe",
+            "artifact-hash",
+            "toolchain",
+        ));
+
+        write_file(&support_path, "tampered-support");
+        assert!(!distribution_bundle_is_ready(
+            &bundle_dir,
+            "app.exe",
+            "artifact-hash",
+            "toolchain",
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_managed_distribution_dir_rejects_mismatched_identity() {
+        let dir = temp_workspace_dir("bundle_identity_guard");
+        let bundle_dir = dir.join("bundle");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir should exist");
+        let build_key = BuildOutputKey::target(BuildTarget::windows_exe());
+        let manifest = render_distribution_manifest(
+            "app",
+            &build_key,
+            "arcana-aot-windows-exe-v1",
+            "app.exe",
+            &[],
+            0,
+            "",
+            &[],
+            "artifact-hash",
+            "toolchain",
+            None,
+            None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
+        write_file(&bundle_dir.join(DISTRIBUTION_MANIFEST_FILE), &manifest);
+
+        let err = validate_managed_distribution_dir(
+            &bundle_dir,
+            "tool",
+            &BuildTarget::windows_exe(),
+            None,
+            "app.exe",
+        )
+        .expect_err("mismatched member identity should fail");
+        assert!(
+            err.contains("belongs to `app` target `windows-exe`"),
+            "{err}"
+        );
+
+        let err = validate_managed_distribution_dir(
+            &bundle_dir,
+            "app",
+            &BuildTarget::windows_dll(),
+            None,
+            "app.exe",
+        )
+        .expect_err("mismatched target identity should fail");
+        assert!(err.contains("target `windows-exe`"), "{err}");
+
+        validate_managed_distribution_dir(
+            &bundle_dir,
+            "app",
+            &BuildTarget::windows_exe(),
+            None,
+            "app.exe",
+        )
+        .expect("matching managed bundle identity should pass");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
