@@ -1865,7 +1865,7 @@ shackle fn window_alive_impl(read win: arcana_winapi.desktop_handles.Window) -> 
     Ok(binding_bool(!window.closed && !window.hwnd.is_null() && unsafe { IsWindow(window.hwnd) != 0 }))
 
 shackle fn window_native_handle_impl(read win: arcana_winapi.desktop_handles.Window) -> arcana_winapi.raw.types.HWND = helpers.window.window_native_handle:
-    Ok(binding_layout(window_ref(instance, win)?.hwnd))
+    Ok(binding_output_layout(window_ref(instance, win)?.hwnd))
 
 shackle fn window_width_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_width:
     Ok(binding_int(window_ref(instance, win)?.width))

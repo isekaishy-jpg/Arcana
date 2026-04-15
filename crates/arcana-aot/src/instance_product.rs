@@ -1128,13 +1128,13 @@ fn render_binding_param_decode(
             format!("read_bool_arg(&args[{index}], {:?})?", param.name)
         }
         ArcanaCabiBindingType::Str => {
-            format!("read_utf8_arg(&args[{index}], {:?})?", param.name)
+            format!("read_input_utf8_arg(&args[{index}], {:?})?", param.name)
         }
         ArcanaCabiBindingType::Bytes | ArcanaCabiBindingType::ByteBuffer => {
-            format!("read_bytes_arg(&args[{index}], {:?})?", param.name)
+            format!("read_input_bytes_arg(&args[{index}], {:?})?", param.name)
         }
         ArcanaCabiBindingType::Utf16 | ArcanaCabiBindingType::Utf16Buffer => {
-            format!("read_utf16_arg(&args[{index}], {:?})?", param.name)
+            format!("read_input_utf16_arg(&args[{index}], {:?})?", param.name)
         }
         ArcanaCabiBindingType::I8 => format!("read_i8_arg(&args[{index}], {:?})?", param.name),
         ArcanaCabiBindingType::U8 => format!("read_u8_arg(&args[{index}], {:?})?", param.name),
@@ -1171,7 +1171,7 @@ fn render_binding_param_decode(
         ArcanaCabiBindingType::Named(name) => {
             if binding_named_type_has_layout(spec, name) {
                 format!(
-                    "read_layout_arg::<{target_ty}>(&args[{index}], {:?})?",
+                    "read_input_layout_arg::<{target_ty}>(&args[{index}], {:?})?",
                     param.name
                 )
             } else if target_ty == "u64" {
@@ -1187,7 +1187,7 @@ fn render_binding_param_decode(
             format!("read_unit_arg(&args[{index}], {:?})?", param.name)
         }
         ArcanaCabiBindingType::View(view) => format!(
-            "read_view_arg(&args[{index}], {:?}, {}, {})?",
+            "read_input_view_arg(&args[{index}], {:?}, {}, {})?",
             param.name,
             view.family.cabi_tag(),
             render_binding_view_element_size_expr(spec, view)?
@@ -1250,7 +1250,7 @@ fn render_binding_write_back_value_expr(
         }
         ArcanaCabiBindingType::Named(name) => {
             if binding_named_type_has_layout(spec, name) {
-                format!("binding_layout({expr})")
+                format!("binding_output_layout({expr})")
             } else {
                 format!("binding_opaque({expr} as u64)")
             }
@@ -1438,7 +1438,7 @@ fn render_binding_result_expr(
         ArcanaCabiBindingType::F64 => format!("    Ok(binding_f64({expr} as f64))\n"),
         ArcanaCabiBindingType::Named(name) => {
             if binding_named_type_has_layout(spec, name) {
-                format!("    Ok(binding_layout({expr}))\n")
+                format!("    Ok(binding_output_layout({expr}))\n")
             } else {
                 format!("    Ok(binding_opaque({expr} as u64))\n")
             }
@@ -1529,6 +1529,8 @@ fn render_generated_binding_preamble(
             "use arcana_cabi::{{\n",
             "    ARCANA_CABI_CONTRACT_VERSION_V1,\n",
             "    ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,\n",
+            "    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,\n",
+            "    ARCANA_CABI_VIEW_FLAG_UTF8,\n",
             "    ArcanaCabiBindingCallbackEntryV1,\n",
             "    ArcanaCabiBindingCallbackFn,\n",
             "    ArcanaCabiBindingImportEntryV1,\n",
@@ -1629,6 +1631,16 @@ fn render_binding_runtime_support(
         "    handles_to_name: BTreeMap<u64, String>,\n",
         "    next_handle: u64,\n",
         "    package_state: PackageState,\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "struct BindingInputValue {\n",
+        "    value: ArcanaCabiBindingValueV1,\n",
+        "    backing: Option<Vec<u8>>,\n",
+        "}\n\n",
+        "impl BindingInputValue {\n",
+        "    fn cabi(&self) -> ArcanaCabiBindingValueV1 {\n",
+        "        self.value\n",
+        "    }\n",
         "}\n\n",
         "fn binding_tag(value: &ArcanaCabiBindingValueV1) -> Result<ArcanaCabiBindingValueTag, String> {\n",
         "    value.tag()\n",
@@ -1731,7 +1743,7 @@ fn render_binding_runtime_support(
         "        ..ArcanaCabiBindingValueV1::default()\n",
         "    }\n",
         "}\n\n",
-        "fn binding_layout<T: Copy>(value: T) -> ArcanaCabiBindingValueV1 {\n",
+        "fn binding_output_layout<T: Copy>(value: T) -> ArcanaCabiBindingValueV1 {\n",
         "    let len = std::mem::size_of::<T>();\n",
         "    let bytes = if len == 0 {\n",
         "        Vec::new()\n",
@@ -1775,6 +1787,92 @@ fn render_binding_runtime_support(
         "        payload: ArcanaCabiBindingPayloadV1 { owned_bytes_value: into_owned_bytes(bytes) },\n",
         "        ..ArcanaCabiBindingValueV1::default()\n",
         "    }\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "fn binding_input_value(value: ArcanaCabiBindingValueV1) -> BindingInputValue {\n",
+        "    BindingInputValue { value, backing: None }\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "fn binding_input_owned_view(\n",
+        "    tag: ArcanaCabiBindingValueTag,\n",
+        "    bytes: Vec<u8>,\n",
+        "    len: usize,\n",
+        "    stride_bytes: usize,\n",
+        "    family: u32,\n",
+        "    element_size: u32,\n",
+        "    flags: u32,\n",
+        ") -> BindingInputValue {\n",
+        "    let view = if bytes.is_empty() {\n",
+        "        raw_view(ptr::null(), len, stride_bytes, family, element_size, flags)\n",
+        "    } else {\n",
+        "        raw_view(bytes.as_ptr(), len, stride_bytes, family, element_size, flags)\n",
+        "    };\n",
+        "    BindingInputValue {\n",
+        "        value: ArcanaCabiBindingValueV1 {\n",
+        "            tag: tag as u32,\n",
+        "            payload: ArcanaCabiBindingPayloadV1 { view_value: view },\n",
+        "            ..ArcanaCabiBindingValueV1::default()\n",
+        "        },\n",
+        "        backing: Some(bytes),\n",
+        "    }\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "fn binding_input_layout<T: Copy>(value: T) -> BindingInputValue {\n",
+        "    let len = std::mem::size_of::<T>();\n",
+        "    let bytes = if len == 0 {\n",
+        "        Vec::new()\n",
+        "    } else {\n",
+        "        unsafe { std::slice::from_raw_parts((&value as *const T).cast::<u8>(), len) }.to_vec()\n",
+        "    };\n",
+        "    binding_input_owned_view(\n",
+        "        ArcanaCabiBindingValueTag::Layout,\n",
+        "        bytes,\n",
+        "        len,\n",
+        "        1,\n",
+        "        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,\n",
+        "        1,\n",
+        "        0,\n",
+        "    )\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "fn binding_input_utf8(text: &str) -> BindingInputValue {\n",
+        "    binding_input_owned_view(\n",
+        "        ArcanaCabiBindingValueTag::Str,\n",
+        "        text.as_bytes().to_vec(),\n",
+        "        text.len(),\n",
+        "        1,\n",
+        "        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,\n",
+        "        1,\n",
+        "        ARCANA_CABI_VIEW_FLAG_UTF8,\n",
+        "    )\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "fn binding_input_bytes(bytes: &[u8]) -> BindingInputValue {\n",
+        "    binding_input_owned_view(\n",
+        "        ArcanaCabiBindingValueTag::Bytes,\n",
+        "        bytes.to_vec(),\n",
+        "        bytes.len(),\n",
+        "        1,\n",
+        "        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,\n",
+        "        1,\n",
+        "        0,\n",
+        "    )\n",
+        "}\n\n",
+        "#[allow(dead_code)]\n",
+        "fn binding_input_utf16(units: &[u16]) -> BindingInputValue {\n",
+        "    let mut bytes = Vec::with_capacity(units.len().saturating_mul(2));\n",
+        "    for unit in units {\n",
+        "        bytes.extend_from_slice(&unit.to_ne_bytes());\n",
+        "    }\n",
+        "    binding_input_owned_view(\n",
+        "        ArcanaCabiBindingValueTag::Bytes,\n",
+        "        bytes,\n",
+        "        units.len().saturating_mul(2),\n",
+        "        1,\n",
+        "        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,\n",
+        "        1,\n",
+        "        0,\n",
+        "    )\n",
         "}\n\n",
         "fn view_total_bytes(view: ArcanaViewV1) -> Result<usize, String> {\n",
         "    if view.len == 0 {\n",
@@ -1949,7 +2047,7 @@ fn render_binding_runtime_support(
         "    }\n",
         "    Ok(unsafe { value.payload.opaque_value })\n",
         "}\n\n",
-        "fn read_layout_arg<T: Copy>(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<T, String> {\n",
+        "fn read_input_layout_arg<T: Copy>(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<T, String> {\n",
         "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Layout {\n",
         "        return Err(format!(\"binding arg `{name}` must be Layout\"));\n",
         "    }\n",
@@ -1970,7 +2068,29 @@ fn render_binding_runtime_support(
         "        Ok(unsafe { std::ptr::read_unaligned(view.ptr.cast::<T>()) })\n",
         "    }\n",
         "}\n\n",
-        "fn read_utf8_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<String, String> {\n",
+        "#[allow(dead_code)]\n",
+        "fn read_output_layout_arg<T: Copy>(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<T, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Layout {\n",
+        "        return Err(format!(\"binding output `{name}` must be Layout\"));\n",
+        "    }\n",
+        "    let owned = unsafe { value.payload.owned_bytes_value };\n",
+        "    let expected_len = std::mem::size_of::<T>();\n",
+        "    if owned.len != expected_len {\n",
+        "        return Err(format!(\"binding output `{name}` layout size mismatch: expected {expected_len}, got {}\", owned.len));\n",
+        "    }\n",
+        "    if owned.ptr.is_null() {\n",
+        "        if expected_len == 0 {\n",
+        "            return Ok(unsafe { std::mem::zeroed() });\n",
+        "        }\n",
+        "        return Err(format!(\"binding output `{name}` returned null Layout data with len {}\", owned.len));\n",
+        "    }\n",
+        "    if (owned.ptr as usize) % std::mem::align_of::<T>() == 0 {\n",
+        "        Ok(unsafe { *(owned.ptr.cast::<T>()) })\n",
+        "    } else {\n",
+        "        Ok(unsafe { std::ptr::read_unaligned(owned.ptr.cast::<T>()) })\n",
+        "    }\n",
+        "}\n\n",
+        "fn read_input_utf8_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<String, String> {\n",
         "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Str {\n",
         "        return Err(format!(\"binding arg `{name}` must be Str\"));\n",
         "    }\n",
@@ -1984,7 +2104,7 @@ fn render_binding_runtime_support(
         "    };\n",
         "    String::from_utf8(bytes.to_vec()).map_err(|err| format!(\"binding arg `{name}` is not utf-8: {err}\"))\n",
         "}\n\n",
-        "fn read_bytes_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<Vec<u8>, String> {\n",
+        "fn read_input_bytes_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<Vec<u8>, String> {\n",
         "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Bytes {\n",
         "        return Err(format!(\"binding arg `{name}` must be Bytes\"));\n",
         "    }\n",
@@ -1998,8 +2118,8 @@ fn render_binding_runtime_support(
         "    };\n",
         "    Ok(bytes.to_vec())\n",
         "}\n\n",
-        "fn read_utf16_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<Vec<u16>, String> {\n",
-        "    let bytes = read_bytes_arg(value, name)?;\n",
+        "fn read_input_utf16_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<Vec<u16>, String> {\n",
+        "    let bytes = read_input_bytes_arg(value, name)?;\n",
         "    if bytes.len() % 2 != 0 {\n",
         "        return Err(format!(\"binding arg `{name}` utf16 byte length {} is not divisible by 2\", bytes.len()));\n",
         "    }\n",
@@ -2008,7 +2128,7 @@ fn render_binding_runtime_support(
         "        .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))\n",
         "        .collect())\n",
         "}\n\n",
-        "fn read_view_arg(\n",
+        "fn read_input_view_arg(\n",
         "    value: &ArcanaCabiBindingValueV1,\n",
         "    name: &str,\n",
         "    expected_family: u32,\n",
@@ -2035,20 +2155,21 @@ fn render_binding_runtime_support(
         "unsafe fn invoke_callback_value_result(\n",
         "    instance: &mut BindingInstance,\n",
         "    callback_name: &str,\n",
-        "    args: &[ArcanaCabiBindingValueV1],\n",
+        "    args: &[BindingInputValue],\n",
         ") -> Result<ArcanaCabiBindingValueV1, String> {\n",
         "    let callback = instance\n",
         "        .callbacks_by_name\n",
         "        .get(callback_name)\n",
         "        .copied()\n",
         "        .ok_or_else(|| format!(\"no registered `{callback_name}` callback is active\"))?;\n",
-        "    let mut write_backs = vec![ArcanaCabiBindingValueV1::default(); args.len()];\n",
+        "    let cabi_args = args.iter().map(BindingInputValue::cabi).collect::<Vec<_>>();\n",
+        "    let mut write_backs = vec![ArcanaCabiBindingValueV1::default(); cabi_args.len()];\n",
         "    let mut out = ArcanaCabiBindingValueV1::default();\n",
         "    let ok = unsafe {\n",
         "        (callback.callback)(\n",
         "            callback.user_data,\n",
-        "            args.as_ptr(),\n",
-        "            args.len(),\n",
+        "            cabi_args.as_ptr(),\n",
+        "            cabi_args.len(),\n",
         "            write_backs.as_mut_ptr(),\n",
         "            &mut out,\n",
         "        )\n",
@@ -2068,7 +2189,7 @@ fn render_binding_runtime_support(
         "unsafe fn invoke_callback_int_result(\n",
         "    instance: &mut BindingInstance,\n",
         "    callback_name: &str,\n",
-        "    args: &[ArcanaCabiBindingValueV1],\n",
+        "    args: &[BindingInputValue],\n",
         ") -> Result<i64, String> {\n",
         "    let out = unsafe { invoke_callback_value_result(instance, callback_name, args) }?;\n",
         "    if binding_tag(&out)? != ArcanaCabiBindingValueTag::Int {\n",
@@ -3334,6 +3455,15 @@ mod tests {
         assert!(lib_rs.contains("binding_import_impl_0"));
         assert!(lib_rs.contains("arcana_binding_import_arcana_winapi_foundation_module_path"));
         assert!(lib_rs.contains("binding_callback_name_is_declared"));
+        assert!(lib_rs.contains("struct BindingInputValue"));
+        assert!(lib_rs.contains("fn binding_input_layout<T: Copy>(value: T) -> BindingInputValue"));
+        assert!(
+            lib_rs.contains(
+                "fn binding_output_layout<T: Copy>(value: T) -> ArcanaCabiBindingValueV1"
+            )
+        );
+        assert!(lib_rs.contains("fn read_output_layout_arg<T: Copy>(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<T, String>"));
+        assert!(lib_rs.contains("args: &[BindingInputValue]"));
         assert!(lib_rs.contains("is not declared by this product"));
         assert!(lib_rs.contains("is already registered"));
         assert!(lib_rs.contains(

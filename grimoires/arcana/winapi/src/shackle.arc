@@ -406,15 +406,19 @@ shackle thunk hidden_window_proc(hwnd: HWND, message: UINT, wparam: WPARAM, lpar
     }
     let instance = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut crate::BindingInstance };
     if message == WM_APP + 1 && !instance.is_null() {
+        let hwnd_arg = binding_input_layout(hwnd);
+        let message_arg = binding_input_layout(message);
+        let wparam_arg = binding_input_layout(wparam);
+        let lparam_arg = binding_input_layout(lparam);
         let args = [
-            binding_layout(hwnd),
-            binding_layout(message),
-            binding_layout(wparam),
-            binding_layout(lparam),
+            hwnd_arg,
+            message_arg,
+            wparam_arg,
+            lparam_arg,
         ];
         match unsafe { invoke_callback_value_result(&mut *instance, "window_proc", &args) } {
             Ok(out) => {
-                let result = read_layout_arg::<LRESULT>(&out, "window_proc result");
+                let result = read_output_layout_arg::<LRESULT>(&out, "window_proc result");
                 if let Some(callback) = unsafe { (*instance).callbacks_by_name.get("window_proc").copied() } {
                     let _ = release_binding_output_value(out, callback.owned_bytes_free, callback.owned_str_free);
                 }
@@ -446,7 +450,7 @@ shackle thunk hidden_window_proc(hwnd: HWND, message: UINT, wparam: WPARAM, lpar
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 
 shackle fn foundation_current_module_impl() -> arcana_winapi.raw.types.HMODULE = foundation.current_module:
-    Ok(binding_layout(
+    Ok(binding_output_layout(
         current_module_handle_for_address(hidden_window_proc as usize as LPCVOID)?
     ))
 
@@ -514,7 +518,7 @@ shackle fn windows_create_hidden_window_impl() -> arcana_winapi.raw.types.HWND =
             unsafe { GetLastError() }
         ));
     }
-    Ok(binding_layout(hwnd))
+    Ok(binding_output_layout(hwnd))
 
 shackle fn windows_post_ping_impl(read window: arcana_winapi.raw.types.HWND, code: Int) = windows.post_ping:
     let hwnd = window;

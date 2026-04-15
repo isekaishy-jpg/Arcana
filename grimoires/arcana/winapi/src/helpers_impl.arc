@@ -193,7 +193,7 @@ shackle fn strings_utf16_units_with_nul_impl(read text: Str) -> Int = helpers.st
     Ok(binding_int(text.encode_utf16().count() as i64 + 1))
 
 shackle fn errors_last_error_impl() -> arcana_winapi.raw.types.DWORD = helpers.errors.last_error:
-    Ok(binding_layout(unsafe { crate::raw::kernel32::GetLastError() }))
+    Ok(binding_output_layout(unsafe { crate::raw::kernel32::GetLastError() }))
 
 shackle fn errors_hresult_succeeded_impl(read code: arcana_winapi.raw.types.HRESULT) -> Bool = helpers.errors.hresult_succeeded:
     Ok(binding_bool(hresult_succeeded_native(code)))
@@ -202,12 +202,12 @@ shackle fn errors_hresult_failed_impl(read code: arcana_winapi.raw.types.HRESULT
     Ok(binding_bool(hresult_failed_native(code)))
 
 shackle fn com_initialize_multithreaded_impl() -> arcana_winapi.raw.types.HRESULT = helpers.com.initialize_multithreaded:
-    Ok(binding_layout(unsafe {
+    Ok(binding_output_layout(unsafe {
         crate::raw::ole32::CoInitializeEx(std::ptr::null_mut(), crate::raw::constants::COINIT_MULTITHREADED)
     }))
 
 shackle fn com_initialize_apartment_threaded_impl() -> arcana_winapi.raw.types.HRESULT = helpers.com.initialize_apartment_threaded:
-    Ok(binding_layout(unsafe {
+    Ok(binding_output_layout(unsafe {
         crate::raw::ole32::CoInitializeEx(std::ptr::null_mut(), crate::raw::constants::COINIT_APARTMENTTHREADED)
     }))
 
@@ -226,13 +226,13 @@ shackle fn com_guid_to_text_impl(read guid: arcana_winapi.raw.types.GUID) -> Str
     Ok(binding_owned_str(String::from_utf16_lossy(&buffer[..(len as usize - 1)])))
 
 shackle fn com_make_property_key_impl(read fmtid: arcana_winapi.raw.types.GUID, read pid: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.PROPERTYKEY = helpers.com.make_property_key:
-    Ok(binding_layout(crate::raw::types::PROPERTYKEY {
+    Ok(binding_output_layout(crate::raw::types::PROPERTYKEY {
         fmtid,
         pid,
     }))
 
 shackle fn com_property_key_pid_impl(read key: arcana_winapi.raw.types.PROPERTYKEY) -> arcana_winapi.raw.types.DWORD = helpers.com.property_key_pid:
-    Ok(binding_layout(key.pid))
+    Ok(binding_output_layout(key.pid))
 
 shackle fn windowing_hidden_window_roundtrip_impl(read code: Int) -> Int = helpers.windowing.hidden_window_roundtrip:
     let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
@@ -269,7 +269,7 @@ shackle fn windowing_hidden_window_dpi_impl() -> arcana_winapi.raw.types.UINT = 
             unsafe { crate::raw::kernel32::GetLastError() }
         ));
     }
-    Ok(binding_layout(dpi))
+    Ok(binding_output_layout(dpi))
 
 shackle fn windowing_hidden_window_monitor_dpi_impl() -> arcana_winapi.raw.types.UINT = helpers.windowing.hidden_window_monitor_dpi:
     let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
@@ -296,7 +296,7 @@ shackle fn windowing_hidden_window_monitor_dpi_impl() -> arcana_winapi.raw.types
         Ok(dpi_x.max(dpi_y))
     })();
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
-    Ok(binding_layout(result?))
+    Ok(binding_output_layout(result?))
 
 shackle fn windowing_hidden_window_dark_mode_roundtrip_impl() -> Bool = helpers.windowing.hidden_window_dark_mode_roundtrip:
     let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
@@ -338,7 +338,7 @@ shackle fn windowing_hidden_window_client_rect_impl() -> arcana_winapi.raw.types
             unsafe { crate::raw::kernel32::GetLastError() }
         ));
     }
-    Ok(binding_layout(rect))
+    Ok(binding_output_layout(rect))
 
 shackle fn windowing_hidden_window_frame_rect_impl() -> arcana_winapi.raw.types.RECT = helpers.windowing.hidden_window_frame_rect:
     let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
@@ -355,7 +355,7 @@ shackle fn windowing_hidden_window_frame_rect_impl() -> arcana_winapi.raw.types.
     if hresult_failed_native(hr) {
         return Err(format!("DwmGetWindowAttribute failed with HRESULT {hr}"));
     }
-    Ok(binding_layout(rect))
+    Ok(binding_output_layout(rect))
 
 shackle fn windowing_clipboard_open_roundtrip_impl() -> Bool = helpers.windowing.clipboard_open_roundtrip:
     let hwnd = unsafe { create_hidden_window_handle(instance as *mut crate::BindingInstance)? };
