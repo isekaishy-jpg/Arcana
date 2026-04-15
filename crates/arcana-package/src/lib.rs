@@ -5289,7 +5289,10 @@ mod tests {
     #[test]
     fn invalid_cached_artifact_format_triggers_rebuild() {
         let dir = temp_dir("invalid_artifact_format");
-        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"artifact_format_app\"\nkind = \"app\"\n",
+        );
         write_file(
             &dir.join("src").join("shelf.arc"),
             "fn main() -> Int:\n    return 0\n",
@@ -5305,7 +5308,7 @@ mod tests {
             .expect("read lock")
             .expect("lock exists");
 
-        let status = status(&first_statuses, "app");
+        let status = status(&first_statuses, "artifact_format_app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
         fs::write(
@@ -5318,7 +5321,10 @@ mod tests {
         .expect("artifact should be rewritten");
 
         let (second_prepared, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
-        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+        assert_dispositions(
+            &second_statuses,
+            &[("artifact_format_app", BuildDisposition::Built)],
+        );
 
         execute_planned_build(&graph, &second_prepared, &second_statuses)
             .expect("rebuild should refresh artifact");
@@ -5332,7 +5338,10 @@ mod tests {
     #[test]
     fn invalid_cached_artifact_identity_triggers_rebuild() {
         let dir = temp_dir("invalid_artifact_identity");
-        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"artifact_identity_app\"\nkind = \"app\"\n",
+        );
         write_file(
             &dir.join("src").join("shelf.arc"),
             "fn main() -> Int:\n    return 0\n",
@@ -5348,17 +5357,23 @@ mod tests {
             .expect("read lock")
             .expect("lock exists");
 
-        let status = status(&first_statuses, "app");
+        let status = status(&first_statuses, "artifact_identity_app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
         fs::write(
             &artifact_path,
-            stale.replace("package_name = \"app\"", "package_name = \"wrong\""),
+            stale.replace(
+                "package_name = \"artifact_identity_app\"",
+                "package_name = \"wrong\"",
+            ),
         )
         .expect("artifact should be rewritten");
 
         let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
-        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+        assert_dispositions(
+            &second_statuses,
+            &[("artifact_identity_app", BuildDisposition::Built)],
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5366,7 +5381,10 @@ mod tests {
     #[test]
     fn invalid_cached_artifact_payload_triggers_rebuild() {
         let dir = temp_dir("invalid_artifact_payload");
-        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"artifact_payload_app\"\nkind = \"app\"\n",
+        );
         write_file(
             &dir.join("src").join("shelf.arc"),
             "fn main() -> Int:\n    return 0\n",
@@ -5382,14 +5400,17 @@ mod tests {
             .expect("read lock")
             .expect("lock exists");
 
-        let status = status(&first_statuses, "app");
+        let status = status(&first_statuses, "artifact_payload_app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
         fs::write(&artifact_path, stale.replace("Int = 0", "Int = 99"))
             .expect("artifact should be rewritten");
 
         let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
-        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+        assert_dispositions(
+            &second_statuses,
+            &[("artifact_payload_app", BuildDisposition::Built)],
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

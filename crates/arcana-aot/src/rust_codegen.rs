@@ -1490,16 +1490,20 @@ fn repo_root() -> PathBuf {
 }
 
 fn sanitize_crate_name(name: &str) -> String {
-    let mut out = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
+    let mut out = String::new();
+    let mut last_was_underscore = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !out.is_empty() && !last_was_underscore {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    if out.ends_with('_') {
+        out.pop();
+    }
     if out.is_empty() {
         out.push_str("arcana_native");
     }
@@ -1532,10 +1536,18 @@ fn escape_toml(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_direct_routine_helper;
+    use super::{render_direct_routine_helper, sanitize_crate_name};
     use crate::native_abi::{NativeAbiParam, NativeAbiType};
     use crate::native_lowering::{NativeDirectBlock, NativeDirectExpr, NativeDirectRoutine};
     use arcana_cabi::{ArcanaCabiParamSourceMode, ArcanaCabiPassMode};
+
+    #[test]
+    fn sanitize_crate_name_collapses_separator_runs() {
+        assert_eq!(
+            sanitize_crate_name("arcana_dll_path:///lib"),
+            "arcana_dll_path_lib"
+        );
+    }
 
     #[test]
     fn render_direct_routine_helper_emits_native_hint_attributes() {
