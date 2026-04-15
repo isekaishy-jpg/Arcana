@@ -35,7 +35,7 @@ use crate::build_identity::read_cached_output_metadata;
 use crate::{
     BuildOutputKey, BuildTarget, NativeProductProducer, PackageResult, WorkspaceGraph,
     WorkspaceMember, collect_validated_support_file_paths, repo_root,
-    validate_support_file_relative_path, workspace_release_output_root,
+    validate_support_file_relative_path, workspace_distribution_output_root,
     workspace_target_output_root,
 };
 
@@ -200,7 +200,8 @@ pub fn default_distribution_dir_for_build(
         .member(member)
         .map(distribution_member_dir_name)
         .unwrap_or_else(|| sanitize_distribution_component(member));
-    let mut dir = workspace_release_output_root(&graph.root_dir)
+    let mut dir = workspace_distribution_output_root(&graph.root_dir)
+        .join("bundle")
         .join(member_dir)
         .join(build_key.target.key());
     if let Some(product) = build_key.product() {
@@ -226,7 +227,7 @@ pub fn default_non_release_bundle_dir_for_build(
         .member(member)
         .map(distribution_member_dir_name)
         .unwrap_or_else(|| sanitize_distribution_component(member));
-    let mut dir = workspace_target_output_root(&graph.root_dir)
+    let mut dir = workspace_distribution_output_root(&graph.root_dir)
         .join("bundle-stage")
         .join(member_dir)
         .join(build_key.target.key());
@@ -2476,16 +2477,35 @@ mod tests {
         let graph = crate::load_workspace_graph(&dir).expect("workspace graph should load");
         let dist_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
         let stage_dir = default_non_release_bundle_dir(&graph, "app", &BuildTarget::windows_exe());
+        let shared_root = repo_root().join("dist").join("target");
 
         assert!(
-            dist_dir.starts_with(repo_root().join("dist")),
-            "expected release bundles under repo dist, got {}",
+            dist_dir.starts_with(&shared_root),
+            "expected release bundles under repo dist/target, got {}",
             dist_dir.display()
         );
         assert!(
-            stage_dir.starts_with(repo_root().join("target")),
-            "expected non-release bundles under repo target, got {}",
+            stage_dir.starts_with(&shared_root),
+            "expected non-release bundles under repo dist/target, got {}",
             stage_dir.display()
+        );
+        assert!(
+            dist_dir
+                .components()
+                .any(|component| component.as_os_str() == "bundle"),
+            "expected release bundles under dist/target/bundle, got {}",
+            dist_dir.display()
+        );
+        assert!(
+            stage_dir
+                .components()
+                .any(|component| component.as_os_str() == "bundle-stage"),
+            "expected staged bundles under dist/target/bundle-stage, got {}",
+            stage_dir.display()
+        );
+        assert_ne!(
+            dist_dir, stage_dir,
+            "release and staged bundle directories must not collide"
         );
         assert!(
             !dist_dir.starts_with(&dir),

@@ -1,4 +1,4 @@
-fn leak(value: &'a Int) -> &'a Int:
+fn leak(read value: &read[Int, 'a]) -> &read[Int, 'a]:
     return value
 
 fn main() -> Int:

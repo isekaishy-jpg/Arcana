@@ -8,7 +8,7 @@ obj Counter:
     fn resume(edit self: Self, read ctx: SessionCtx):
         self.value += ctx.base
 
-create Session [Counter] scope-exit:
+create Session [Counter] context: SessionCtx scope-exit:
     done: when Counter.value == 3 retain [Counter]
 
 Session

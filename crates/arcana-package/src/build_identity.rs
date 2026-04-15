@@ -300,6 +300,12 @@ pub fn cached_artifact_matches_status(
         expected_artifact_hash,
         expected_native_product_closure,
     ) {
+        if matches!(expected_target, BuildTarget::InternalAot) {
+            return cached_emission_hash_for_path(output_path, expected_target)
+                .ok()
+                .as_deref()
+                == Some(expected_artifact_hash);
+        }
         return true;
     }
     let metadata_path = cache_metadata_path_for_output(output_path, expected_target);

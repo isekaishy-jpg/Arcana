@@ -2244,7 +2244,9 @@ mod tests {
         EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC, RuntimeChildBindingInfo, load_bundle_native_products,
         load_bundle_native_products_from_text, read_embedded_distribution_manifest,
     };
-    use arcana_aot::{AotInstanceProductSpec, compile_instance_product};
+    use arcana_aot::{
+        AotInstanceProductSpec, compile_instance_product, default_instance_product_cargo_target_dir,
+    };
     use arcana_cabi::{
         ARCANA_CABI_CHILD_CONTRACT_ID, ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiProductRole,
     };
@@ -2285,7 +2287,7 @@ mod tests {
     ) -> PathBuf {
         let project_dir = dir.join("project").join(product_name);
         let artifact_dir = dir.join("target").join(product_name);
-        let cargo_target_dir = artifact_dir.join("cargo-target");
+        let cargo_target_dir = default_instance_product_cargo_target_dir(role);
         let compiled = compile_instance_product(
             &AotInstanceProductSpec {
                 package_id: package_name.to_string(),

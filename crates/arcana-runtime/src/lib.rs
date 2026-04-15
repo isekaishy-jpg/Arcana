@@ -387,6 +387,42 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn runtime_relative_path(path: &Path, base: &Path) -> Result<PathBuf, String> {
+    let path = normalize_lexical_path(path);
+    let base = normalize_lexical_path(base);
+    let path_parts = path.components().collect::<Vec<_>>();
+    let base_parts = base.components().collect::<Vec<_>>();
+    let mut shared = 0usize;
+    while shared < path_parts.len()
+        && shared < base_parts.len()
+        && path_parts[shared] == base_parts[shared]
+    {
+        shared += 1;
+    }
+    if shared == 0
+        && path_parts
+            .first()
+            .is_some_and(|part| matches!(part, Component::Prefix(_)))
+        && base_parts
+            .first()
+            .is_some_and(|part| matches!(part, Component::Prefix(_)))
+    {
+        return Err(format!(
+            "failed to make `{}` relative to `{}`",
+            runtime_path_string(&path),
+            runtime_path_string(&base)
+        ));
+    }
+    let mut relative = PathBuf::new();
+    for _ in shared..base_parts.len() {
+        relative.push("..");
+    }
+    for component in path_parts.iter().skip(shared) {
+        relative.push(component.as_os_str());
+    }
+    Ok(relative)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeChannelHandle(u64);
 
@@ -865,6 +901,64 @@ pub trait RuntimeCoreHost {
         let _ = ms;
         Err("runtime core host sleep_ms is not implemented".to_string())
     }
+    fn allows_process_execution(&self) -> bool {
+        true
+    }
+    fn runtime_arg_count(&self) -> Result<i64, String> {
+        Ok(std::env::args().skip(1).count() as i64)
+    }
+    fn runtime_arg_get(&self, index: i64) -> Result<String, String> {
+        if index < 0 {
+            return Err("arg_get index must be non-negative".to_string());
+        }
+        Ok(std::env::args()
+            .skip(1)
+            .nth(index as usize)
+            .unwrap_or_default())
+    }
+    fn runtime_env_has(&self, name: &str) -> Result<bool, String> {
+        Ok(std::env::var_os(name).is_some())
+    }
+    fn runtime_env_get(&self, name: &str) -> Result<String, String> {
+        Ok(std::env::var(name).unwrap_or_default())
+    }
+    fn runtime_current_working_dir(&self) -> Result<PathBuf, String> {
+        std::env::current_dir()
+            .map(|path| normalize_lexical_path(&path))
+            .map_err(|err| format!("failed to resolve current directory: {err}"))
+    }
+    fn runtime_resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
+        let requested = PathBuf::from(path);
+        Ok(if requested.is_absolute() {
+            normalize_lexical_path(&requested)
+        } else {
+            normalize_lexical_path(&self.runtime_current_working_dir()?.join(requested))
+        })
+    }
+    fn runtime_path_canonicalize(&self, path: &str) -> Result<String, String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::canonicalize(&resolved)
+            .map(|real| runtime_path_string(&normalize_lexical_path(&real)))
+            .map_err(|err| format!("failed to canonicalize `{path}`: {err}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeProcessCapture {
+    status: i64,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_utf8: bool,
+    stderr_utf8: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeProcessFileStreamState {
+    path: String,
+    readable: bool,
+    writable: bool,
+    append: bool,
+    cursor: u64,
 }
 
 fn runtime_memory_strategy_from_name(name: &str) -> Result<RuntimeMemoryStrategy, String> {
@@ -1097,6 +1191,8 @@ pub struct RuntimeExecutionState {
     atomic_ints: BTreeMap<RuntimeAtomicIntHandle, i64>,
     next_atomic_bool_handle: u64,
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
+    next_process_stream_handle: u64,
+    process_file_streams: BTreeMap<u64, RuntimeProcessFileStreamState>,
     exported_descriptor_counts: BTreeMap<RuntimeExportedDescriptorTarget, usize>,
 }
 
@@ -5482,19 +5578,1189 @@ fn runtime_current_package_asset_root(current_package_id: &str) -> Result<PathBu
     ))
 }
 
+fn runtime_process_file_stream_value(handle: u64) -> RuntimeValue {
+    RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
+        package_id: "arcana_winapi",
+        type_name: "arcana_winapi.process_handles.FileStream",
+        handle,
+    }))
+}
+
+fn expect_process_file_stream_handle(value: RuntimeValue, context: &str) -> Result<u64, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) = value else {
+        return Err(format!("{context} expected arcana_winapi.process_handles.FileStream"));
+    };
+    if binding.type_name != "arcana_winapi.process_handles.FileStream" {
+        return Err(format!(
+            "{context} expected arcana_winapi.process_handles.FileStream, got `{}`",
+            binding.type_name
+        ));
+    }
+    if binding.handle == 0 {
+        return Err("FileStream handle must not be 0".to_string());
+    }
+    Ok(binding.handle)
+}
+
+fn insert_runtime_process_file_stream(
+    state: &mut RuntimeExecutionState,
+    path: &Path,
+    readable: bool,
+    writable: bool,
+    append: bool,
+    cursor: u64,
+) -> u64 {
+    let handle = state.next_process_stream_handle.max(1);
+    state.next_process_stream_handle = handle + 1;
+    state.process_file_streams.insert(
+        handle,
+        RuntimeProcessFileStreamState {
+            path: runtime_path_string(path),
+            readable,
+            writable,
+            append,
+            cursor,
+        },
+    );
+    handle
+}
+
+fn runtime_process_file_stream_ref(
+    state: &RuntimeExecutionState,
+    handle: u64,
+) -> Result<&RuntimeProcessFileStreamState, String> {
+    state
+        .process_file_streams
+        .get(&handle)
+        .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
+}
+
+fn runtime_process_file_stream_mut(
+    state: &mut RuntimeExecutionState,
+    handle: u64,
+) -> Result<&mut RuntimeProcessFileStreamState, String> {
+    state
+        .process_file_streams
+        .get_mut(&handle)
+        .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
+}
+
+fn bind_runtime_direct_call_args(
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+    take_arg_indices: &[usize],
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> Result<Vec<RuntimeCallArg>, String> {
+    let mut bound = bind_call_args_for_intrinsic(callable, call_args.to_vec())?;
+    consume_take_call_args(scopes, take_arg_indices, &bound)?;
+    for arg in &mut bound {
+        arg.value = read_runtime_value_if_ref(
+            arg.value.clone(),
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            state,
+            host,
+        )?;
+    }
+    Ok(bound)
+}
+
+fn runtime_exec_capture_record(capture: RuntimeProcessCapture) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("status".to_string(), RuntimeValue::Int(capture.status));
+    fields.insert(
+        "output".to_string(),
+        make_pair(
+            RuntimeValue::Bytes(capture.stdout),
+            RuntimeValue::Bytes(capture.stderr),
+        ),
+    );
+    fields.insert(
+        "utf8".to_string(),
+        make_pair(
+            RuntimeValue::Bool(capture.stdout_utf8),
+            RuntimeValue::Bool(capture.stderr_utf8),
+        ),
+    );
+    RuntimeValue::Record {
+        name: "arcana_process.process.ExecCapture".to_string(),
+        fields,
+    }
+}
+
+fn runtime_arcana_owned_callable_key(callable: &[String]) -> Option<String> {
+    let key = match callable {
+        [std_name, io_name, name] if std_name == "std" && io_name == "io" => {
+            format!("std.io.{name}")
+        }
+        [module, name]
+            if matches!(
+                module.as_str(),
+                "io" | "args" | "env" | "path" | "fs" | "process"
+            ) =>
+        {
+            format!("arcana_process.{module}.{name}")
+        }
+        _ => callable.join("."),
+    };
+    matches!(
+        key.as_str(),
+        "std.io.print"
+            | "std.io.eprint"
+            | "std.io.flush_stdout"
+            | "std.io.flush_stderr"
+            | "std.io.read_line"
+            | "arcana_process.io.print"
+            | "arcana_process.io.print_line"
+            | "arcana_process.io.eprint"
+            | "arcana_process.io.eprint_line"
+            | "arcana_process.io.flush_stdout"
+            | "arcana_process.io.flush_stderr"
+            | "arcana_process.io.read_line"
+            | "arcana_process.args.count"
+            | "arcana_process.args.get"
+            | "arcana_process.env.has"
+            | "arcana_process.env.get"
+            | "arcana_process.env.get_or"
+            | "arcana_process.path.cwd"
+            | "arcana_process.path.join"
+            | "arcana_process.path.normalize"
+            | "arcana_process.path.parent"
+            | "arcana_process.path.file_name"
+            | "arcana_process.path.ext"
+            | "arcana_process.path.is_absolute"
+            | "arcana_process.path.stem"
+            | "arcana_process.path.with_ext"
+            | "arcana_process.path.relative_to"
+            | "arcana_process.path.canonicalize"
+            | "arcana_process.path.strip_prefix"
+            | "arcana_process.fs.exists"
+            | "arcana_process.fs.is_file"
+            | "arcana_process.fs.is_dir"
+            | "arcana_process.fs.read_text"
+            | "arcana_process.fs.read_bytes"
+            | "arcana_process.fs.write_text"
+            | "arcana_process.fs.write_bytes"
+            | "arcana_process.fs.stream_open_read"
+            | "arcana_process.fs.stream_open_write"
+            | "arcana_process.fs.stream_read"
+            | "arcana_process.fs.stream_write"
+            | "arcana_process.fs.stream_eof"
+            | "arcana_process.fs.stream_close"
+            | "arcana_process.fs.list_dir"
+            | "arcana_process.fs.mkdir_all"
+            | "arcana_process.fs.create_dir"
+            | "arcana_process.fs.remove_file"
+            | "arcana_process.fs.remove_dir"
+            | "arcana_process.fs.remove_dir_all"
+            | "arcana_process.fs.copy_file"
+            | "arcana_process.fs.rename"
+            | "arcana_process.fs.file_size"
+            | "arcana_process.fs.modified_unix_ms"
+            | "arcana_process.process.exec_status"
+            | "arcana_process.process.exec_capture"
+    )
+    .then_some(key)
+}
+
 fn try_execute_arcana_owned_api_call(
-    _callable: &[String],
-    _call_args: &[RuntimeCallArg],
-    _scopes: &mut Vec<RuntimeScope>,
-    _plan: &RuntimePackagePlan,
-    _current_package_id: &str,
-    _current_module_id: &str,
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
     _aliases: &BTreeMap<String, Vec<String>>,
     _type_bindings: &RuntimeTypeBindings,
-    _state: &mut RuntimeExecutionState,
-    _host: &mut dyn RuntimeCoreHost,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
 ) -> Result<Option<RuntimeValue>, String> {
-    Ok(None)
+    let Some(key) = runtime_arcana_owned_callable_key(callable) else {
+        return Ok(None);
+    };
+    let value = match key.as_str() {
+        "std.io.print"
+        | "arcana_process.io.print"
+        | "arcana_process.io.print_line" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            host.print(&runtime_value_to_string(&args[0].value))?;
+            if key == "arcana_process.io.print_line" {
+                host.print("\n")?;
+            }
+            RuntimeValue::Unit
+        }
+        "std.io.eprint"
+        | "arcana_process.io.eprint"
+        | "arcana_process.io.eprint_line" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            host.eprint(&runtime_value_to_string(&args[0].value))?;
+            if key == "arcana_process.io.eprint_line" {
+                host.eprint("\n")?;
+            }
+            RuntimeValue::Unit
+        }
+        "std.io.flush_stdout" | "arcana_process.io.flush_stdout" => {
+            bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            host.flush_stdout()?;
+            RuntimeValue::Unit
+        }
+        "std.io.flush_stderr" | "arcana_process.io.flush_stderr" => {
+            bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            host.flush_stderr()?;
+            RuntimeValue::Unit
+        }
+        "std.io.read_line" | "arcana_process.io.read_line" => {
+            bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            match host.stdin_read_line() {
+                Ok(line) => ok_variant(RuntimeValue::Str(line)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.args.count" => {
+            bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            RuntimeValue::Int(host.runtime_arg_count()?)
+        }
+        "arcana_process.args.get" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            RuntimeValue::Str(host.runtime_arg_get(expect_int(
+                args[0].value.clone(),
+                "arcana_process.args.get",
+            )?)?)
+        }
+        "arcana_process.env.has" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            RuntimeValue::Bool(host.runtime_env_has(&expect_str(
+                args[0].value.clone(),
+                "arcana_process.env.has",
+            )?)?)
+        }
+        "arcana_process.env.get" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            RuntimeValue::Str(host.runtime_env_get(&expect_str(
+                args[0].value.clone(),
+                "arcana_process.env.get",
+            )?)?)
+        }
+        "arcana_process.env.get_or" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let name = expect_str(args[0].value.clone(), "arcana_process.env.get_or")?;
+            let fallback = expect_str(args[1].value.clone(), "arcana_process.env.get_or")?;
+            RuntimeValue::Str(if host.runtime_env_has(&name)? {
+                host.runtime_env_get(&name)?
+            } else {
+                fallback
+            })
+        }
+        "arcana_process.path.cwd" => {
+            bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            RuntimeValue::Str(runtime_path_string(&host.runtime_current_working_dir()?))
+        }
+        "arcana_process.path.join" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let a = expect_str(args[0].value.clone(), "arcana_process.path.join")?;
+            let b = expect_str(args[1].value.clone(), "arcana_process.path.join")?;
+            RuntimeValue::Str(runtime_path_string(&normalize_lexical_path(&Path::new(&a).join(b))))
+        }
+        "arcana_process.path.normalize" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.normalize")?;
+            RuntimeValue::Str(runtime_path_string(&normalize_lexical_path(Path::new(&path))))
+        }
+        "arcana_process.path.parent" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.parent")?;
+            RuntimeValue::Str(
+                Path::new(&path)
+                    .parent()
+                    .map(runtime_path_string)
+                    .unwrap_or_default(),
+            )
+        }
+        "arcana_process.path.file_name" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.file_name")?;
+            RuntimeValue::Str(
+                Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            )
+        }
+        "arcana_process.path.ext" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.ext")?;
+            RuntimeValue::Str(
+                Path::new(&path)
+                    .extension()
+                    .map(|ext| ext.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            )
+        }
+        "arcana_process.path.is_absolute" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.is_absolute")?;
+            RuntimeValue::Bool(Path::new(&path).is_absolute())
+        }
+        "arcana_process.path.stem" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.stem")?;
+            match Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .ok_or_else(|| format!("path `{path}` has no stem"))
+            {
+                Ok(value) => ok_variant(RuntimeValue::Str(value)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.path.with_ext" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.with_ext")?;
+            let ext = expect_str(args[1].value.clone(), "arcana_process.path.with_ext")?;
+            let mut updated = PathBuf::from(path);
+            updated.set_extension(ext);
+            RuntimeValue::Str(runtime_path_string(&updated))
+        }
+        "arcana_process.path.relative_to" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.relative_to")?;
+            let base = expect_str(args[1].value.clone(), "arcana_process.path.relative_to")?;
+            match runtime_relative_path(Path::new(&path), Path::new(&base))
+                .map(|value| runtime_path_string(&value))
+            {
+                Ok(value) => ok_variant(RuntimeValue::Str(value)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.path.canonicalize" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), "arcana_process.path.canonicalize")?;
+            match host.runtime_path_canonicalize(&path) {
+                Ok(value) => ok_variant(RuntimeValue::Str(value)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.path.strip_prefix" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = normalize_lexical_path(Path::new(&expect_str(
+                args[0].value.clone(),
+                "arcana_process.path.strip_prefix",
+            )?));
+            let prefix = normalize_lexical_path(Path::new(&expect_str(
+                args[1].value.clone(),
+                "arcana_process.path.strip_prefix",
+            )?));
+            match path.strip_prefix(&prefix).map(runtime_path_string).map_err(|_| {
+                format!(
+                    "path `{}` does not start with `{}`",
+                    runtime_path_string(&path),
+                    runtime_path_string(&prefix)
+                )
+            }) {
+                Ok(value) => ok_variant(RuntimeValue::Str(value)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.exists" | "arcana_process.fs.is_file" | "arcana_process.fs.is_dir" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = host.runtime_resolve_fs_path(&expect_str(
+                args[0].value.clone(),
+                key.as_str(),
+            )?)?;
+            let result = match key.as_str() {
+                "arcana_process.fs.exists" => path.exists(),
+                "arcana_process.fs.is_file" => path.is_file(),
+                _ => path.is_dir(),
+            };
+            RuntimeValue::Bool(result)
+        }
+        "arcana_process.fs.read_text" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                fs::read_to_string(&resolved)
+                    .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
+            }) {
+                Ok(text) => ok_variant(RuntimeValue::Str(text)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.read_bytes" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                fs::read(&resolved)
+                    .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
+            }) {
+                Ok(bytes) => ok_variant(RuntimeValue::Bytes(bytes)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.write_text" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            let text = expect_str(args[1].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                if let Some(parent) = resolved.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+                    })?;
+                }
+                fs::write(&resolved, text)
+                    .map_err(|err| format!("failed to write `{}`: {err}", runtime_path_string(&resolved)))
+            }) {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.write_bytes" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            let bytes = expect_byte_array(args[1].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                if let Some(parent) = resolved.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+                    })?;
+                }
+                fs::write(&resolved, bytes)
+                    .map_err(|err| format!("failed to write `{}`: {err}", runtime_path_string(&resolved)))
+            }) {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.stream_open_read" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                fs::File::open(&resolved).map_err(|err| {
+                    format!("failed to open `{}` for reading: {err}", runtime_path_string(&resolved))
+                })?;
+                Ok(resolved)
+            }) {
+                Ok(resolved) => {
+                    let handle =
+                        insert_runtime_process_file_stream(state, &resolved, true, false, false, 0);
+                    ok_variant(runtime_process_file_stream_value(handle))
+                }
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.stream_open_write" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            let append = expect_bool(args[1].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                if let Some(parent) = resolved.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+                    })?;
+                }
+                let mut options = fs::OpenOptions::new();
+                options.create(true).write(true);
+                if append {
+                    options.append(true);
+                } else {
+                    options.truncate(true);
+                }
+                let file = options.open(&resolved).map_err(|err| {
+                    format!("failed to open `{}` for writing: {err}", runtime_path_string(&resolved))
+                })?;
+                let cursor = if append {
+                    file.metadata()
+                        .map_err(|err| format!("failed to stat `{}`: {err}", runtime_path_string(&resolved)))?
+                        .len()
+                } else {
+                    0
+                };
+                Ok((resolved, cursor))
+            }) {
+                Ok((resolved, cursor)) => {
+                    let handle = insert_runtime_process_file_stream(
+                        state, &resolved, false, true, append, cursor,
+                    );
+                    ok_variant(runtime_process_file_stream_value(handle))
+                }
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.stream_read" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let handle =
+                expect_process_file_stream_handle(args[0].value.clone(), "arcana_process.fs.stream_read")?;
+            let max_bytes = expect_int(args[1].value.clone(), key.as_str())?;
+            let result = (|| -> Result<Vec<u8>, String> {
+                if max_bytes < 0 {
+                    return Err("fs_stream_read max_bytes must be non-negative".to_string());
+                }
+                let stream = runtime_process_file_stream_mut(state, handle)?;
+                if !stream.readable {
+                    return Err(format!("FileStream `{}` is not opened for reading", stream.path));
+                }
+                let path = PathBuf::from(&stream.path);
+                let mut file = fs::File::open(&path).map_err(|err| {
+                    format!("failed to open `{}` for reading: {err}", runtime_path_string(&path))
+                })?;
+                use std::io::{Read, Seek, SeekFrom};
+                file.seek(SeekFrom::Start(stream.cursor))
+                    .map_err(|err| format!("failed to seek FileStream `{}`: {err}", stream.path))?;
+                let mut buffer = vec![0u8; max_bytes as usize];
+                let read = file.read(&mut buffer).map_err(|err| {
+                    format!("failed to read from FileStream `{}`: {err}", stream.path)
+                })?;
+                stream.cursor += read as u64;
+                buffer.truncate(read);
+                Ok(buffer)
+            })();
+            match result {
+                Ok(bytes) => ok_variant(RuntimeValue::Bytes(bytes)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.stream_write" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let handle = expect_process_file_stream_handle(
+                args[0].value.clone(),
+                "arcana_process.fs.stream_write",
+            )?;
+            let bytes = expect_byte_array(args[1].value.clone(), key.as_str())?;
+            let result = (|| -> Result<i64, String> {
+                let stream = runtime_process_file_stream_mut(state, handle)?;
+                if !stream.writable {
+                    return Err(format!("FileStream `{}` is not opened for writing", stream.path));
+                }
+                let path = PathBuf::from(&stream.path);
+                let mut options = fs::OpenOptions::new();
+                options.write(true);
+                if stream.append {
+                    options.create(true).append(true);
+                }
+                let mut file = options.open(&path).map_err(|err| {
+                    format!("failed to open `{}` for writing: {err}", runtime_path_string(&path))
+                })?;
+                use std::io::{Seek, SeekFrom, Write};
+                if !stream.append {
+                    file.seek(SeekFrom::Start(stream.cursor))
+                        .map_err(|err| format!("failed to seek FileStream `{}`: {err}", stream.path))?;
+                }
+                file.write_all(&bytes).map_err(|err| {
+                    format!("failed to write to FileStream `{}`: {err}", stream.path)
+                })?;
+                stream.cursor = if stream.append {
+                    file.metadata()
+                        .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
+                        .len()
+                } else {
+                    stream.cursor + bytes.len() as u64
+                };
+                Ok(bytes.len() as i64)
+            })();
+            match result {
+                Ok(written) => ok_variant(RuntimeValue::Int(written)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.stream_eof" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let handle =
+                expect_process_file_stream_handle(args[0].value.clone(), "arcana_process.fs.stream_eof")?;
+            let result = (|| -> Result<bool, String> {
+                let stream = runtime_process_file_stream_ref(state, handle)?;
+                if !stream.readable {
+                    return Err(format!("FileStream `{}` is not opened for reading", stream.path));
+                }
+                let len = fs::metadata(PathBuf::from(&stream.path))
+                    .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
+                    .len();
+                Ok(stream.cursor >= len)
+            })();
+            match result {
+                Ok(value) => ok_variant(RuntimeValue::Bool(value)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.stream_close" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[0],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let handle = expect_process_file_stream_handle(
+                args[0].value.clone(),
+                "arcana_process.fs.stream_close",
+            )?;
+            match state.process_file_streams.remove(&handle) {
+                Some(_) => ok_variant(RuntimeValue::Unit),
+                None => err_variant(format!("invalid FileStream handle `{handle}`")),
+            }
+        }
+        "arcana_process.fs.list_dir" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                let mut entries = fs::read_dir(&resolved)
+                    .map_err(|err| format!("failed to list `{}`: {err}", runtime_path_string(&resolved)))?
+                    .map(|entry| {
+                        entry
+                            .map(|entry| runtime_path_string(&normalize_lexical_path(&entry.path())))
+                            .map_err(|err| {
+                                format!(
+                                    "failed to read directory entry in `{}`: {err}",
+                                    runtime_path_string(&resolved)
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                entries.sort();
+                Ok(entries)
+            }) {
+                Ok(entries) => ok_variant(RuntimeValue::List(
+                    entries.into_iter().map(RuntimeValue::Str).collect(),
+                )),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.mkdir_all"
+        | "arcana_process.fs.create_dir"
+        | "arcana_process.fs.remove_file"
+        | "arcana_process.fs.remove_dir"
+        | "arcana_process.fs.remove_dir_all" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            let result = host.runtime_resolve_fs_path(&path).and_then(|resolved| match key.as_str() {
+                "arcana_process.fs.mkdir_all" => fs::create_dir_all(&resolved)
+                    .map_err(|err| format!("failed to create `{}`: {err}", runtime_path_string(&resolved))),
+                "arcana_process.fs.create_dir" => fs::create_dir(&resolved)
+                    .map_err(|err| format!("failed to create directory `{}`: {err}", runtime_path_string(&resolved))),
+                "arcana_process.fs.remove_file" => fs::remove_file(&resolved)
+                    .map_err(|err| format!("failed to remove file `{}`: {err}", runtime_path_string(&resolved))),
+                "arcana_process.fs.remove_dir" => fs::remove_dir(&resolved)
+                    .map_err(|err| format!("failed to remove directory `{}`: {err}", runtime_path_string(&resolved))),
+                _ => fs::remove_dir_all(&resolved)
+                    .map_err(|err| format!("failed to remove directory tree `{}`: {err}", runtime_path_string(&resolved))),
+            });
+            match result {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.copy_file" | "arcana_process.fs.rename" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let from = expect_str(args[0].value.clone(), key.as_str())?;
+            let to = expect_str(args[1].value.clone(), key.as_str())?;
+            let result = host.runtime_resolve_fs_path(&from).and_then(|from_resolved| {
+                let to_resolved = host.runtime_resolve_fs_path(&to)?;
+                if let Some(parent) = to_resolved.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+                    })?;
+                }
+                match key.as_str() {
+                    "arcana_process.fs.copy_file" => {
+                        fs::copy(&from_resolved, &to_resolved).map_err(|err| {
+                            format!(
+                                "failed to copy `{}` to `{}`: {err}",
+                                runtime_path_string(&from_resolved),
+                                runtime_path_string(&to_resolved)
+                            )
+                        })?;
+                    }
+                    _ => {
+                        fs::rename(&from_resolved, &to_resolved).map_err(|err| {
+                            format!(
+                                "failed to rename `{}` to `{}`: {err}",
+                                runtime_path_string(&from_resolved),
+                                runtime_path_string(&to_resolved)
+                            )
+                        })?;
+                    }
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.fs.file_size" | "arcana_process.fs.modified_unix_ms" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
+            let result = host.runtime_resolve_fs_path(&path).and_then(|resolved| {
+                let metadata = fs::metadata(&resolved)
+                    .map_err(|err| format!("failed to stat `{}`: {err}", runtime_path_string(&resolved)))?;
+                match key.as_str() {
+                    "arcana_process.fs.file_size" => i64::try_from(metadata.len())
+                        .map_err(|_| format!("file size for `{path}` does not fit in i64")),
+                    _ => {
+                        let modified = metadata.modified().map_err(|err| {
+                            format!(
+                                "failed to read modified time for `{}`: {err}",
+                                runtime_path_string(&resolved)
+                            )
+                        })?;
+                        let duration = modified.duration_since(std::time::UNIX_EPOCH).map_err(
+                            |err| {
+                                format!(
+                                    "modified time for `{}` predates unix epoch: {err}",
+                                    runtime_path_string(&resolved)
+                                )
+                            },
+                        )?;
+                        i64::try_from(duration.as_millis()).map_err(|_| {
+                            format!(
+                                "modified time for `{}` does not fit in i64 milliseconds",
+                                runtime_path_string(&resolved)
+                            )
+                        })
+                    }
+                }
+            });
+            match result {
+                Ok(value) => ok_variant(RuntimeValue::Int(value)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.process.exec_status" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let program = expect_str(args[0].value.clone(), key.as_str())?;
+            let argv = expect_string_list(args[1].value.clone(), key.as_str())?;
+            let result = if !host.allows_process_execution() {
+                Err("process execution is disabled by the runtime host".to_string())
+            } else {
+                std::process::Command::new(&program)
+                    .args(&argv)
+                    .status()
+                    .map(|status| i64::from(status.code().unwrap_or(-1)))
+                    .map_err(|err| format!("failed to run process `{program}`: {err}"))
+            };
+            match result {
+                Ok(status) => ok_variant(RuntimeValue::Int(status)),
+                Err(err) => err_variant(err),
+            }
+        }
+        "arcana_process.process.exec_capture" => {
+            let args = bind_runtime_direct_call_args(
+                callable,
+                call_args,
+                &[],
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                state,
+                host,
+            )?;
+            let program = expect_str(args[0].value.clone(), key.as_str())?;
+            let argv = expect_string_list(args[1].value.clone(), key.as_str())?;
+            let result = if !host.allows_process_execution() {
+                Err("process execution is disabled by the runtime host".to_string())
+            } else {
+                std::process::Command::new(&program)
+                    .args(&argv)
+                    .output()
+                    .map(|output| RuntimeProcessCapture {
+                        status: i64::from(output.status.code().unwrap_or(-1)),
+                        stdout_utf8: std::str::from_utf8(&output.stdout).is_ok(),
+                        stderr_utf8: std::str::from_utf8(&output.stderr).is_ok(),
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                    })
+                    .map_err(|err| format!("failed to run process `{program}`: {err}"))
+            };
+            match result {
+                Ok(capture) => ok_variant(runtime_exec_capture_record(capture)),
+                Err(err) => err_variant(err),
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(value))
 }
 
 fn expect_channel(value: RuntimeValue, context: &str) -> Result<RuntimeChannelHandle, String> {
@@ -7802,8 +9068,74 @@ fn runtime_receiver_type_args(
             .get(handle)
             .map(|thread| thread.type_args.clone())
             .unwrap_or_default(),
+        RuntimeValue::Ref(reference) => runtime_reference_inner_value_type_from_state(reference, state)
+            .map(|ty| parse_runtime_value_type_args(&ty.render()))
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
+}
+
+fn runtime_reference_inner_value_type_from_state(
+    reference: &RuntimeReferenceValue,
+    state: &RuntimeExecutionState,
+) -> Option<IrRoutineType> {
+    let root = match &reference.target {
+        RuntimeReferenceTarget::Local { .. } | RuntimeReferenceTarget::OwnerObject { .. } => None,
+        RuntimeReferenceTarget::ArenaSlot { id, .. } => {
+            let arena = state.arenas.get(&id.arena)?;
+            if !arena_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+        RuntimeReferenceTarget::FrameSlot { id, .. } => {
+            let arena = state.frame_arenas.get(&id.arena)?;
+            if !frame_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+        RuntimeReferenceTarget::PoolSlot { id, .. } => {
+            let arena = state.pool_arenas.get(&id.arena)?;
+            if !pool_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+        RuntimeReferenceTarget::TempSlot { id, .. } => {
+            let arena = state.temp_arenas.get(&id.arena)?;
+            if !temp_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+        RuntimeReferenceTarget::SessionSlot { id, .. } => {
+            let arena = state.session_arenas.get(&id.arena)?;
+            if !session_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+        RuntimeReferenceTarget::RingSlot { id, .. } => {
+            let arena = state.ring_buffers.get(&id.arena)?;
+            if !ring_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+        RuntimeReferenceTarget::SlabSlot { id, .. } => {
+            let arena = state.slabs.get(&id.arena)?;
+            if !slab_id_is_live(id.arena, arena, *id) {
+                return None;
+            }
+            arena.slots.get(&id.slot)
+        }
+    }?;
+    let mut current = root;
+    for member in runtime_reference_members(&reference.target) {
+        current = runtime_member_value_ref(current, member).ok().flatten()?;
+    }
+    runtime_value_type_from_state(current, Some(state))
 }
 
 fn runtime_simple_type(name: &str) -> Option<IrRoutineType> {
@@ -7888,6 +9220,17 @@ fn runtime_value_type_from_state(
     state: Option<&RuntimeExecutionState>,
 ) -> Option<IrRoutineType> {
     match receiver {
+        RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
+        RuntimeValue::Ref(reference) => state.and_then(|state| {
+            let inner = runtime_reference_inner_value_type_from_state(reference, state)?;
+            Some(IrRoutineType {
+                kind: IrRoutineTypeKind::Ref {
+                    mode: reference.mode.as_str().to_string(),
+                    lifetime: None,
+                    inner: Box::new(inner),
+                },
+            })
+        }),
         RuntimeValue::Pair(left, right) => {
             let left = runtime_value_type_from_state(left, state)?;
             let right = runtime_value_type_from_state(right, state)?;
@@ -8065,10 +9408,26 @@ fn runtime_receiver_matches_declared_type(
     receiver_root: &str,
 ) -> bool {
     IrRoutineType::matches_declared(declared, actual, type_params)
+        || match &actual.kind {
+            IrRoutineTypeKind::Ref { inner, .. } => {
+                IrRoutineType::matches_declared(declared, inner, type_params)
+                    || runtime_opaque_family_matches(plan, declared, inner, type_params)
+                    || runtime_simple_root_fallback_allowed(inner)
+                        && runtime_simple_root_fallback_allowed(declared)
+                        && declared.root_name() == inner.root_name()
+            }
+            _ => false,
+        }
         || runtime_opaque_family_matches(plan, declared, actual, type_params)
         || runtime_simple_root_fallback_allowed(actual)
             && runtime_simple_root_fallback_allowed(declared)
             && declared.root_name() == Some(receiver_root)
+        || declared.root_name() == Some(receiver_root)
+            && match &actual.kind {
+                IrRoutineTypeKind::Path(_) => runtime_simple_root_fallback_allowed(actual),
+                IrRoutineTypeKind::Ref { inner, .. } => runtime_simple_root_fallback_allowed(inner),
+                _ => false,
+            }
 }
 
 fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
@@ -10282,6 +11641,51 @@ fn resolve_routine_index_for_call(
     }
 }
 
+fn resolve_runtime_receiver_intrinsic_fallback(
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+) -> Option<RuntimeIntrinsic> {
+    if callable.len() != 1 {
+        return None;
+    }
+    let method = callable[0].as_str();
+    let receiver = &call_args.first()?.value;
+    match receiver {
+        RuntimeValue::Bytes(_) => match method {
+            "len" => Some(RuntimeIntrinsic::BytesLen),
+            "at" => Some(RuntimeIntrinsic::BytesAt),
+            "slice" => Some(RuntimeIntrinsic::BytesSlice),
+            "sha256_hex" => Some(RuntimeIntrinsic::BytesSha256Hex),
+            "thaw" => Some(RuntimeIntrinsic::BytesThaw),
+            _ => None,
+        },
+        RuntimeValue::ByteBuffer(_) => match method {
+            "len" => Some(RuntimeIntrinsic::ByteBufferLen),
+            "at" => Some(RuntimeIntrinsic::ByteBufferAt),
+            "set" => Some(RuntimeIntrinsic::ByteBufferSet),
+            "push" => Some(RuntimeIntrinsic::ByteBufferPush),
+            "freeze" => Some(RuntimeIntrinsic::ByteBufferFreeze),
+            _ => None,
+        },
+        RuntimeValue::Utf16(_) => match method {
+            "len" => Some(RuntimeIntrinsic::Utf16Len),
+            "at" => Some(RuntimeIntrinsic::Utf16At),
+            "slice" => Some(RuntimeIntrinsic::Utf16Slice),
+            "thaw" => Some(RuntimeIntrinsic::Utf16Thaw),
+            _ => None,
+        },
+        RuntimeValue::Utf16Buffer(_) => match method {
+            "len" => Some(RuntimeIntrinsic::Utf16BufferLen),
+            "at" => Some(RuntimeIntrinsic::Utf16BufferAt),
+            "set" => Some(RuntimeIntrinsic::Utf16BufferSet),
+            "push" => Some(RuntimeIntrinsic::Utf16BufferPush),
+            "freeze" => Some(RuntimeIntrinsic::Utf16BufferFreeze),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn resolve_cleanup_footer_handler_callable_path(
     plan: &RuntimePackagePlan,
     current_package_id: &str,
@@ -10427,7 +11831,10 @@ fn execute_call_by_path(
     )? {
         return Ok(value);
     }
-    if let Some(routine_index) = resolve_routine_index_for_call(
+    let receiver_fallback_intrinsic = allow_receiver_root_fallback
+        .then(|| resolve_runtime_receiver_intrinsic_fallback(callable, &call_args))
+        .flatten();
+    let routine_index = match resolve_routine_index_for_call(
         plan,
         current_package_id,
         current_module_id,
@@ -10437,7 +11844,58 @@ fn execute_call_by_path(
         dynamic_dispatch,
         allow_receiver_root_fallback,
         Some(state),
-    )? {
+    ) {
+        Ok(index) => index,
+        Err(err)
+            if call_args
+                .first()
+                .is_some_and(|arg| matches!(arg.value, RuntimeValue::Ref(_)))
+                && err.contains("has no overload matching receiver `Ref`") =>
+        {
+            let mut probe_args = call_args.clone();
+            if let Some(receiver) = probe_args.first_mut() {
+                receiver.value = read_runtime_value_if_ref(
+                    receiver.value.clone(),
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    state,
+                    host,
+                )?;
+            }
+            match resolve_routine_index_for_call(
+                plan,
+                current_package_id,
+                current_module_id,
+                callable,
+                &probe_args,
+                resolved_routine,
+                dynamic_dispatch,
+                allow_receiver_root_fallback,
+                Some(state),
+            ) {
+                Ok(index) => index,
+                Err(retry_err)
+                    if receiver_fallback_intrinsic.is_some()
+                        && retry_err.contains("has no overload matching receiver") =>
+                {
+                    None
+                }
+                Err(retry_err) => return Err(retry_err.into()),
+            }
+        }
+        Err(err)
+            if receiver_fallback_intrinsic.is_some()
+                && err.contains("has no overload matching receiver") =>
+        {
+            None
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if let Some(routine_index) = routine_index {
         let routine = plan
             .routines
             .get(routine_index)
@@ -10574,7 +12032,8 @@ fn execute_call_by_path(
         }
         return Ok(outcome.value);
     }
-    let intrinsic = resolve_runtime_intrinsic_path(callable)
+    let intrinsic = receiver_fallback_intrinsic
+        .or_else(|| resolve_runtime_intrinsic_path(callable))
         .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
     let call_args = bind_call_args_for_intrinsic(callable, call_args)?;
     consume_take_call_args(scopes, take_arg_indices(intrinsic), &call_args)?;
@@ -10679,7 +12138,8 @@ fn execute_runtime_apply_phrase(
     };
     let has_runtime_routine = has_lowered_runtime_routine
         || resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_some();
-    let has_runtime_intrinsic = resolve_runtime_intrinsic_path(&callable).is_some();
+    let has_runtime_intrinsic = resolve_runtime_intrinsic_path(&callable).is_some()
+        || runtime_arcana_owned_callable_key(&callable).is_some();
     if !has_runtime_routine && !has_runtime_intrinsic {
         // Constructor fallback is only valid when lowering did not identify a routine call.
         if let Some(record) = try_construct_record_value(
@@ -10777,22 +12237,12 @@ fn execute_runtime_method_call_with_type_args(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let receiver = read_runtime_value_if_ref(
-        eval_expr(
-            subject,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?,
-        scopes,
+    let receiver = eval_expr(
+        subject,
         plan,
         current_package_id,
         current_module_id,
+        scopes,
         aliases,
         type_bindings,
         state,
@@ -10855,22 +12305,12 @@ fn execute_runtime_named_qualifier_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeCoreHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let receiver = read_runtime_value_if_ref(
-        eval_expr(
-            subject,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?,
-        scopes,
+    let receiver = eval_expr(
+        subject,
         plan,
         current_package_id,
         current_module_id,
+        scopes,
         aliases,
         type_bindings,
         state,

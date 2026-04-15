@@ -185,4 +185,39 @@ impl RuntimeCoreHost for BufferedHost {
         self.sleep_log_ms.push(ms);
         Ok(())
     }
+
+    fn allows_process_execution(&self) -> bool {
+        self.allow_process
+    }
+
+    fn runtime_arg_count(&self) -> Result<i64, String> {
+        Ok(self.args.len() as i64)
+    }
+
+    fn runtime_arg_get(&self, index: i64) -> Result<String, String> {
+        if index < 0 {
+            return Err("arg_get index must be non-negative".to_string());
+        }
+        Ok(self.args.get(index as usize).cloned().unwrap_or_default())
+    }
+
+    fn runtime_env_has(&self, name: &str) -> Result<bool, String> {
+        Ok(self.env.contains_key(name))
+    }
+
+    fn runtime_env_get(&self, name: &str) -> Result<String, String> {
+        Ok(self.env.get(name).cloned().unwrap_or_default())
+    }
+
+    fn runtime_current_working_dir(&self) -> Result<PathBuf, String> {
+        self.current_working_dir()
+    }
+
+    fn runtime_resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
+        self.resolve_fs_path(path)
+    }
+
+    fn runtime_path_canonicalize(&self, path: &str) -> Result<String, String> {
+        self.path_canonicalize(path)
+    }
 }

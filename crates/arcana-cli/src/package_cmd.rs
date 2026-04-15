@@ -349,6 +349,7 @@ mod tests {
         fs::write(path, bytes).expect("wav fixture should write");
     }
 
+    #[cfg(all(windows, feature = "windows-native-bundle-tests"))]
     fn write_test_wav(path: &Path) {
         write_test_wav_with_format(path, 48_000, 2);
     }
@@ -731,8 +732,18 @@ mod tests {
         let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
             .expect("package should succeed");
         assert!(
-            bundle.bundle_dir.starts_with(repo_root().join("dist")),
-            "expected packaged bundle under repo dist, got {}",
+            bundle
+                .bundle_dir
+                .starts_with(repo_root().join("dist").join("target")),
+            "expected packaged bundle under repo dist/target, got {}",
+            bundle.bundle_dir.display()
+        );
+        assert!(
+            bundle
+                .bundle_dir
+                .components()
+                .any(|component| component.as_os_str() == "bundle"),
+            "expected packaged bundle under dist/target/bundle, got {}",
             bundle.bundle_dir.display()
         );
         let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);

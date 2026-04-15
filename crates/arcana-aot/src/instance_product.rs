@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use crate::artifact::AotShackleDeclArtifact;
 use crate::native_abi::{
@@ -19,6 +20,7 @@ pub const ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV: &str = "ARCANA_NATIVE_PRODUCT_T
 const BINDING_MAPPED_VIEW_LEN_BYTES_NAME: &str = "__binding.mapped_view_len_bytes";
 const BINDING_MAPPED_VIEW_READ_BYTE_NAME: &str = "__binding.mapped_view_read_byte";
 const BINDING_MAPPED_VIEW_WRITE_BYTE_NAME: &str = "__binding.mapped_view_write_byte";
+static GLOBAL_CARGO_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotInstanceProductSpec {
@@ -123,6 +125,10 @@ pub fn compile_instance_product(
     write_instance_product_project(project_dir, &cargo_toml, &lib_rs)?;
 
     let manifest_path = project_dir.join("Cargo.toml");
+    let _global_build_lock = GLOBAL_CARGO_BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "global cargo build lock is poisoned".to_string())?;
     let _build_lock = acquire_cargo_target_lock(cargo_target_dir)?;
     let status = Command::new("cargo")
         .arg("build")
@@ -411,6 +417,20 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
     let product_name = format!("{}\0", spec.product_name);
     let role = format!("{}\0", spec.role.as_str());
     let contract = format!("{}\0", spec.contract_id);
+    let owned_str_import = if spec.role == ArcanaCabiProductRole::Binding {
+        "    ArcanaCabiOwnedStrFreeFn,\n"
+    } else {
+        ""
+    };
+    let owned_str_free_fn = if spec.role == ArcanaCabiProductRole::Binding {
+        concat!(
+            "unsafe extern \"system\" fn owned_str_free(ptr: *mut u8, len: usize) {\n",
+            "    unsafe { owned_bytes_free(ptr, len); }\n",
+            "}\n\n",
+        )
+    } else {
+        ""
+    };
     format!(
         concat!(
             "use std::cell::RefCell;\n",
@@ -423,7 +443,7 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
             "    ArcanaCabiDestroyInstanceFn,\n",
             "    ArcanaCabiLastErrorAllocFn,\n",
             "    ArcanaCabiOwnedBytesFreeFn,\n",
-            "    ArcanaCabiOwnedStrFreeFn,\n",
+            "{}",
             "    ArcanaCabiProductApiV1,\n",
             "}};\n\n",
             "thread_local! {{\n",
@@ -455,14 +475,14 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
             "    }}\n",
             "    unsafe {{ drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))); }}\n",
             "}}\n\n",
-            "unsafe extern \"system\" fn owned_str_free(ptr: *mut u8, len: usize) {{\n",
-            "    unsafe {{ owned_bytes_free(ptr, len); }}\n",
-            "}}\n\n",
+            "{}",
         ),
+        owned_str_import,
         render_rust_string_literal(&package_name),
         render_rust_string_literal(&product_name),
         render_rust_string_literal(&role),
         render_rust_string_literal(&contract),
+        owned_str_free_fn,
     )
 }
 

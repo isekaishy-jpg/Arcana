@@ -188,8 +188,62 @@ pub(super) fn eval_runtime_index_value(
                 .cloned()
                 .ok_or_else(|| format!("array index `{index}` is out of bounds"))
         }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) => {
+            let view = state
+                .read_views
+                .get(&handle)
+                .cloned()
+                .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
+            let values = runtime_read_view_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &view,
+                host,
+                "view index",
+            )?;
+            let index = runtime_index_to_usize(index, values.len(), "view index")?;
+            values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("view index `{index}` is out of bounds"))
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) => {
+            let view = state
+                .edit_views
+                .get(&handle)
+                .cloned()
+                .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
+            let read_view = RuntimeReadViewState {
+                type_args: view.type_args,
+                backing: view.backing,
+                start: view.start,
+                len: view.len,
+            };
+            let values = runtime_read_view_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &read_view,
+                host,
+                "view index",
+            )?;
+            let index = runtime_index_to_usize(index, values.len(), "view index")?;
+            values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("view index `{index}` is out of bounds"))
+        }
         other => Err(format!(
-            "runtime index expects List or Array, got `{other:?}`"
+            "runtime index expects List, Array, or View, got `{other:?}`"
         )),
     }
 }

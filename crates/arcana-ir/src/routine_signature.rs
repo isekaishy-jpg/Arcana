@@ -383,9 +383,9 @@ mod tests {
 
     #[test]
     fn routine_types_roundtrip_hir_shape() {
-        let ty = parse_routine_type_text("&mut Pair[Int, std.option.Option[Bool]]")
+        let ty = parse_routine_type_text("&edit[Pair[Int, std.option.Option[Bool]]]")
             .expect("type should parse");
-        assert_eq!(ty.render(), "&mut Pair[Int, std.option.Option[Bool]]");
+        assert_eq!(ty.render(), "&edit[Pair[Int, std.option.Option[Bool]]]");
         assert_eq!(IrRoutineType::from_hir(&ty.to_hir()), ty);
     }
 

@@ -1,8 +1,8 @@
 // Runtime-facing projection of the cabi export contract for generated export shims.
 use super::{
-    RuntimeCoreHost, RuntimeExecutionState, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
-    execute_routine_call_with_state, runtime_eval_message, validate_runtime_requirements_supported,
-    variant_name_matches,
+    RuntimeCoreHost, RuntimeExecutionState, RuntimePackagePlan, RuntimeParamPlan,
+    RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state, runtime_eval_message,
+    validate_runtime_requirements_supported, variant_name_matches,
 };
 use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 
@@ -138,7 +138,7 @@ pub(crate) fn project_export_write_backs(
         .params
         .iter()
         .enumerate()
-        .filter(|(_, param)| param.mode.as_deref() == Some("edit"))
+        .filter(|(_, param)| exported_param_uses_whole_value_write_back(param))
         .map(|(index, param)| {
             let value = final_args.get(index).cloned().ok_or_else(|| {
                 format!(
@@ -153,6 +153,18 @@ pub(crate) fn project_export_write_backs(
             })
         })
         .collect()
+}
+
+pub(crate) fn exported_param_uses_whole_value_write_back(param: &RuntimeParamPlan) -> bool {
+    param.mode.as_deref() == Some("edit") && !exported_type_uses_in_place_write_back(&param.ty)
+}
+
+fn exported_type_uses_in_place_write_back(ty: &IrRoutineType) -> bool {
+    matches!(
+        &ty.kind,
+        IrRoutineTypeKind::Path(path)
+            if matches!(path.root_name(), Some("ByteBuffer") | Some("Utf16Buffer"))
+    )
 }
 
 fn native_abi_callable(routine: &RuntimeRoutinePlan) -> bool {
@@ -174,7 +186,7 @@ fn native_abi_supported_type(ty: &IrRoutineType) -> bool {
     match &ty.kind {
         IrRoutineTypeKind::Path(path) => matches!(
             path.root_name(),
-            Some("Int") | Some("Bool") | Some("Str") | Some("Unit")
+            Some("Int") | Some("Bool") | Some("Str") | Some("Bytes") | Some("Unit")
         ),
         IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
             Some("Pair") if args.len() == 2 => args.iter().all(native_abi_supported_type),

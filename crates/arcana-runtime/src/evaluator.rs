@@ -2,6 +2,7 @@ use super::*;
 
 fn materialize_runtime_return_value(
     value: RuntimeValue,
+    return_type: Option<&IrRoutineType>,
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
@@ -11,6 +12,76 @@ fn materialize_runtime_return_value(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeCoreHost,
 ) -> Result<RuntimeValue, String> {
+    let return_root = return_type.and_then(|ty| match &ty.kind {
+        IrRoutineTypeKind::Path(path) => path.root_name(),
+        IrRoutineTypeKind::Apply { base, .. } => base.root_name(),
+        _ => None,
+    });
+    match (return_root, &value) {
+        (Some("Bytes"), RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle))) => {
+            let view = state
+                .byte_views
+                .get(handle)
+                .cloned()
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?;
+            return Ok(RuntimeValue::Bytes(runtime_byte_view_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &view,
+                host,
+                "return value",
+            )?));
+        }
+        (Some("Bytes"), RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(handle))) => {
+            let view = state
+                .byte_edit_views
+                .get(handle)
+                .cloned()
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?;
+            return Ok(RuntimeValue::Bytes(runtime_byte_edit_view_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &view,
+                host,
+                "return value",
+            )?));
+        }
+        (Some("Str"), RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle))) => {
+            let view = state
+                .str_views
+                .get(handle)
+                .cloned()
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?;
+            return Ok(RuntimeValue::Str(runtime_str_view_text(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &view,
+                host,
+                "return value",
+            )?));
+        }
+        _ => {}
+    }
+    if matches!(return_type.map(|ty| &ty.kind), Some(IrRoutineTypeKind::Ref { .. }))
+        || (return_type.is_none() && matches!(value, RuntimeValue::Ref(_)))
+    {
+        return Ok(value);
+    }
     read_runtime_value_if_ref(
         value,
         scopes,
@@ -2704,18 +2775,6 @@ pub(super) fn execute_routine_call_with_state(
                 )
                 .into());
             }
-            if !routine.type_params.is_empty()
-                && !type_args.is_empty()
-                && type_args.len() != routine.type_params.len()
-            {
-                return Err(format!(
-                    "routine `{}` expected {} type arguments, got {}",
-                    routine.symbol_name,
-                    routine.type_params.len(),
-                    type_args.len()
-                )
-                .into());
-            }
             let aliases = plan
                 .module_aliases
                 .get(&module_alias_scope_key(
@@ -2724,11 +2783,9 @@ pub(super) fn execute_routine_call_with_state(
                 ))
                 .cloned()
                 .unwrap_or_default();
-            let resolved_type_args = if type_args.is_empty() {
-                routine.type_params.clone()
-            } else {
-                type_args
-            };
+            let resolved_type_args =
+                resolve_runtime_routine_type_args(&routine.symbol_name, &routine.type_params, type_args)
+                    .map_err(RuntimeEvalSignal::from)?;
             let type_bindings = routine
                 .type_params
                 .iter()
@@ -2813,12 +2870,15 @@ pub(super) fn execute_routine_call_with_state(
                             execute_cleanup_footers(frame, plan, &mut scopes, state, host)
                                 .map_err(runtime_eval_message)?;
                         }
+                        let mut materialize_scopes = scopes.clone();
+                        materialize_scopes.push(final_scope.clone());
                         let value = materialize_runtime_return_value(
                             value,
+                            routine.return_type.as_ref(),
                             plan,
                             &routine.package_id,
                             &routine.module_id,
-                            &mut scopes,
+                            &mut materialize_scopes,
                             &aliases,
                             &type_bindings,
                             state,
@@ -2916,18 +2976,6 @@ pub(super) fn execute_routine_call_with_state(
                     execute_cleanup_footers(frame, plan, &mut scopes, state, host)
                         .map_err(runtime_eval_message)?;
                 }
-                evaluate_owner_exit_checkpoints(
-                    &final_scope.activated_owner_keys,
-                    plan,
-                    &routine.package_id,
-                    &routine.module_id,
-                    &aliases,
-                    &type_bindings,
-                    state,
-                    host,
-                    None,
-                )?;
-                release_scope_owner_activations(state, &final_scope.activated_owner_keys);
                 let result = match result {
                     Ok(signal) => signal,
                     Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
@@ -2940,6 +2988,40 @@ pub(super) fn execute_routine_call_with_state(
                         exit_name,
                     },
                 };
+                let result = match result {
+                    FlowSignal::Return(value) => {
+                        let mut materialize_scopes = scopes.clone();
+                        materialize_scopes.push(final_scope.clone());
+                        FlowSignal::Return(
+                            materialize_runtime_return_value(
+                                value,
+                                routine.return_type.as_ref(),
+                                plan,
+                                &routine.package_id,
+                                &routine.module_id,
+                                &mut materialize_scopes,
+                                &aliases,
+                                &type_bindings,
+                                state,
+                                host,
+                            )
+                            .map_err(RuntimeEvalSignal::from)?,
+                        )
+                    }
+                    other => other,
+                };
+                evaluate_owner_exit_checkpoints(
+                    &final_scope.activated_owner_keys,
+                    plan,
+                    &routine.package_id,
+                    &routine.module_id,
+                    &aliases,
+                    &type_bindings,
+                    state,
+                    host,
+                    None,
+                )?;
+                release_scope_owner_activations(state, &final_scope.activated_owner_keys);
                 let result = match result {
                     FlowSignal::OwnerExit {
                         owner_key,
@@ -2956,17 +3038,7 @@ pub(super) fn execute_routine_call_with_state(
                 };
                 let value = match result {
                     FlowSignal::Next => RuntimeValue::Unit,
-                    FlowSignal::Return(value) => materialize_runtime_return_value(
-                        value,
-                        plan,
-                        &routine.package_id,
-                        &routine.module_id,
-                        &mut scopes,
-                        &aliases,
-                        &type_bindings,
-                        state,
-                        host,
-                    )?,
+                    FlowSignal::Return(value) => value,
                     FlowSignal::Break => {
                         return Err("break escaped the top-level routine".to_string().into());
                     }
@@ -3037,6 +3109,56 @@ pub(super) fn execute_routine_call_with_state(
     });
     pop_runtime_call_frame(state);
     execution_result
+}
+
+fn runtime_type_param_is_lifetime(param: &str) -> bool {
+    param.starts_with('\'')
+}
+
+fn resolve_runtime_routine_type_args(
+    routine_name: &str,
+    declared_type_params: &[String],
+    supplied_type_args: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if declared_type_params.is_empty() {
+        if supplied_type_args.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "routine `{routine_name}` expected 0 type arguments, got {}",
+            supplied_type_args.len()
+        ));
+    }
+    if supplied_type_args.is_empty() {
+        return Ok(declared_type_params.to_vec());
+    }
+    if supplied_type_args.len() == declared_type_params.len() {
+        return Ok(supplied_type_args);
+    }
+    let non_lifetime_type_param_count = declared_type_params
+        .iter()
+        .filter(|param| !runtime_type_param_is_lifetime(param))
+        .count();
+    if supplied_type_args.len() == non_lifetime_type_param_count {
+        let mut supplied = supplied_type_args.into_iter();
+        return Ok(declared_type_params
+            .iter()
+            .map(|param| {
+                if runtime_type_param_is_lifetime(param) {
+                    param.clone()
+                } else {
+                    supplied
+                        .next()
+                        .expect("non-lifetime type arg count should match supplied args")
+                }
+            })
+            .collect());
+    }
+    Err(format!(
+        "routine `{routine_name}` expected {} type arguments, got {}",
+        declared_type_params.len(),
+        supplied_type_args.len()
+    ))
 }
 
 pub(super) fn execute_routine_with_state(

@@ -7,8 +7,9 @@ use serde::Serialize;
 
 use super::{
     RuntimeCoreHost, RuntimeExecutionState, RuntimeOpaqueFamily, RuntimePackagePlan,
-    RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
-    native_abi::project_export_write_backs, routine_plan::render_runtime_signature_text,
+    RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
+    native_abi::{exported_param_uses_whole_value_write_back, project_export_write_backs},
+    routine_plan::render_runtime_signature_text,
     runtime_binding_callback_signatures_for_package, runtime_binding_import_signatures_for_package,
     runtime_eval_message, validate_runtime_requirements_supported,
 };
@@ -92,8 +93,8 @@ pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<St
                         name: &param.name,
                         source_mode: json_abi_source_mode(param.mode.as_deref()),
                         input_type: param.ty.render(),
-                        pass_mode: json_abi_pass_mode(param.mode.as_deref()).as_str(),
-                        write_back_type: (param.mode.as_deref() == Some("edit"))
+                        pass_mode: json_abi_pass_mode(param).as_str(),
+                        write_back_type: exported_param_uses_whole_value_write_back(param)
                             .then(|| param.ty.render()),
                     })
                     .collect(),
@@ -251,18 +252,43 @@ fn json_abi_callable(plan: &RuntimePackagePlan, routine: &RuntimeRoutinePlan) ->
 fn json_abi_supported_type(plan: &RuntimePackagePlan, ty: &IrRoutineType) -> bool {
     match &ty.kind {
         IrRoutineTypeKind::Path(path) => {
-            !json_abi_blocks_path(plan, &path.render(), path.root_name())
+            json_abi_supported_path(plan, &path.render(), path.root_name())
         }
-        IrRoutineTypeKind::Apply { base, args } => {
-            !json_abi_blocks_path(plan, &base.render(), base.root_name())
-                && args.iter().all(|arg| json_abi_supported_type(plan, arg))
-        }
+        IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
+            Some("Pair") if args.len() == 2 => args.iter().all(|arg| json_abi_supported_type(plan, arg)),
+            Some("Array") | Some("List") if args.len() == 1 => {
+                args.iter().all(|arg| json_abi_supported_type(plan, arg))
+            }
+            Some("Map") if args.len() == 2 => args.iter().all(|arg| json_abi_supported_type(plan, arg)),
+            _ => false,
+        },
         IrRoutineTypeKind::Ref { .. } => false,
         IrRoutineTypeKind::Tuple(items) => {
             items.len() == 2 && items.iter().all(|item| json_abi_supported_type(plan, item))
         }
         IrRoutineTypeKind::Projection(_) => false,
     }
+}
+
+fn json_abi_supported_path(
+    plan: &RuntimePackagePlan,
+    rendered: &str,
+    root_name: Option<&str>,
+) -> bool {
+    if json_abi_blocks_path(plan, rendered, root_name) {
+        return false;
+    }
+    matches!(
+        root_name,
+        Some("Int")
+            | Some("Bool")
+            | Some("Str")
+            | Some("Bytes")
+            | Some("ByteBuffer")
+            | Some("Utf16")
+            | Some("Utf16Buffer")
+            | Some("Unit")
+    )
 }
 
 fn json_abi_blocks_path(
@@ -283,10 +309,11 @@ fn json_abi_path_is_runtime_opaque(plan: &RuntimePackagePlan, rendered: &str) ->
     }) || super::retired_binding_opaque_type_matches(plan, rendered)
 }
 
-fn json_abi_pass_mode(mode: Option<&str>) -> ArcanaCabiPassMode {
-    match mode {
-        Some("edit") => ArcanaCabiPassMode::InWithWriteBack,
-        _ => ArcanaCabiPassMode::In,
+fn json_abi_pass_mode(param: &RuntimeParamPlan) -> ArcanaCabiPassMode {
+    if exported_param_uses_whole_value_write_back(param) {
+        ArcanaCabiPassMode::InWithWriteBack
+    } else {
+        ArcanaCabiPassMode::In
     }
 }
 

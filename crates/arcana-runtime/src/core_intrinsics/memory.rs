@@ -1033,7 +1033,39 @@ pub(super) fn execute(
                     },
                     None,
                     None,
-                    |_| false,
+                    |state| {
+                        runtime_any_live_element_view_reference(state, |reference| {
+                            runtime_reference_targets_ring_id(reference, oldest_id)
+                        }) || state.read_views.values().any(|view| {
+                            runtime_ring_window_backing_matches_predicate(
+                                &view.backing,
+                                view.start,
+                                view.len,
+                                &|candidate_arena, candidate_slots| {
+                                    runtime_ring_window_overlaps_slots(
+                                        handle,
+                                        &[oldest_slot],
+                                        candidate_arena,
+                                        candidate_slots,
+                                    )
+                                },
+                            )
+                        }) || state.edit_views.values().any(|view| {
+                            runtime_ring_window_backing_matches_predicate(
+                                &view.backing,
+                                view.start,
+                                view.len,
+                                &|candidate_arena, candidate_slots| {
+                                    runtime_ring_window_overlaps_slots(
+                                        handle,
+                                        &[oldest_slot],
+                                        candidate_arena,
+                                        candidate_slots,
+                                    )
+                                },
+                            )
+                        })
+                    },
                     format!(
                         "ring_push rejects overwrite while borrowed views for RingId `{}` are live",
                         runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(

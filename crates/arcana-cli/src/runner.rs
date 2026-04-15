@@ -277,13 +277,15 @@ mod tests {
             .clone()
             .expect("windows exe run should stage a non-release bundle");
         assert!(
-            bundle_dir.starts_with(repo_root().join("target")),
-            "expected staged run bundle under repo target, got {}",
+            bundle_dir.starts_with(repo_root().join("dist").join("target")),
+            "expected staged run bundle under repo dist/target, got {}",
             bundle_dir.display()
         );
         assert!(
-            !bundle_dir.starts_with(repo_root().join("dist")),
-            "did not expect staged run bundle under repo dist: {}",
+            bundle_dir
+                .components()
+                .any(|component| component.as_os_str() == "bundle-stage"),
+            "expected staged run bundle under dist/target/bundle-stage, got {}",
             bundle_dir.display()
         );
         let code = run_native_executable(
@@ -333,8 +335,15 @@ mod tests {
             .clone()
             .expect("windows exe run should stage a bundle");
         assert!(
-            bundle_dir.starts_with(repo_root().join("target")),
-            "expected staged run bundle under repo target, got {}",
+            bundle_dir.starts_with(repo_root().join("dist").join("target")),
+            "expected staged run bundle under repo dist/target, got {}",
+            bundle_dir.display()
+        );
+        assert!(
+            bundle_dir
+                .components()
+                .any(|component| component.as_os_str() == "bundle-stage"),
+            "expected staged run bundle under dist/target/bundle-stage, got {}",
             bundle_dir.display()
         );
         let marker = bundle_dir.join("runner-reuse-marker.txt");

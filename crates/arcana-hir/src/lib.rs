@@ -2685,6 +2685,14 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         }
         HirExpr::QualifiedPhrase {
             subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Try,
+            ..
+        } => {
+            let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+            hir_option_payload_type(&subject_ty).or_else(|| hir_result_ok_payload_type(&subject_ty))
+        }
+        HirExpr::QualifiedPhrase {
+            subject,
             qualifier_kind: HirQualifiedPhraseQualifierKind::Must,
             ..
         } => {
@@ -6867,8 +6875,8 @@ mod tests {
 
     #[test]
     fn resolve_workspace_builds_module_and_symbol_bindings() {
-        let std_summary = build_package_summary(
-            "std",
+        let process_summary = build_package_summary(
+            "arcana_process",
             vec![
                 lower_module_text(
                     "arcana_process.io",
@@ -6877,22 +6885,22 @@ mod tests {
                 .expect("arcana_process.io should lower"),
             ],
         );
-        let std_layout = build_package_layout(
-            &std_summary,
+        let process_layout = build_package_layout(
+            &process_summary,
             BTreeMap::from([(
                 "arcana_process.io".to_string(),
-                Path::new("C:/repo/std/src/io.arc").to_path_buf(),
+                Path::new("C:/repo/grimoires/arcana/process/src/io.arc").to_path_buf(),
             )]),
             BTreeMap::new(),
         )
-        .expect("std layout should build");
-        let std_package = build_workspace_package(
-            Path::new("C:/repo/std").to_path_buf(),
+        .expect("arcana_process layout should build");
+        let process_package = build_workspace_package(
+            Path::new("C:/repo/grimoires/arcana/process").to_path_buf(),
             BTreeSet::new(),
-            std_summary,
-            std_layout,
+            process_summary,
+            process_layout,
         )
-        .expect("std package should build");
+        .expect("arcana_process package should build");
 
         let app_summary = build_package_summary(
             "app",
@@ -6915,14 +6923,14 @@ mod tests {
         .expect("app layout should build");
         let app_package = build_workspace_package(
             Path::new("C:/repo/app").to_path_buf(),
-            BTreeSet::new(),
+            BTreeSet::from(["arcana_process".to_string()]),
             app_summary,
             app_layout,
         )
         .expect("app package should build");
 
         let workspace =
-            build_workspace_summary(vec![app_package, std_package]).expect("workspace builds");
+            build_workspace_summary(vec![app_package, process_package]).expect("workspace builds");
         let resolved = resolve_workspace(&workspace).expect("resolution should succeed");
         let app = resolved.package("app").expect("app should resolve");
         let root = app.module("app").expect("root module should resolve");
@@ -6933,8 +6941,8 @@ mod tests {
                 .expect("alias should resolve")
                 .target,
             super::HirResolvedTarget::Module {
-                package_id: "std".to_string(),
-                package_name: "std".to_string(),
+                package_id: "arcana_process".to_string(),
+                package_name: "arcana_process".to_string(),
                 module_id: "arcana_process.io".to_string(),
             }
         );
@@ -6944,8 +6952,8 @@ mod tests {
                 .expect("symbol should resolve")
                 .target,
             super::HirResolvedTarget::Symbol {
-                package_id: "std".to_string(),
-                package_name: "std".to_string(),
+                package_id: "arcana_process".to_string(),
+                package_name: "arcana_process".to_string(),
                 module_id: "arcana_process.io".to_string(),
                 symbol_name: "print".to_string(),
             }
@@ -7127,30 +7135,46 @@ mod tests {
 
     #[test]
     fn resolve_workspace_rejects_duplicate_directive_bindings() {
-        let std_summary = build_package_summary(
-            "std",
+        let process_summary = build_package_summary(
+            "arcana_process",
             vec![
                 lower_module_text(
                     "arcana_process.io",
                     "export fn print() -> Int:\n    return 0\n",
                 )
                 .expect("arcana_process.io should lower"),
+            ],
+        );
+        let process_layout = build_package_layout(
+            &process_summary,
+            BTreeMap::from([(
+                "arcana_process.io".to_string(),
+                Path::new("C:/repo/grimoires/arcana/process/src/io.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("arcana_process layout should build");
+        let process_package = build_workspace_package(
+            Path::new("C:/repo/grimoires/arcana/process").to_path_buf(),
+            BTreeSet::new(),
+            process_summary,
+            process_layout,
+        )
+        .expect("arcana_process package should build");
+
+        let std_summary = build_package_summary(
+            "std",
+            vec![
                 lower_module_text("std.text", "export fn len() -> Int:\n    return 0\n")
                     .expect("std.text should lower"),
             ],
         );
         let std_layout = build_package_layout(
             &std_summary,
-            BTreeMap::from([
-                (
-                    "arcana_process.io".to_string(),
-                    Path::new("C:/repo/std/src/io.arc").to_path_buf(),
-                ),
-                (
-                    "std.text".to_string(),
-                    Path::new("C:/repo/std/src/text.arc").to_path_buf(),
-                ),
-            ]),
+            BTreeMap::from([(
+                "std.text".to_string(),
+                Path::new("C:/repo/std/src/text.arc").to_path_buf(),
+            )]),
             BTreeMap::new(),
         )
         .expect("std layout should build");
@@ -7183,14 +7207,15 @@ mod tests {
         .expect("app layout should build");
         let app_package = build_workspace_package(
             Path::new("C:/repo/app").to_path_buf(),
-            BTreeSet::from(["std".to_string()]),
+            BTreeSet::from(["arcana_process".to_string(), "std".to_string()]),
             app_summary,
             app_layout,
         )
         .expect("app package should build");
 
         let workspace =
-            build_workspace_summary(vec![app_package, std_package]).expect("workspace builds");
+            build_workspace_summary(vec![app_package, process_package, std_package])
+                .expect("workspace builds");
         let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("duplicate binding `io`"));
@@ -7199,8 +7224,8 @@ mod tests {
 
     #[test]
     fn resolve_workspace_allows_duplicate_directives_when_target_matches() {
-        let std_summary = build_package_summary(
-            "std",
+        let process_summary = build_package_summary(
+            "arcana_process",
             vec![
                 lower_module_text(
                     "arcana_process.io",
@@ -7209,22 +7234,22 @@ mod tests {
                 .expect("arcana_process.io should lower"),
             ],
         );
-        let std_layout = build_package_layout(
-            &std_summary,
+        let process_layout = build_package_layout(
+            &process_summary,
             BTreeMap::from([(
                 "arcana_process.io".to_string(),
-                Path::new("C:/repo/std/src/io.arc").to_path_buf(),
+                Path::new("C:/repo/grimoires/arcana/process/src/io.arc").to_path_buf(),
             )]),
             BTreeMap::new(),
         )
-        .expect("std layout should build");
-        let std_package = build_workspace_package(
-            Path::new("C:/repo/std").to_path_buf(),
+        .expect("arcana_process layout should build");
+        let process_package = build_workspace_package(
+            Path::new("C:/repo/grimoires/arcana/process").to_path_buf(),
             BTreeSet::new(),
-            std_summary,
-            std_layout,
+            process_summary,
+            process_layout,
         )
-        .expect("std package should build");
+        .expect("arcana_process package should build");
 
         let app_summary = build_package_summary(
             "app",
@@ -7247,14 +7272,14 @@ mod tests {
         .expect("app layout should build");
         let app_package = build_workspace_package(
             Path::new("C:/repo/app").to_path_buf(),
-            BTreeSet::from(["std".to_string()]),
+            BTreeSet::from(["arcana_process".to_string()]),
             app_summary,
             app_layout,
         )
         .expect("app package should build");
 
         let workspace =
-            build_workspace_summary(vec![app_package, std_package]).expect("workspace builds");
+            build_workspace_summary(vec![app_package, process_package]).expect("workspace builds");
         let resolved = resolve_workspace(&workspace).expect("resolution should succeed");
         let app_module = resolved
             .package("app")

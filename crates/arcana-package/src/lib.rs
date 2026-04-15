@@ -90,8 +90,10 @@ pub(crate) fn workspace_target_output_root(workspace_root: &Path) -> PathBuf {
         .join(TARGET_OUTPUT_NAMESPACE)
 }
 
-pub(crate) fn workspace_release_output_root(workspace_root: &Path) -> PathBuf {
-    workspace_output_anchor_root(workspace_root).join("dist")
+pub(crate) fn workspace_distribution_output_root(workspace_root: &Path) -> PathBuf {
+    workspace_output_anchor_root(workspace_root)
+        .join("dist")
+        .join("target")
 }
 
 pub(crate) fn render_workspace_output_path(workspace_root: &Path, output_path: &Path) -> String {
@@ -3332,6 +3334,29 @@ mod tests {
         );
     }
 
+    fn write_process_io_grimoire(dir: &Path) {
+        write_std_io_grimoire(dir);
+        write_grimoire(
+            &dir.join("arcana_process"),
+            GrimoireKind::Lib,
+            "arcana_process",
+            &[("std", "../std")],
+        );
+        write_file(
+            &dir.join("arcana_process/src/book.arc"),
+            "reexport arcana_process.io\n",
+        );
+        write_file(&dir.join("arcana_process/src/types.arc"), "// process types\n");
+        write_file(
+            &dir.join("arcana_process/src/io.arc"),
+            concat!(
+                "import std.io\n",
+                "export fn print[T](read value: T):\n",
+                "    std.io.print[T] :: value :: call\n",
+            ),
+        );
+    }
+
     fn prepare_test_build(graph: &WorkspaceGraph) -> PreparedBuild {
         prepare_build(graph).expect("prepare build")
     }
@@ -3552,7 +3577,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("manual-bundle-output");
         let bundle = stage_distribution_bundle(
             &graph,
             &statuses,
@@ -4311,7 +4336,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("manual-bundle-output");
         fs::create_dir_all(&bundle_dir).expect("bundle dir should exist");
         fs::write(bundle_dir.join("user.txt"), "keep").expect("user file should write");
 
@@ -4423,12 +4448,14 @@ mod tests {
         .expect("native dll cache metadata should read");
         assert!(artifact_path.is_file());
         assert_eq!(metadata.target_format, AOT_WINDOWS_DLL_FORMAT);
+        let mut support_files = metadata.support_files.clone();
+        support_files.sort();
         assert_eq!(
-            metadata.support_files,
+            support_files,
             vec![
-                "lib.dll.h".to_string(),
+                "lib.dll.arcana-bundle.toml".to_string(),
                 "lib.dll.def".to_string(),
-                "lib.dll.arcana-bundle.toml".to_string()
+                "lib.dll.h".to_string()
             ]
         );
         let header_text = fs::read_to_string(artifact_path.with_file_name("lib.dll.h"))
@@ -4893,15 +4920,13 @@ mod tests {
         );
         write_file(
             &dir.join("src").join("shelf.arc"),
-            "use arcana_process.io.print\nfn main() -> Int:\n    return 0\n",
+            "use std.text.len\nfn main() -> Int:\n    return 0\n",
         );
         write_file(&dir.join("src").join("types.arc"), "// types\n");
         write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
         write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
-        write_file(
-            &dir.join("std/src/book.arc"),
-            "export fn print() -> Int:\n    return 0\n",
-        );
+        write_file(&dir.join("std/src/book.arc"), "// std root\n");
+        write_file(&dir.join("std/src/text.arc"), "export fn len() -> Int:\n    return 0\n");
 
         let workspace = load_workspace_hir(&dir).expect("workspace hir should load");
         assert!(workspace.package("workspace").is_some());
@@ -4915,7 +4940,7 @@ mod tests {
                 .dependency_edges
                 .iter()
                 .any(|edge| edge.target_path
-                    == vec!["std".to_string(), "io".to_string(), "print".to_string()])
+                    == vec!["std".to_string(), "text".to_string(), "len".to_string()])
         );
         assert_eq!(
             workspace
@@ -5372,13 +5397,16 @@ mod tests {
     #[test]
     fn malformed_cached_artifact_rows_trigger_rebuild_even_with_matching_hashes() {
         let dir = temp_dir("invalid_artifact_rows");
-        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\narcana_process = { path = \"arcana_process\" }\nstd = { path = \"std\" }\n",
+        );
         write_file(
             &dir.join("src").join("shelf.arc"),
             "import arcana_process.io\nfn main() -> Int:\n    arcana_process.io.print :: 1 :: call\n    return 0\n",
         );
         write_file(&dir.join("src").join("types.arc"), "// types\n");
-        write_std_io_grimoire(&dir);
+        write_process_io_grimoire(&dir);
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
@@ -5399,7 +5427,14 @@ mod tests {
             .expect("lock exists");
 
         let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
-        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+        assert_dispositions(
+            &second_statuses,
+            &[
+                ("app", BuildDisposition::Built),
+                ("arcana_process", BuildDisposition::CacheHit),
+                ("std", BuildDisposition::CacheHit),
+            ],
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5753,7 +5788,10 @@ toolchain = \"future-toolchain\"\n"
     #[test]
     fn built_lib_artifact_runtime_requirements_follow_exported_surface() {
         let dir = temp_dir("lib_artifact_runtime_requirements");
-        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"core\"\nkind = \"lib\"\n[deps]\narcana_process = { path = \"arcana_process\" }\nstd = { path = \"std\" }\n",
+        );
         write_file(
             &dir.join("src/book.arc"),
             concat!(
@@ -5764,21 +5802,7 @@ toolchain = \"future-toolchain\"\n"
             ),
         );
         write_file(&dir.join("src/types.arc"), "// core types\n");
-        write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
-        write_file(&dir.join("std/src/book.arc"), "// std root\n");
-        write_file(&dir.join("std/src/types.arc"), "// std types\n");
-        write_file(
-            &dir.join("std/src/io.arc"),
-            concat!(
-                "import std.kernel.io\n",
-                "export fn print[T](read value: T):\n",
-                "    std.kernel.io.print[T] :: value :: call\n",
-            ),
-        );
-        write_file(
-            &dir.join("std/src/kernel/io.arc"),
-            "intrinsic fn print[T](read value: T) = IoPrint\n",
-        );
+        write_process_io_grimoire(&dir);
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
@@ -5800,7 +5824,10 @@ toolchain = \"future-toolchain\"\n"
     #[test]
     fn built_lib_artifact_runtime_requirements_follow_exported_impl_surface() {
         let dir = temp_dir("lib_artifact_impl_runtime_requirements");
-        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"core\"\nkind = \"lib\"\n[deps]\narcana_process = { path = \"arcana_process\" }\nstd = { path = \"std\" }\n",
+        );
         write_file(&dir.join("src/book.arc"), "reexport types\n");
         write_file(
             &dir.join("src/types.arc"),
@@ -5814,7 +5841,7 @@ toolchain = \"future-toolchain\"\n"
                 "        return self.value\n",
             ),
         );
-        write_std_io_grimoire(&dir);
+        write_process_io_grimoire(&dir);
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
@@ -5843,7 +5870,10 @@ toolchain = \"future-toolchain\"\n"
     #[test]
     fn built_lib_artifact_surface_rows_exclude_dependency_exports() {
         let dir = temp_dir("lib_artifact_surface_rows");
-        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"core\"\nkind = \"lib\"\n[deps]\narcana_process = { path = \"arcana_process\" }\nstd = { path = \"std\" }\n",
+        );
         write_file(
             &dir.join("src/book.arc"),
             concat!(
@@ -5854,7 +5884,7 @@ toolchain = \"future-toolchain\"\n"
             ),
         );
         write_file(&dir.join("src/types.arc"), "// core types\n");
-        write_std_io_grimoire(&dir);
+        write_process_io_grimoire(&dir);
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
@@ -5931,7 +5961,10 @@ toolchain = \"future-toolchain\"\n"
         );
 
         let graph = load_workspace_graph(&dir).expect("load graph");
-        let err = prepare_build(&graph).expect_err("ambiguous concrete bare method should fail");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        let err = execute_planned_build(&graph, &prepared, &statuses)
+            .expect_err("ambiguous concrete bare method should fail");
         assert!(
             err.contains("bare-method qualifier `tap` on `app.types.Counter` is ambiguous"),
             "{err}"

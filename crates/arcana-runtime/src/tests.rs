@@ -3190,12 +3190,14 @@ fn execute_main_cleanup_footers_refresh_subject_value_after_mutation() {
         "export record Counter:\n    value: Int\n",
     );
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_cleanup_footer_mutation_refresh");
-    let mut host = BufferedHost::default();
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-    assert_eq!(code, 0);
-    assert_eq!(host.stdout, vec!["2".to_string()]);
+    let err = match load_workspace_graph(&dir).and_then(|graph| check_workspace_graph(&graph)) {
+        Ok(_) => panic!("cleanup footer target mutation after activation should fail"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("cleanup footer target `counter` cannot be reassigned after activation"),
+        "unexpected error: {err}"
+    );
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -7928,7 +7930,7 @@ fn mutex_put_rejects_ring_memory() {
         &mut host,
     )
     .expect_err("mutex_put should reject ring memory");
-    assert!(err.contains("move-only"), "{err}");
+    assert!(err.contains("explicit move"), "{err}");
 }
 
 #[test]
@@ -8305,19 +8307,19 @@ fn execute_main_runs_linked_std_wrapper_closure_routines() {
             "    arcana_process.io.print[Str] :: (texts.join :: parts, \"+\" :: call) :: call\n",
             "    arcana_process.io.print[Str] :: (texts.repeat :: \"ha\", 3 :: call) :: call\n",
             "    arcana_process.io.print[Int] :: (unwrap_int :: (texts.to_int :: \"  -42 \" :: call) :: call) :: call\n",
-            "    let arc = bytes.from_str_utf8 :: \"arcana\" :: call\n",
-            "    let prefix = bytes.from_str_utf8 :: \"arc\" :: call\n",
-            "    let can = bytes.from_str_utf8 :: \"can\" :: call\n",
-            "    let na = bytes.from_str_utf8 :: \"na\" :: call\n",
-            "    arcana_process.io.print[Bool] :: (bytes.starts_with :: arc, prefix :: call) :: call\n",
-            "    arcana_process.io.print[Bool] :: (bytes.ends_with :: arc, na :: call) :: call\n",
-            "    arcana_process.io.print[Int] :: (bytes.find :: arc, 0, can :: call) :: call\n",
-            "    arcana_process.io.print[Bool] :: (bytes.contains :: arc, can :: call) :: call\n",
-            "    let mut buf = bytes.new_buf :: :: call\n",
-            "    arcana_process.io.print[Bool] :: ((bytes.buf_push :: buf, 65 :: call) :: :: is_ok) :: call\n",
-            "    arcana_process.io.print[Int] :: (unwrap_int :: (bytes.buf_extend :: buf, can :: call) :: call) :: call\n",
-            "    let combo = bytes.concat :: prefix, (bytes.buf_to_array :: buf :: call) :: call\n",
-            "    arcana_process.io.print[Str] :: (bytes.to_str_utf8 :: combo :: call) :: call\n",
+            "    let arc = texts.bytes_from_str_utf8 :: \"arcana\" :: call\n",
+            "    let can = texts.bytes_slice :: arc, 2, 5 :: call\n",
+            "    arcana_process.io.print[Int] :: (texts.bytes_len :: arc :: call) :: call\n",
+            "    arcana_process.io.print[Int] :: (texts.bytes_at :: arc, 2 :: call) :: call\n",
+            "    arcana_process.io.print[Str] :: (texts.bytes_to_str_utf8 :: can :: call) :: call\n",
+            "    let mut buf = texts.byte_buffer_new :: :: call\n",
+            "    buf :: 65 :: push\n",
+            "    buf :: 99 :: push\n",
+            "    buf :: 97 :: push\n",
+            "    buf :: 110 :: push\n",
+            "    let combo = buf :: :: freeze\n",
+            "    arcana_process.io.print[Int] :: (buf :: :: len) :: call\n",
+            "    arcana_process.io.print[Str] :: (texts.bytes_to_str_utf8 :: combo :: call) :: call\n",
             "    let pos = core.vec2 :: 3, 4 :: call\n",
             "    let size = core.size2 :: 5, 6 :: call\n",
             "    let rect = core.rect :: pos, size :: call\n",
@@ -8417,13 +8419,11 @@ fn execute_main_runs_linked_std_wrapper_closure_routines() {
             "alpha+beta".to_string(),
             "hahaha".to_string(),
             "-42".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-            "2".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-            "3".to_string(),
-            "arcAcan".to_string(),
+            "6".to_string(),
+            "99".to_string(),
+            "can".to_string(),
+            "4".to_string(),
+            "Acan".to_string(),
             "9".to_string(),
             "8".to_string(),
             "5".to_string(),
@@ -9510,7 +9510,7 @@ fn execute_main_runs_range_index_slice_and_literal_match_routines() {
             "import std.collections.array\n",
             "import arcana_process.io\n",
             "fn main() -> Int:\n",
-            "    let xs = [10, 20, 30, 40]\n",
+            "    let xs = std.collections.array.from_list[Int] :: [10, 20, 30, 40] :: call\n",
             "    arcana_process.io.print[Int] :: xs[0] :: call\n",
             "    let tail = xs[1..]\n",
             "    arcana_process.io.print[Int] :: (tail :: :: len) :: call\n",
@@ -10767,7 +10767,7 @@ fn execute_main_runs_owner_init_hook_with_activation_context() {
             "    fn init(edit self: Self, read ctx: SessionCtx):\n",
             "        self.value = ctx.base\n",
             "\n",
-            "create Session [Counter] scope-exit:\n",
+            "create Session [Counter] context: SessionCtx scope-exit:\n",
             "    done: when Counter.value > 10 retain [Counter]\n",
             "\n",
             "Session\n",
@@ -10809,7 +10809,7 @@ fn execute_main_runs_owner_resume_hook_with_activation_context() {
             "    fn resume(edit self: Self, read ctx: SessionCtx):\n",
             "        self.value += ctx.base\n",
             "\n",
-            "create Session [Counter] scope-exit:\n",
+            "create Session [Counter] context: SessionCtx scope-exit:\n",
             "    done: when Counter.value == 3 retain [Counter]\n",
             "\n",
             "Session\n",
@@ -10858,7 +10858,7 @@ fn execute_main_reentry_while_active_uses_new_activation_context() {
             "obj GateState:\n",
             "    gate: AtomicBool\n",
             "\n",
-            "create Session [Counter, GateState] scope-exit:\n",
+            "create Session [Counter, GateState] context: SessionCtx scope-exit:\n",
             "    closed: when (std.kernel.concurrency.atomic_bool_load :: GateState.gate :: call)\n",
             "\n",
             "Session\n",
@@ -11169,12 +11169,14 @@ fn execute_main_rejects_owner_object_init_without_required_context() {
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_missing_context");
-    let mut host = BufferedHost::default();
-    let err =
-        execute_main(&plan, &mut host).expect_err("owner object init without context should fail");
-
-    assert!(err.contains("requires an activation context"), "{err}");
+    let err = match load_workspace_graph(&dir).and_then(|graph| check_workspace_graph(&graph)) {
+        Ok(_) => panic!("owner object init without required context should fail to check"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("owner `Session` must declare `context: ...` to use lifecycle context hooks"),
+        "{err}"
+    );
 
     let _ = fs::remove_dir_all(dir);
 }
