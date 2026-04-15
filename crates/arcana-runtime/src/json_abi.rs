@@ -255,11 +255,15 @@ fn json_abi_supported_type(plan: &RuntimePackagePlan, ty: &IrRoutineType) -> boo
             json_abi_supported_path(plan, &path.render(), path.root_name())
         }
         IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
-            Some("Pair") if args.len() == 2 => args.iter().all(|arg| json_abi_supported_type(plan, arg)),
+            Some("Pair") if args.len() == 2 => {
+                args.iter().all(|arg| json_abi_supported_type(plan, arg))
+            }
             Some("Array") | Some("List") if args.len() == 1 => {
                 args.iter().all(|arg| json_abi_supported_type(plan, arg))
             }
-            Some("Map") if args.len() == 2 => args.iter().all(|arg| json_abi_supported_type(plan, arg)),
+            Some("Map") if args.len() == 2 => {
+                args.iter().all(|arg| json_abi_supported_type(plan, arg))
+            }
             _ => false,
         },
         IrRoutineTypeKind::Ref { .. } => false,

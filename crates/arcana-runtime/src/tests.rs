@@ -3585,7 +3585,8 @@ fn execute_main_materializes_nested_edit_member_returns_before_frame_exit() {
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_materialize_nested_edit_member_return");
+    let plan =
+        build_workspace_plan_for_member(&dir, "runtime_materialize_nested_edit_member_return");
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
@@ -11220,4 +11221,3 @@ fn execute_main_runs_owner_activation_with_explicit_context_clause() {
 
     let _ = fs::remove_dir_all(dir);
 }
-

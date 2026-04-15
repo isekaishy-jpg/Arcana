@@ -7213,9 +7213,8 @@ mod tests {
         )
         .expect("app package should build");
 
-        let workspace =
-            build_workspace_summary(vec![app_package, process_package, std_package])
-                .expect("workspace builds");
+        let workspace = build_workspace_summary(vec![app_package, process_package, std_package])
+            .expect("workspace builds");
         let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("duplicate binding `io`"));

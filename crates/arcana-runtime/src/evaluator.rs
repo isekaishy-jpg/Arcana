@@ -77,8 +77,10 @@ fn materialize_runtime_return_value(
         }
         _ => {}
     }
-    if matches!(return_type.map(|ty| &ty.kind), Some(IrRoutineTypeKind::Ref { .. }))
-        || (return_type.is_none() && matches!(value, RuntimeValue::Ref(_)))
+    if matches!(
+        return_type.map(|ty| &ty.kind),
+        Some(IrRoutineTypeKind::Ref { .. })
+    ) || (return_type.is_none() && matches!(value, RuntimeValue::Ref(_)))
     {
         return Ok(value);
     }
@@ -1942,7 +1944,8 @@ pub(super) fn execute_statements(
                     state,
                     host,
                 )?;
-                let values = into_iterable_values(force_runtime_value(iterable, plan, state, host)?)?;
+                let values =
+                    into_iterable_values(force_runtime_value(iterable, plan, state, host)?)?;
                 let mut loop_signal = FlowSignal::Next;
                 for value in values {
                     let mut scope = RuntimeScope::default();
@@ -2783,9 +2786,12 @@ pub(super) fn execute_routine_call_with_state(
                 ))
                 .cloned()
                 .unwrap_or_default();
-            let resolved_type_args =
-                resolve_runtime_routine_type_args(&routine.symbol_name, &routine.type_params, type_args)
-                    .map_err(RuntimeEvalSignal::from)?;
+            let resolved_type_args = resolve_runtime_routine_type_args(
+                &routine.symbol_name,
+                &routine.type_params,
+                type_args,
+            )
+            .map_err(RuntimeEvalSignal::from)?;
             let type_bindings = routine
                 .type_params
                 .iter()

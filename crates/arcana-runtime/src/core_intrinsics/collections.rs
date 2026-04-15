@@ -449,7 +449,6 @@ pub(super) fn execute(
             }
             if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
                 let scopes = scopes
-                    .as_deref_mut()
                     .ok_or_else(|| "map_remove on refs requires runtime scopes".to_string())?;
                 let current_package_id = current_package_id
                     .ok_or_else(|| "map_remove on refs requires package context".to_string())?;

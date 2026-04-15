@@ -3421,9 +3421,7 @@ mod tests {
             params: vec![ArcanaCabiBindingParam::binding(
                 "window",
                 ArcanaCabiParamSourceMode::Edit,
-                ArcanaCabiBindingType::Named(
-                    "arcana_winapi.desktop_handles.Window".to_string(),
-                ),
+                ArcanaCabiBindingType::Named("arcana_winapi.desktop_handles.Window".to_string()),
             )],
         }];
         spec.binding_shackle_decls = vec![AotShackleDeclArtifact {

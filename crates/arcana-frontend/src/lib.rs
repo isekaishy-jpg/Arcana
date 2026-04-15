@@ -21873,7 +21873,9 @@ mod tests {
 
         let err = check_path(&root).expect_err("list slice borrow should fail");
         assert!(
-            err.contains("borrowed projections require contiguous or view backing; `List` is not supported"),
+            err.contains(
+                "borrowed projections require contiguous or view backing; `List` is not supported"
+            ),
             "{err}"
         );
 

@@ -1587,16 +1587,16 @@ pub(super) fn runtime_final_args_from_binding_import(
         }
         let expected_type = param.ty.render();
         let write_back = &outcome.write_backs[index];
-        if write_back.tag()? == ArcanaCabiBindingValueTag::Unit {
-            if let Some(value) = runtime_binding_preserved_opaque_edit_arg(
+        if write_back.tag()? == ArcanaCabiBindingValueTag::Unit
+            && let Some(value) = runtime_binding_preserved_opaque_edit_arg(
                 package_id,
                 &expected_type,
                 args.get(index),
                 binding_args.get(index),
-            ) {
-                final_args[index] = value;
-                continue;
-            }
+            )
+        {
+            final_args[index] = value;
+            continue;
         }
         match runtime_value_from_binding_cabi_output(
             layouts,
@@ -1631,9 +1631,7 @@ fn runtime_binding_preserved_opaque_edit_arg(
             continue;
         };
         if binding.package_id == package_id && binding.type_name == expected_type {
-            return Some(RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(
-                binding.clone(),
-            )));
+            return Some(RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(*binding)));
         }
     }
     None

@@ -5,13 +5,16 @@ on:
   pull_request:
 
 jobs:
-  test:
+  ci:
+    name: CI
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Freeze Guard
         shell: pwsh
         run: |
@@ -25,5 +28,9 @@ jobs:
       - name: AnyBox Guard
         shell: pwsh
         run: ./scripts/ci/anybox_policy_guard.ps1
+      - name: Cargo Fmt
+        run: cargo fmt --all -- --check
+      - name: Cargo Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cargo Test
         run: cargo test --workspace

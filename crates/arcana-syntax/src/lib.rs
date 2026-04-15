@@ -9993,8 +9993,16 @@ mod tests {
     fn rewrite_owned_and_conformance_corpus_parses_as_supported_syntax() {
         for root in [
             repo_root().join("std").join("src"),
-            repo_root().join("grimoires").join("arcana").join("process").join("src"),
-            repo_root().join("grimoires").join("arcana").join("winapi").join("src"),
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("process")
+                .join("src"),
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src"),
             repo_root()
                 .join("conformance")
                 .join("fixtures")
@@ -10928,10 +10936,9 @@ mod tests {
 
     #[test]
     fn parse_module_accepts_nested_tuple_member_access_after_numeric_selector() {
-        let parsed = parse_module(
-            "fn main() -> Int:\n    let value = pair.1.0\n    return value\n",
-        )
-        .expect("nested tuple member access should parse");
+        let parsed =
+            parse_module("fn main() -> Int:\n    let value = pair.1.0\n    return value\n")
+                .expect("nested tuple member access should parse");
 
         match &parsed.symbols[0].statements[0].kind {
             StatementKind::Let { value, .. } => match value {

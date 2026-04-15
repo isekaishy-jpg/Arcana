@@ -3346,7 +3346,10 @@ mod tests {
             &dir.join("arcana_process/src/book.arc"),
             "reexport arcana_process.io\n",
         );
-        write_file(&dir.join("arcana_process/src/types.arc"), "// process types\n");
+        write_file(
+            &dir.join("arcana_process/src/types.arc"),
+            "// process types\n",
+        );
         write_file(
             &dir.join("arcana_process/src/io.arc"),
             concat!(
@@ -3987,9 +3990,15 @@ mod tests {
             "arcana_winapi should publish a dedicated graphics handle module"
         );
 
-        let desktop_handles =
-            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("desktop_handles.arc"))
-                .expect("desktop_handles source should load");
+        let desktop_handles = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("desktop_handles.arc"),
+        )
+        .expect("desktop_handles source should load");
         assert!(
             !desktop_handles.contains("Session"),
             "desktop handle source should not publish Session anymore"
@@ -4001,9 +4010,15 @@ mod tests {
             "desktop handle source should not publish alias-only lang handle shims"
         );
 
-        let audio_handles =
-            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("audio_handles.arc"))
-                .expect("audio_handles source should load");
+        let audio_handles = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("audio_handles.arc"),
+        )
+        .expect("audio_handles source should load");
         assert!(
             !audio_handles.contains("lang audio_device_handle")
                 && !audio_handles.contains("lang audio_buffer_handle")
@@ -4011,17 +4026,30 @@ mod tests {
             "audio handle source should not publish alias-only lang handle shims"
         );
 
-        let process_handles =
-            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("process_handles.arc"))
-                .expect("process_handles source should load");
+        let process_handles = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("process_handles.arc"),
+        )
+        .expect("process_handles source should load");
         assert!(
             !process_handles.contains("lang file_stream_handle"),
             "process handle source should not publish alias-only lang handle shims"
         );
 
-        let events_source =
-            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("helpers").join("events.arc"))
-                .expect("events helper source should load");
+        let events_source = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("helpers")
+                .join("events.arc"),
+        )
+        .expect("events helper source should load");
         assert!(
             !events_source.contains("session_open")
                 && !events_source.contains("session_close")
@@ -4033,9 +4061,16 @@ mod tests {
             "events helper source should not expose desktop session helpers"
         );
 
-        let graphics_source =
-            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("helpers").join("graphics.arc"))
-                .expect("graphics helper source should load");
+        let graphics_source = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("helpers")
+                .join("graphics.arc"),
+        )
+        .expect("graphics helper source should load");
         assert!(
             graphics_source.contains("use arcana_winapi.graphics_handles.GdiWindowSurface"),
             "graphics helper source should use the canonical graphics handle module"
@@ -4046,9 +4081,16 @@ mod tests {
             "graphics helper source should only expose the generic GDI window-surface owner lane"
         );
 
-        let window_source =
-            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("helpers").join("window.arc"))
-                .expect("window helper source should load");
+        let window_source = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("helpers")
+                .join("window.arc"),
+        )
+        .expect("window helper source should load");
         assert!(
             window_source.contains(
                 "export native fn window_native_handle(read win: Window) -> arcana_winapi.raw.types.HWND"
@@ -4926,7 +4968,10 @@ mod tests {
         write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
         write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
         write_file(&dir.join("std/src/book.arc"), "// std root\n");
-        write_file(&dir.join("std/src/text.arc"), "export fn len() -> Int:\n    return 0\n");
+        write_file(
+            &dir.join("std/src/text.arc"),
+            "export fn len() -> Int:\n    return 0\n",
+        );
 
         let workspace = load_workspace_hir(&dir).expect("workspace hir should load");
         assert!(workspace.package("workspace").is_some());
