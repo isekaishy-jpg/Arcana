@@ -23,18 +23,13 @@ impl[K] Set[K]:
         return std.kernel.collections.map_has :: self.entries, key :: call
 
     fn insert(edit self: Set[K], key: K) -> Bool:
-        let mut entries = self.entries
-        if std.kernel.collections.map_has :: entries, key :: call:
+        if std.kernel.collections.map_has :: self.entries, key :: call:
             return false
-        std.kernel.collections.map_set :: entries, key, true :: call
-        self.entries = entries
+        std.kernel.collections.map_set :: self.entries, key, true :: call
         return true
 
     fn remove(edit self: Set[K], key: K) -> Bool:
-        let mut entries = self.entries
-        let removed = std.kernel.collections.map_remove :: entries, key :: call
-        self.entries = entries
-        return removed
+        return std.kernel.collections.map_remove :: self.entries, key :: call
 
     fn clear(edit self: Set[K]):
         let items = self :: :: items

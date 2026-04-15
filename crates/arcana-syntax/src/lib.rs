@@ -6684,6 +6684,9 @@ fn parse_generic_arg_types(text: &str) -> Option<Vec<SurfaceType>> {
 }
 
 fn split_member_access(text: &str) -> Option<(&str, &str)> {
+    if is_float_literal(text.trim()) {
+        return None;
+    }
     let positions = find_top_level_dot_positions(text);
     let index = *positions.last()?;
     let base = text[..index].trim();
@@ -7009,14 +7012,6 @@ fn find_top_level_dot_positions(text: &str) -> Vec<usize> {
         .filter(|index| {
             !matches!(text[..*index].chars().next_back(), Some('.'))
                 && !matches!(text[*index + 1..].chars().next(), Some('.'))
-                && !matches!(
-                    (
-                        text[..*index].chars().next_back(),
-                        text[*index + 1..].chars().next()
-                    ),
-                    (Some(left), Some(right))
-                        if left.is_ascii_digit() && right.is_ascii_digit()
-                )
         })
         .collect()
 }
@@ -9956,15 +9951,6 @@ mod tests {
             .expect("repo root should resolve")
     }
 
-    fn owned_app_root() -> PathBuf {
-        let libs = repo_root().join("grimoires").join("owned").join("libs");
-        if libs.is_dir() {
-            libs
-        } else {
-            repo_root().join("grimoires").join("owned").join("app")
-        }
-    }
-
     fn collect_arc_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         let mut stack = vec![root.to_path_buf()];
@@ -10007,10 +9993,8 @@ mod tests {
     fn rewrite_owned_and_conformance_corpus_parses_as_supported_syntax() {
         for root in [
             repo_root().join("std").join("src"),
-            owned_app_root().join("arcana-desktop").join("src"),
-            owned_app_root().join("arcana-graphics").join("src"),
-            owned_app_root().join("arcana-text").join("src"),
-            owned_app_root().join("arcana-audio").join("src"),
+            repo_root().join("grimoires").join("arcana").join("process").join("src"),
+            repo_root().join("grimoires").join("arcana").join("winapi").join("src"),
             repo_root()
                 .join("conformance")
                 .join("fixtures")
@@ -10944,6 +10928,27 @@ mod tests {
             "struct Vec2:\n    x: F32\n    y: F32\nfn main() -> F64:\n    let point = Vec2 :: x = 1.5f32, y = 2.5f32 :: call\n    let sum = (F64 :: point.x :: call) + 2.5\n    return sum\n",
         )
         .expect("member access and decimal float literal should parse together");
+    }
+
+    #[test]
+    fn parse_module_accepts_nested_tuple_member_access_after_numeric_selector() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let value = pair.1.0\n    return value\n",
+        )
+        .expect("nested tuple member access should parse");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let { value, .. } => match value {
+                Expr::MemberAccess { expr, member } if member == "0" => {
+                    assert!(matches!(
+                        expr.as_ref(),
+                        Expr::MemberAccess { member, .. } if member == "1"
+                    ));
+                }
+                other => panic!("expected nested tuple member access, got {other:?}"),
+            },
+            other => panic!("expected let statement, got {other:?}"),
+        }
     }
 
     #[test]

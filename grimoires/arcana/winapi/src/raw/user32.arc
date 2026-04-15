@@ -3,6 +3,7 @@ export shackle import fn CreateWindowExW(ex_style: arcana_winapi.raw.types.DWORD
 export shackle import fn DestroyWindow(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.BOOL = user32.DestroyWindow
 export shackle import fn PostMessageW(window: arcana_winapi.raw.types.HWND, message: arcana_winapi.raw.types.UINT, wparam: arcana_winapi.raw.types.WPARAM, lparam: arcana_winapi.raw.types.LPARAM) -> arcana_winapi.raw.types.BOOL = user32.PostMessageW
 export shackle import fn PeekMessageW(message: arcana_winapi.raw.types.LPMSG, window: arcana_winapi.raw.types.HWND, min_filter: arcana_winapi.raw.types.UINT, max_filter: arcana_winapi.raw.types.UINT, remove: arcana_winapi.raw.types.UINT) -> arcana_winapi.raw.types.BOOL = user32.PeekMessageW
+export shackle import fn MsgWaitForMultipleObjectsEx(count: arcana_winapi.raw.types.DWORD, handles: arcana_winapi.raw.types.PHANDLE, milliseconds: arcana_winapi.raw.types.DWORD, wake_mask: arcana_winapi.raw.types.DWORD, flags: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.DWORD = user32.MsgWaitForMultipleObjectsEx
 export shackle import fn TranslateMessage(message: arcana_winapi.raw.types.PCMSG) -> arcana_winapi.raw.types.BOOL = user32.TranslateMessage
 export shackle import fn DispatchMessageW(message: arcana_winapi.raw.types.PCMSG) -> arcana_winapi.raw.types.LRESULT = user32.DispatchMessageW
 export shackle import fn GetWindowLongPtrW(window: arcana_winapi.raw.types.HWND, index: arcana_winapi.raw.types.LONG) -> arcana_winapi.raw.types.LONG_PTR = user32.GetWindowLongPtrW

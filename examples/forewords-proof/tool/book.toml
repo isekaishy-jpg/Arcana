@@ -1,5 +1,0 @@
-name = "tool"
-kind = "lib"
-
-[toolchain.foreword_products.tool-forewords]
-path = "forewords/runtime_note.cmd"

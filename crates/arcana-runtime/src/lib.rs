@@ -234,7 +234,6 @@ const RETIRED_BINDING_OPAQUE_LANG_ITEMS: &[&str] = &[
     "file_stream_handle",
     "window_handle",
     "app_frame_handle",
-    "app_session_handle",
     "wake_handle",
     "audio_device_handle",
     "audio_buffer_handle",
@@ -2144,28 +2143,33 @@ fn resolve_routine_module_targets(
 
     let mut targets = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut push_target = |package_id: &str, module_id: String, symbol_name: &str| {
+        let target = (
+            package_id.to_string(),
+            module_id,
+            symbol_name.to_string(),
+        );
+        if seen.insert(target.clone()) {
+            targets.push(target);
+        }
+    };
     let root = callable_path
         .first()
         .map(String::as_str)
         .unwrap_or_default();
     if let Some(package_id) = resolve_visible_package_id_for_root(plan, current_package_id, root) {
-        let target = (
-            package_id.to_string(),
-            module_id.clone(),
-            symbol_name.clone(),
-        );
-        seen.insert(target.clone());
-        targets.push(target);
+        push_target(package_id, module_id.clone(), &symbol_name);
+        if let Some(stripped_module) = module_id
+            .strip_prefix(root)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .filter(|module| !module.is_empty())
+        {
+            push_target(package_id, stripped_module.to_string(), &symbol_name);
+        }
         return targets;
     }
 
-    let local_target = (
-        current_package_id.to_string(),
-        module_id.clone(),
-        symbol_name.clone(),
-    );
-    seen.insert(local_target.clone());
-    targets.push(local_target);
+    push_target(current_package_id, module_id.clone(), &symbol_name);
 
     if let Some(package_name) = current_package_name(plan, current_package_id) {
         let prefixed_module = if module_id == package_name
@@ -2175,10 +2179,7 @@ fn resolve_routine_module_targets(
         } else {
             format!("{package_name}.{module_id}")
         };
-        let prefixed_target = (current_package_id.to_string(), prefixed_module, symbol_name);
-        if seen.insert(prefixed_target.clone()) {
-            targets.push(prefixed_target);
-        }
+        push_target(current_package_id, prefixed_module, &symbol_name);
     }
 
     targets
@@ -2202,6 +2203,49 @@ fn resolve_routine_index(
         }
     }
     None
+}
+
+fn resolve_lowered_routine_index(
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    routine_key: &str,
+) -> Result<Option<usize>, String> {
+    let mut candidate_keys = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push_candidate = |candidate: String| {
+        if seen.insert(candidate.clone()) {
+            candidate_keys.push(candidate);
+        }
+    };
+    push_candidate(routine_key.to_string());
+    if !routine_key.contains('|')
+        && let Some((module_id, _)) = routine_key.split_once('#')
+    {
+        let root = module_id.split('.').next().unwrap_or(module_id);
+        if let Some(package_id) = resolve_visible_package_id_for_root(plan, current_package_id, root)
+        {
+            push_candidate(format!("{package_id}|{routine_key}"));
+        }
+    }
+
+    let filtered = plan
+        .routines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, routine)| {
+            candidate_keys
+                .iter()
+                .any(|candidate| routine.routine_key == *candidate)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    match filtered.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => Err(format!(
+            "runtime lowered routine `{routine_key}` matched duplicate runtime routines"
+        )),
+    }
 }
 
 fn resolve_routine_candidate_indices(
@@ -2914,8 +2958,16 @@ fn resolve_memory_spec_target(
         ));
     };
     let module_id = canonical[..canonical.len() - 1].join(".");
-    runtime_module_exists(plan, &package_id, &module_id)
-        .then_some((package_id, module_id, spec_name))
+    if runtime_module_exists(plan, &package_id, &module_id) {
+        return Some((package_id, module_id, spec_name));
+    }
+    let stripped_module = module_id
+        .strip_prefix(&canonical[0])
+        .and_then(|rest| rest.strip_prefix('.'))
+        .filter(|module| !module.is_empty())?
+        .to_string();
+    runtime_module_exists(plan, &package_id, &stripped_module)
+        .then_some((package_id, stripped_module, spec_name))
 }
 
 fn lookup_module_memory_spec_decl(
@@ -7082,18 +7134,6 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../grimoires/arcana/winapi/src/helpers/audio.arc"),
     ),
     (
-        "arcana_audio.output",
-        include_str!("../../../grimoires/libs/arcana-audio/src/output.arc"),
-    ),
-    (
-        "arcana_audio.clip",
-        include_str!("../../../grimoires/libs/arcana-audio/src/clip.arc"),
-    ),
-    (
-        "arcana_audio.playback",
-        include_str!("../../../grimoires/libs/arcana-audio/src/playback.arc"),
-    ),
-    (
         "std.collections.array",
         include_str!("../../../std/src/collections/array.arc"),
     ),
@@ -7516,13 +7556,33 @@ fn bind_call_args_for_routine(
 }
 
 fn runtime_execution_arg_for_bound_param(
-    scopes: &[RuntimeScope],
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     param: &RuntimeParamPlan,
     arg: &BoundRuntimeArg,
-) -> RuntimeValue {
-    if param.mode.as_deref() != Some("edit") {
-        return arg.value.clone();
+    host: &mut dyn RuntimeCoreHost,
+) -> Result<RuntimeValue, String> {
+    match param.mode.as_deref() {
+        Some("edit") => {}
+        Some("take") | Some("hold") => return Ok(arg.value.clone()),
+        _ => {
+            return read_runtime_value_if_ref(
+                arg.value.clone(),
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            );
+        }
     }
     if !matches!(
         arg.value,
@@ -7534,13 +7594,13 @@ fn runtime_execution_arg_for_bound_param(
             | RuntimeValue::Record { .. }
             | RuntimeValue::Variant { .. }
     ) {
-        return arg.value.clone();
+        return Ok(arg.value.clone());
     }
     let Some(target) = expr_to_assign_target(&arg.source_expr) else {
-        return arg.value.clone();
+        return Ok(arg.value.clone());
     };
     let Ok(place) = resolve_assign_target_place(scopes, &target) else {
-        return arg.value.clone();
+        return Ok(arg.value.clone());
     };
     if let RuntimeReferenceTarget::Local { local, .. } = &place.target
         && let Some((_, runtime_local)) = lookup_local_with_name_by_handle(scopes, *local)
@@ -7550,10 +7610,10 @@ fn runtime_execution_arg_for_bound_param(
             .entry(*local)
             .or_insert_with(|| runtime_local.value.clone());
     }
-    RuntimeValue::Ref(RuntimeReferenceValue {
+    Ok(RuntimeValue::Ref(RuntimeReferenceValue {
         mode: place.mode,
         target: place.target,
-    })
+    }))
 }
 
 fn ok_variant(value: RuntimeValue) -> RuntimeValue {
@@ -8065,8 +8125,7 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => {
             matches!(
                 binding.type_name,
-                "arcana_desktop.types.WakeHandle"
-                    | "arcana_winapi.types.WakeHandle"
+                "arcana_winapi.types.WakeHandle"
                     | "arcana_winapi.desktop_handles.WakeHandle"
             )
         }
@@ -10128,6 +10187,11 @@ fn resolve_routine_index_for_call(
     allow_receiver_root_fallback: bool,
     state: Option<&RuntimeExecutionState>,
 ) -> Result<Option<usize>, String> {
+    if let Some(routine_key) = resolved_routine {
+        if let Some(index) = resolve_lowered_routine_index(plan, current_package_id, routine_key)? {
+            return Ok(Some(index));
+        }
+    }
     let bare_receiver_lookup =
         dynamic_dispatch.is_none() && allow_receiver_root_fallback && callable.len() == 1;
     let candidates = match dynamic_dispatch {
@@ -10146,28 +10210,6 @@ fn resolve_routine_index_for_call(
     };
     if candidates.is_empty() {
         return Ok(None);
-    }
-    if let Some(routine_key) = resolved_routine {
-        let filtered = candidates
-            .into_iter()
-            .filter(|index| {
-                plan.routines
-                    .get(*index)
-                    .map(|routine| routine.routine_key == routine_key)
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
-        return match filtered.as_slice() {
-            [] => Err(format!(
-                "runtime call `{}` has no overload matching lowered routine `{routine_key}`",
-                callable.join(".")
-            )),
-            [index] => Ok(Some(*index)),
-            _ => Err(format!(
-                "runtime call `{}` remains ambiguous for lowered routine `{routine_key}`",
-                callable.join(".")
-            )),
-        };
     }
     if dynamic_dispatch.is_none() && candidates.len() == 1 && !bare_receiver_lookup {
         return Ok(candidates.into_iter().next());
@@ -10411,8 +10453,21 @@ fn execute_call_by_path(
             .params
             .iter()
             .zip(bound_args.iter())
-            .map(|(param, arg)| runtime_execution_arg_for_bound_param(scopes, state, param, arg))
-            .collect::<Vec<_>>();
+            .map(|(param, arg)| {
+                runtime_execution_arg_for_bound_param(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    state,
+                    param,
+                    arg,
+                    host,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let outcome = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
             if let Some(intrinsic_impl) = &routine.intrinsic_impl {
                 let intrinsic =
@@ -10616,9 +10671,17 @@ fn execute_runtime_apply_phrase(
     )? {
         return Ok(value);
     }
-    if resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_none()
-        && resolve_runtime_intrinsic_path(&callable).is_none()
-    {
+    let has_lowered_runtime_routine = match resolved_routine {
+        Some(routine_key) => resolve_lowered_routine_index(plan, current_package_id, routine_key)
+            .map_err(RuntimeEvalSignal::from)?
+            .is_some(),
+        None => false,
+    };
+    let has_runtime_routine = has_lowered_runtime_routine
+        || resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_some();
+    let has_runtime_intrinsic = resolve_runtime_intrinsic_path(&callable).is_some();
+    if !has_runtime_routine && !has_runtime_intrinsic {
+        // Constructor fallback is only valid when lowering did not identify a routine call.
         if let Some(record) = try_construct_record_value(
             &callable,
             &type_args,

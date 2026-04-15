@@ -382,6 +382,54 @@ pub(super) fn execute(
             if args.len() != 3 {
                 return Err("map_set expects three arguments".to_string());
             }
+            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "map_set on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "map_set on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "map_set on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                let RuntimeValue::Map(mut entries) = read_runtime_value_if_ref(
+                    RuntimeValue::Ref(reference.clone()),
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?
+                else {
+                    return Err("map_set expects Map".to_string());
+                };
+                if let Some((_, entry_value)) = entries
+                    .iter_mut()
+                    .find(|(entry_key, _)| *entry_key == args[1])
+                {
+                    *entry_value = args[2].clone();
+                } else {
+                    entries.push((args[1].clone(), args[2].clone()));
+                }
+                write_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    RuntimeValue::Map(entries),
+                    host,
+                )?;
+                return Ok(RuntimeValue::Unit);
+            }
             let Some(RuntimeValue::Map(entries)) = final_args.get_mut(0) else {
                 return Err("map_set expects Map".to_string());
             };
@@ -398,6 +446,49 @@ pub(super) fn execute(
         RuntimeIntrinsic::MapRemove => {
             if args.len() != 2 {
                 return Err("map_remove expects two arguments".to_string());
+            }
+            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "map_remove on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "map_remove on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "map_remove on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                let RuntimeValue::Map(mut entries) = read_runtime_value_if_ref(
+                    RuntimeValue::Ref(reference.clone()),
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?
+                else {
+                    return Err("map_remove expects Map".to_string());
+                };
+                let original_len = entries.len();
+                entries.retain(|(entry_key, _)| *entry_key != args[1]);
+                let removed = entries.len() != original_len;
+                write_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    RuntimeValue::Map(entries),
+                    host,
+                )?;
+                return Ok(RuntimeValue::Bool(removed));
             }
             let Some(RuntimeValue::Map(entries)) = final_args.get_mut(0) else {
                 return Err("map_remove expects Map".to_string());

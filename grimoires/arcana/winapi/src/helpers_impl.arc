@@ -599,59 +599,155 @@ shackle fn clipboard_take_last_error_impl() -> Str = helpers.clipboard.take_last
     Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
 
 shackle flags WinapiSoftwareSurfaceInternals:
-    pub(crate) fn software_surface_pixels_len(
+    pub(crate) fn gdi_surface_slot_ref(
         instance: &crate::BindingInstance,
-        map_handle: i64,
-    ) -> Result<i64, String> {
-        let map = crate::shackle::software_surface_map_ref(instance, map_handle)?;
-        let surface = crate::shackle::software_surface_ref(instance, map.surface)?;
-        Ok(surface.pixels.len() as i64)
+        surface_handle: u64,
+        slot: i64,
+    ) -> Result<&crate::shackle::SoftwareSurfaceBufferState, String> {
+        if slot < 0 {
+            return Err(format!("software surface slot `{slot}` must be >= 0"));
+        }
+        let surface = crate::shackle::software_surface_ref(instance, surface_handle)?;
+        let slot_index = usize::try_from(slot)
+            .map_err(|_| format!("software surface slot `{slot}` is invalid"))?;
+        surface
+            .buffers
+            .get(slot_index)
+            .ok_or_else(|| format!("software surface slot `{slot}` is missing"))
     }
 
-    pub(crate) fn software_surface_pixel_at(
+    pub(crate) fn gdi_surface_slot_mut(
+        instance: &mut crate::BindingInstance,
+        surface_handle: u64,
+        slot: i64,
+    ) -> Result<&mut crate::shackle::SoftwareSurfaceBufferState, String> {
+        if slot < 0 {
+            return Err(format!("software surface slot `{slot}` must be >= 0"));
+        }
+        let surface = crate::shackle::software_surface_mut(instance, surface_handle)?;
+        let slot_index = usize::try_from(slot)
+            .map_err(|_| format!("software surface slot `{slot}` is invalid"))?;
+        surface
+            .buffers
+            .get_mut(slot_index)
+            .ok_or_else(|| format!("software surface slot `{slot}` is missing"))
+    }
+
+    pub(crate) fn new_software_surface_state(
+        hwnd: crate::raw::types::HWND,
+    ) -> crate::shackle::SoftwareSurfaceState {
+        crate::shackle::SoftwareSurfaceState {
+            hwnd,
+            width: 0,
+            height: 0,
+            stride: 0,
+            buffers: Vec::new(),
+        }
+    }
+
+    pub(crate) fn configure_software_surface_buffers(
+        instance: &mut crate::BindingInstance,
+        surface_handle: u64,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let stride = crate::shackle::software_surface_stride(width, height)?;
+        let len = stride
+            .checked_mul(height)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| "software surface size overflowed".to_string())?;
+        let surface = crate::shackle::software_surface_mut(instance, surface_handle)?;
+        surface.width = width;
+        surface.height = height;
+        surface.stride = stride;
+        surface.buffers = vec![
+            crate::shackle::SoftwareSurfaceBufferState {
+                pixels: vec![0; len],
+            },
+            crate::shackle::SoftwareSurfaceBufferState {
+                pixels: vec![0; len],
+            },
+        ];
+        Ok(())
+    }
+
+    pub(crate) fn gdi_surface_pixels_len(
         instance: &crate::BindingInstance,
-        map_handle: i64,
+        surface_handle: u64,
+        slot: i64,
+    ) -> Result<i64, String> {
+        Ok((gdi_surface_slot_ref(instance, surface_handle, slot)?.pixels.len() / 4) as i64)
+    }
+
+    pub(crate) fn gdi_surface_pixel_at(
+        instance: &crate::BindingInstance,
+        surface_handle: u64,
+        slot: i64,
         index: i64,
     ) -> Result<i64, String> {
         if index < 0 {
-            return Err(format!("software surface byte index `{index}` must be >= 0"));
+            return Err(format!("software surface pixel index `{index}` must be >= 0"));
         }
-        let map = crate::shackle::software_surface_map_ref(instance, map_handle)?;
-        let surface = crate::shackle::software_surface_ref(instance, map.surface)?;
-        let value = surface
-            .pixels
-            .get(index as usize)
-            .copied()
-            .ok_or_else(|| format!("software surface byte index `{index}` is out of bounds"))?;
-        Ok(i64::from(value))
+        let base = index
+            .checked_mul(4)
+            .ok_or_else(|| format!("software surface pixel index `{index}` overflowed"))?;
+        let buffer = gdi_surface_slot_ref(instance, surface_handle, slot)?;
+        let blue = i64::from(
+            *buffer
+                .pixels
+                .get(base as usize)
+                .ok_or_else(|| format!("software surface pixel index `{index}` is out of bounds"))?,
+        );
+        let green = i64::from(
+            *buffer
+                .pixels
+                .get((base + 1) as usize)
+                .ok_or_else(|| format!("software surface pixel index `{index}` is out of bounds"))?,
+        );
+        let red = i64::from(
+            *buffer
+                .pixels
+                .get((base + 2) as usize)
+                .ok_or_else(|| format!("software surface pixel index `{index}` is out of bounds"))?,
+        );
+        Ok((red << 16) | (green << 8) | blue)
     }
 
-    pub(crate) fn software_surface_pixel_set(
+    pub(crate) fn gdi_surface_pixel_set(
         instance: &mut crate::BindingInstance,
-        map_handle: i64,
+        surface_handle: u64,
+        slot: i64,
         index: i64,
         value: i64,
     ) -> Result<(), String> {
         if index < 0 {
-            return Err(format!("software surface byte index `{index}` must be >= 0"));
+            return Err(format!("software surface pixel index `{index}` must be >= 0"));
         }
-        if !(0..=255).contains(&value) {
+        if !(0..=0x00ff_ffff).contains(&value) {
             return Err(format!(
-                "software surface byte value `{value}` is out of range `0..=255`"
+                "software surface pixel value `{value}` is out of range `0x000000..=0x00ffffff`"
             ));
         }
-        let surface_handle = crate::shackle::software_surface_map_ref(instance, map_handle)?.surface;
-        let surface = crate::shackle::software_surface_mut(instance, surface_handle)?;
-        let slot = surface
-            .pixels
-            .get_mut(index as usize)
-            .ok_or_else(|| format!("software surface byte index `{index}` is out of bounds"))?;
-        *slot = value as u8;
+        let base = index
+            .checked_mul(4)
+            .ok_or_else(|| format!("software surface pixel index `{index}` overflowed"))?;
+        let buffer = gdi_surface_slot_mut(instance, surface_handle, slot)?;
+        let start = usize::try_from(base)
+            .map_err(|_| format!("software surface pixel index `{index}` overflowed"))?;
+        let end = start + 3;
+        if end >= buffer.pixels.len() {
+            return Err(format!("software surface pixel index `{index}` is out of bounds"));
+        }
+        buffer.pixels[start] = (value & 0xff) as u8;
+        buffer.pixels[start + 1] = ((value >> 8) & 0xff) as u8;
+        buffer.pixels[start + 2] = ((value >> 16) & 0xff) as u8;
+        buffer.pixels[start + 3] = 0;
         Ok(())
     }
 
     pub(crate) fn present_software_surface(
         surface: &crate::shackle::SoftwareSurfaceState,
+        slot: i64,
         bounded: Option<(i64, i64, i64, i64)>,
     ) -> Result<(), String> {
         if surface.hwnd.is_null() {
@@ -667,7 +763,7 @@ shackle flags WinapiSoftwareSurfaceInternals:
                 unsafe { crate::raw::kernel32::GetLastError() }
             ));
         }
-        let mut info = crate::raw::types::BITMAPINFO {
+        let info = crate::raw::types::BITMAPINFO {
             bmiHeader: crate::raw::types::BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<crate::raw::types::BITMAPINFOHEADER>() as u32,
                 biWidth: surface.width as i32,
@@ -688,6 +784,14 @@ shackle flags WinapiSoftwareSurfaceInternals:
                 rgbReserved: 0,
             }],
         };
+        let slot_index = usize::try_from(slot)
+            .map_err(|_| format!("software surface slot `{slot}` is invalid"))?;
+        let pixels = surface
+            .buffers
+            .get(slot_index)
+            .ok_or_else(|| format!("software surface slot `{slot}` is missing"))?
+            .pixels
+            .as_ptr() as *const std::ffi::c_void;
         let copied = if let Some((x, y, width, height)) = bounded {
             unsafe {
                 crate::raw::gdi32::StretchDIBits(
@@ -700,7 +804,7 @@ shackle flags WinapiSoftwareSurfaceInternals:
                     y as i32,
                     width as i32,
                     height as i32,
-                    surface.pixels.as_ptr() as *const std::ffi::c_void,
+                    pixels,
                     &info,
                     crate::raw::constants::DIB_RGB_COLORS,
                     crate::raw::constants::SRCCOPY,
@@ -722,7 +826,7 @@ shackle flags WinapiSoftwareSurfaceInternals:
                     0,
                     surface.width as i32,
                     surface.height as i32,
-                    surface.pixels.as_ptr() as *const std::ffi::c_void,
+                    pixels,
                     &info,
                     crate::raw::constants::DIB_RGB_COLORS,
                     crate::raw::constants::SRCCOPY,
@@ -834,140 +938,62 @@ shackle fn graphics_gdi_hidden_window_present_impl() -> Bool = helpers.graphics.
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
     Ok(binding_bool(presented.unwrap_or(false)))
 
-shackle fn graphics_software_surface_open_impl(read hwnd: Int) -> Int = helpers.graphics.software_surface_open:
-    crate::shackle::clear_helper_error(instance);
-    if hwnd <= 0 {
-        crate::shackle::set_helper_error(instance, format!("software surface HWND `{hwnd}` must be > 0"));
-        return Ok(binding_int(0));
-    }
-    let state = crate::shackle::package_state_data_mut(instance)?;
-    let handle = state.next_surface_handle;
-    state.next_surface_handle += 1;
-    state.software_surfaces.insert(handle, crate::shackle::SoftwareSurfaceState {
-        hwnd: hwnd as usize as crate::raw::types::HWND,
-        width: 0,
-        height: 0,
-        stride: 0,
-        pixels: Vec::new(),
-        current_map: 0,
-        presented_once: false,
-    });
-    Ok(binding_int(handle))
-
-shackle fn graphics_software_surface_open_handle_impl(read hwnd: arcana_winapi.raw.types.HWND) -> Int = helpers.graphics.software_surface_open_handle:
+shackle fn graphics_gdi_window_surface_open_impl(read hwnd: arcana_winapi.raw.types.HWND) -> arcana_winapi.graphics_handles.GdiWindowSurface = helpers.graphics.gdi_window_surface_open:
     crate::shackle::clear_helper_error(instance);
     if hwnd.is_null() {
-        crate::shackle::set_helper_error(instance, "software surface HWND must not be null".to_string());
-        return Ok(binding_int(0));
+        crate::shackle::set_helper_error(instance, "gdi window surface HWND must not be null".to_string());
+        return Ok(binding_opaque(0));
     }
     let state = crate::shackle::package_state_data_mut(instance)?;
     let handle = state.next_surface_handle;
     state.next_surface_handle += 1;
-    state.software_surfaces.insert(handle, crate::shackle::SoftwareSurfaceState {
-        hwnd,
-        width: 0,
-        height: 0,
-        stride: 0,
-        pixels: Vec::new(),
-        current_map: 0,
-        presented_once: false,
-    });
-    Ok(binding_int(handle))
+    state
+        .software_surfaces
+        .insert(handle, new_software_surface_state(hwnd));
+    Ok(binding_opaque(handle))
 
-shackle fn graphics_software_surface_configure_impl(read surface: Int, read width: Int, read height: Int) -> Bool = helpers.graphics.software_surface_configure:
+shackle fn graphics_gdi_window_surface_configure_impl(edit surface: arcana_winapi.graphics_handles.GdiWindowSurface, read width: Int, read height: Int) -> Bool = helpers.graphics.gdi_window_surface_configure:
     crate::shackle::clear_helper_error(instance);
-    let stride = match crate::shackle::software_surface_stride(width, height) {
-        Ok(value) => value,
+    match configure_software_surface_buffers(instance, surface, width, height) {
+        Ok(()) => Ok(binding_bool(true)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_bool(false));
+            Ok(binding_bool(false))
         }
-    };
-    let len = match stride.checked_mul(height).and_then(|value| usize::try_from(value).ok()) {
-        Some(value) => value,
+    }
+
+shackle fn graphics_gdi_window_surface_destroy_impl(take surface: arcana_winapi.graphics_handles.GdiWindowSurface) -> Bool = helpers.graphics.gdi_window_surface_destroy:
+    crate::shackle::clear_helper_error(instance);
+    match crate::shackle::package_state_data_mut(instance)?.software_surfaces.remove(&surface) {
+        Some(_) => Ok(binding_bool(true)),
         None => {
-            crate::shackle::set_helper_error(instance, "software surface size overflowed".to_string());
-            return Ok(binding_bool(false));
-        }
-    };
-    let previous_map = match crate::shackle::software_surface_ref(instance, surface) {
-        Ok(value) => value.current_map,
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_bool(false));
-        }
-    };
-    if previous_map > 0 {
-        crate::shackle::set_helper_error(instance, format!("software surface `{surface}` already has a live map `{previous_map}`"));
-        return Ok(binding_bool(false));
-    }
-    let surface = match crate::shackle::software_surface_mut(instance, surface) {
-        Ok(value) => value,
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_bool(false));
-        }
-    };
-    surface.width = width;
-    surface.height = height;
-    surface.stride = stride;
-    surface.pixels = vec![0; len];
-    surface.current_map = 0;
-    surface.presented_once = false;
-    Ok(binding_bool(true))
-
-shackle fn graphics_software_surface_destroy_impl(read surface: Int) = helpers.graphics.software_surface_destroy:
-    crate::shackle::clear_helper_error(instance);
-    if surface > 0 {
-        if let Some(state) = crate::shackle::package_state_data_mut(instance)?.software_surfaces.remove(&surface)
-            && state.current_map > 0
-        {
-            crate::shackle::package_state_data_mut(instance)?.software_surface_maps.remove(&state.current_map);
+            crate::shackle::set_helper_error(instance, format!("invalid software surface handle `{surface}`"));
+            Ok(binding_bool(false))
         }
     }
-    Ok(binding_unit())
 
-shackle fn graphics_software_surface_next_map_impl(read surface: Int) -> Int = helpers.graphics.software_surface_next_map:
+shackle fn graphics_gdi_window_surface_take_last_error_impl() -> Str = helpers.graphics.gdi_window_surface_take_last_error:
+    Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
+
+shackle fn graphics_gdi_window_surface_buffer_count_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface) -> Int = helpers.graphics.gdi_window_surface_buffer_count:
     crate::shackle::clear_helper_error(instance);
     match crate::shackle::software_surface_ref(instance, surface) {
-        Ok(value) => {
-            if value.width <= 0 || value.height <= 0 || value.stride <= 0 {
-                crate::shackle::set_helper_error(instance, "software surface must be configured before next_map".to_string());
-                return Ok(binding_int(0));
+        Ok(value) => match i64::try_from(value.buffers.len()) {
+            Ok(count) => Ok(binding_int(count)),
+            Err(_) => {
+                crate::shackle::set_helper_error(instance, "software surface buffer count does not fit in Int".to_string());
+                Ok(binding_int(0))
             }
-            if value.current_map > 0 {
-                crate::shackle::set_helper_error(instance, format!("software surface `{surface}` already has a live map `{}`", value.current_map));
-                return Ok(binding_int(0));
-            }
-        }
+        },
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_int(0));
+            Ok(binding_int(0))
         }
-    };
-    let map_handle = {
-        let state = crate::shackle::package_state_data_mut(instance)?;
-        let handle = state.next_surface_map_handle;
-        state.next_surface_map_handle += 1;
-        state.software_surface_maps.insert(handle, crate::shackle::SoftwareSurfaceMapState {
-            surface,
-        });
-        handle
-    };
-    let surface = match crate::shackle::software_surface_mut(instance, surface) {
-        Ok(value) => value,
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            crate::shackle::package_state_data_mut(instance)?.software_surface_maps.remove(&map_handle);
-            return Ok(binding_int(0));
-        }
-    };
-    surface.current_map = map_handle;
-    Ok(binding_int(map_handle))
+    }
 
-shackle fn graphics_software_surface_map_len_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_len:
+shackle fn graphics_gdi_window_surface_pixel_len_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int) -> Int = helpers.graphics.gdi_window_surface_pixel_len:
     crate::shackle::clear_helper_error(instance);
-    match software_surface_pixels_len(instance, map) {
+    match gdi_surface_pixels_len(instance, surface, slot) {
         Ok(value) => Ok(binding_int(value)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
@@ -975,84 +1001,46 @@ shackle fn graphics_software_surface_map_len_impl(read map: Int) -> Int = helper
         }
     }
 
-shackle fn graphics_software_surface_map_width_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_width:
+shackle fn graphics_gdi_window_surface_pixel_at_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int, read index: Int) -> Int = helpers.graphics.gdi_window_surface_pixel_at:
     crate::shackle::clear_helper_error(instance);
-    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
-        Ok(surface) => Ok(binding_int(surface.width)),
+    match gdi_surface_pixel_at(instance, surface, slot, index) {
+        Ok(value) => Ok(binding_int(value)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
             Ok(binding_int(0))
         }
     }
 
-shackle fn graphics_software_surface_map_height_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_height:
+shackle fn graphics_gdi_window_surface_pixel_set_impl(edit surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int, read packed: Int) = helpers.graphics.gdi_window_surface_pixel_set:
     crate::shackle::clear_helper_error(instance);
-    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
-        Ok(surface) => Ok(binding_int(surface.height)),
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            Ok(binding_int(0))
-        }
-    }
+    let packed = packed as u64;
+    let index = i64::try_from((packed >> 32) & 0xFFFF_FFFF)
+        .map_err(|_| "pixel index does not fit Int".to_string())?;
+    let value = i64::try_from(packed & 0xFFFF_FFFF)
+        .map_err(|_| "pixel value does not fit Int".to_string())?;
+    gdi_surface_pixel_set(instance, surface, slot, index, value)?;
+    Ok(binding_unit())
 
-shackle fn graphics_software_surface_map_stride_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_stride:
-    crate::shackle::clear_helper_error(instance);
-    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
-        Ok(surface) => Ok(binding_int(surface.stride)),
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            Ok(binding_int(0))
-        }
-    }
-
-shackle fn graphics_software_surface_map_age_impl(read map: Int) -> Int = helpers.graphics.software_surface_map_age:
-    crate::shackle::clear_helper_error(instance);
-    match crate::shackle::software_surface_map_ref(instance, map).and_then(|value| crate::shackle::software_surface_ref(instance, value.surface)) {
-        Ok(surface) => Ok(binding_int(if surface.presented_once { 1 } else { 0 })),
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            Ok(binding_int(0))
-        }
-    }
-
-shackle fn graphics_software_surface_present_impl(read surface: Int, read map: Int) -> Bool = helpers.graphics.software_surface_present:
+shackle fn graphics_gdi_window_surface_present_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int) -> Bool = helpers.graphics.gdi_window_surface_present:
     crate::shackle::clear_helper_error(instance);
     let presented = (|| -> Result<(), String> {
-        let map_state = crate::shackle::software_surface_map_ref(instance, map)?;
-        if map_state.surface != surface {
-            return Err(format!("software surface map `{map}` does not belong to surface `{surface}`"));
-        }
         let surface_state = crate::shackle::software_surface_ref(instance, surface)?;
-        if surface_state.current_map != map {
-            return Err(format!("software surface map `{map}` is not current for surface `{surface}`"));
-        }
-        present_software_surface(surface_state, None)
+        let _ = gdi_surface_slot_ref(instance, surface, slot)?;
+        present_software_surface(surface_state, slot, None)
     })();
     match presented {
-        Ok(()) => {
-            let _ = crate::shackle::software_surface_map_remove(instance, map);
-            if let Ok(surface_state) = crate::shackle::software_surface_mut(instance, surface) {
-                surface_state.presented_once = true;
-            }
-            Ok(binding_bool(true))
-        }
+        Ok(()) => Ok(binding_bool(true)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
             Ok(binding_bool(false))
         }
     }
 
-shackle fn graphics_software_surface_present_bounded_impl(read surface: Int, read map: Int, read rect: arcana_winapi.raw.types.RECT) -> Bool = helpers.graphics.software_surface_present_bounded:
+shackle fn graphics_gdi_window_surface_present_bounded_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int, read rect: arcana_winapi.raw.types.RECT) -> Bool = helpers.graphics.gdi_window_surface_present_bounded:
     crate::shackle::clear_helper_error(instance);
     let presented = (|| -> Result<(), String> {
-        let map_state = crate::shackle::software_surface_map_ref(instance, map)?;
-        if map_state.surface != surface {
-            return Err(format!("software surface map `{map}` does not belong to surface `{surface}`"));
-        }
         let surface_state = crate::shackle::software_surface_ref(instance, surface)?;
-        if surface_state.current_map != map {
-            return Err(format!("software surface map `{map}` is not current for surface `{surface}`"));
-        }
+        let _ = gdi_surface_slot_ref(instance, surface, slot)?;
         let x = i64::from(rect.left);
         let y = i64::from(rect.top);
         let width = i64::from(rect.right - rect.left);
@@ -1062,49 +1050,36 @@ shackle fn graphics_software_surface_present_bounded_impl(read surface: Int, rea
         let right = (x + width).clamp(left, surface_state.width);
         let bottom = (y + height).clamp(top, surface_state.height);
         if right == left || bottom == top {
-            return present_software_surface(surface_state, None);
+            return present_software_surface(surface_state, slot, None);
         }
         present_software_surface(
             surface_state,
+            slot,
             Some((left, top, right - left, bottom - top)),
         )
     })();
     match presented {
-        Ok(()) => {
-            let _ = crate::shackle::software_surface_map_remove(instance, map);
-            if let Ok(surface_state) = crate::shackle::software_surface_mut(instance, surface) {
-                surface_state.presented_once = true;
-            }
-            Ok(binding_bool(true))
-        }
+        Ok(()) => Ok(binding_bool(true)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
             Ok(binding_bool(false))
         }
     }
-
-shackle fn graphics_software_surface_discard_map_impl(read map: Int) -> Bool = helpers.graphics.software_surface_discard_map:
-    crate::shackle::clear_helper_error(instance);
-    match crate::shackle::software_surface_map_remove(instance, map) {
-        Ok(_) => Ok(binding_bool(true)),
-        Err(err) => {
-            crate::shackle::set_helper_error(instance, err);
-            Ok(binding_bool(false))
-        }
-    }
-
-shackle fn graphics_software_surface_take_last_error_impl() -> Str = helpers.graphics.software_surface_take_last_error:
-    Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
 
 shackle fn mapped_view_len_bytes_impl(read handle: Int) -> Int = __binding.mapped_view_len_bytes:
-    Ok(binding_int(software_surface_pixels_len(instance, handle)?))
+    let _ = handle;
+    Err("arcana_winapi does not expose mapped views".to_string())
 
 shackle fn mapped_view_read_byte_impl(read handle: Int, read index: Int) -> Int = __binding.mapped_view_read_byte:
-    Ok(binding_int(software_surface_pixel_at(instance, handle, index)?))
+    let _ = handle;
+    let _ = index;
+    Err("arcana_winapi does not expose mapped views".to_string())
 
 shackle fn mapped_view_write_byte_impl(read handle: Int, read index: Int, read value: Int) = __binding.mapped_view_write_byte:
-    software_surface_pixel_set(instance, handle, index, value)?;
-    Ok(binding_unit())
+    let _ = handle;
+    let _ = index;
+    let _ = value;
+    Err("arcana_winapi does not expose mapped views".to_string())
 
 shackle fn graphics_dxgi_adapter_count_impl() -> Int = helpers.graphics.dxgi_adapter_count:
     let mut factory: crate::raw::types::LPVOID = std::ptr::null_mut();

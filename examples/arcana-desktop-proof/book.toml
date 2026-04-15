@@ -1,5 +1,0 @@
-name = "desktop_proof_workspace"
-kind = "lib"
-
-[workspace]
-members = ["arcsb_app"]

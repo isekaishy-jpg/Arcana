@@ -76,7 +76,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 Its public package shape is:
 - `arcana_winapi.raw.*` for public raw Win32-facing surface
 - `arcana_winapi.helpers.*` for thin Win32 helper routines consumers should build on
-- `arcana_winapi.desktop_handles`, `arcana_winapi.process_handles`, and `arcana_winapi.audio_handles` for canonical binding-owned opaque handle declarations that higher-level grimoires must reference directly when they need those types
+- `arcana_winapi.desktop_handles`, `arcana_winapi.graphics_handles`, `arcana_winapi.process_handles`, and `arcana_winapi.audio_handles` for canonical binding-owned opaque handle declarations that higher-level grimoires must reference directly when they need those types
 - compatibility wrappers like `arcana_winapi.foundation`, `arcana_winapi.fonts`, and `arcana_winapi.windows` remain available during the migration
 
 Its current v1 raw surface covers:
@@ -106,7 +106,7 @@ Its current helper surface covers:
   - client/frame rect queries
   - clipboard, file-drop, and IME helper routines
 - graphics/text
-  - GDI software-present path
+  - GDI window-surface ownership and software-present path
   - DXGI adapter enumeration
   - DXGI hidden-window swapchain bootstrap
   - D3D12 WARP bootstrap including queue/allocator/list/fence setup
@@ -123,10 +123,9 @@ Its current helper surface covers:
 
 ## Boundaries
 
-- `arcana_text` may consume `arcana_winapi` for host-installed font discovery and related metadata.
-- `arcana_desktop` is expected to consume `arcana_winapi` for its Windows shell implementation rather than keep runtime-owned public desktop special cases alive.
-- `arcana_desktop`, `arcana_process`, and `arcana_audio` may traffic in those binding-owned handles through their routines and records, but type references must still resolve to the `arcana_winapi.*_handles` declarations.
-- Future graphics/audio grimoires such as `arcana_graphics`, `arcana_hal`, and `arcana_audio` may consume the raw/helper surface without reviving handwritten Rust bridge layers.
-- `arcana_text` and `arcana_desktop` must not regain direct runtime special cases once this seam exists.
+- Future text, desktop, graphics, or other higher-level layers may consume `arcana_winapi` for Windows-specific behavior such as font discovery or native shell work.
+- `arcana_process`, `arcana_audio`, and any future higher-level layers may traffic in those binding-owned handles through their routines and records, but type references must still resolve to the `arcana_winapi.*_handles` declarations.
+- Future graphics/audio layers such as `arcana_hal` or reintroduced higher-level packages may consume the raw/helper surface without reviving handwritten Rust bridge layers.
+- Higher-level consumers must not regain direct runtime special cases once this seam exists.
 - No library package should talk to `windows-sys` directly in the library binding seam.
 - Rewrite crates must not keep a parallel `windows-sys` host lane beside this binding seam; Win32 access should flow through `arcana_winapi` and consumer packages.

@@ -19392,38 +19392,6 @@ mod tests {
     }
 
     #[test]
-    fn check_path_handles_owned_desktop_grimoire() {
-        let summary = check_path(&owned_app_root().join("arcana-desktop"))
-            .expect("owned desktop grimoire should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 6);
-    }
-
-    #[test]
-    fn check_path_handles_owned_graphics_grimoire() {
-        let summary = check_path(&owned_app_root().join("arcana-graphics"))
-            .expect("owned graphics grimoire should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 5);
-    }
-
-    #[test]
-    fn check_path_handles_owned_text_grimoire() {
-        let summary = check_path(&owned_app_root().join("arcana-text"))
-            .expect("owned text grimoire should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 4);
-    }
-
-    #[test]
-    fn check_path_handles_owned_audio_grimoire() {
-        let summary = check_path(&owned_app_root().join("arcana-audio"))
-            .expect("owned audio grimoire should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 5);
-    }
-
-    #[test]
     fn check_path_accepts_builtin_foreword_package() {
         let root = make_temp_package(
             "builtin_foreword_positive",
@@ -21578,19 +21546,6 @@ mod tests {
     }
 
     #[test]
-    fn check_path_accepts_desktop_proof_app_with_defer_dispatcher() {
-        let summary = check_path(
-            &repo_root()
-                .join("examples")
-                .join("arcana-desktop-proof")
-                .join("app"),
-        )
-        .expect("desktop proof app should check with defer-based dispatcher cleanup");
-        assert!(summary.package_count >= 3);
-        assert!(summary.module_count >= 2);
-    }
-
-    #[test]
     fn check_path_rejects_unresolved_lang_item_package() {
         let err = check_path(
             &repo_root()
@@ -22861,12 +22816,6 @@ mod tests {
 
     #[test]
     fn check_path_rejects_window_use_after_close() {
-        let desktop_dep = repo_root()
-            .join("grimoires")
-            .join("libs")
-            .join("arcana-desktop")
-            .to_string_lossy()
-            .replace('\\', "/");
         let winapi_dep = repo_root()
             .join("grimoires")
             .join("arcana")
@@ -22876,14 +22825,11 @@ mod tests {
         let root = make_temp_package(
             "typed_window_use_after_close",
             "app",
-            &[
-                ("arcana_desktop", desktop_dep.as_str()),
-                ("arcana_winapi", winapi_dep.as_str()),
-            ],
+            &[("arcana_winapi", winapi_dep.as_str())],
             &[
                 (
                     "src/shelf.arc",
-                    "import arcana_desktop.window\nimport arcana_winapi.desktop_handles\nuse arcana_winapi.desktop_handles.Window\nfn bad(take win: Window) -> Int:\n    arcana_desktop.window.close :: win :: call\n    let alive = arcana_desktop.window.alive :: win :: call\n    return 0\n",
+                    "import arcana_winapi.helpers.window\nimport arcana_winapi.desktop_handles\nuse arcana_winapi.desktop_handles.Window\nfn bad(take win: Window) -> Int:\n    let _ = arcana_winapi.helpers.window.window_close :: win :: call\n    let alive = arcana_winapi.helpers.window.window_alive :: win :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -23057,12 +23003,6 @@ mod tests {
 
     #[test]
     fn check_path_rejects_opaque_type_constructor_use() {
-        let desktop_dep = repo_root()
-            .join("grimoires")
-            .join("libs")
-            .join("arcana-desktop")
-            .to_string_lossy()
-            .replace('\\', "/");
         let winapi_dep = repo_root()
             .join("grimoires")
             .join("arcana")
@@ -23072,10 +23012,7 @@ mod tests {
         let root = make_temp_package(
             "opaque_type_constructor_use",
             "app",
-            &[
-                ("arcana_desktop", desktop_dep.as_str()),
-                ("arcana_winapi", winapi_dep.as_str()),
-            ],
+            &[("arcana_winapi", winapi_dep.as_str())],
             &[
                 (
                     "src/shelf.arc",
@@ -23096,12 +23033,6 @@ mod tests {
 
     #[test]
     fn check_path_rejects_boundary_unsafe_std_opaque_type() {
-        let desktop_dep = repo_root()
-            .join("grimoires")
-            .join("libs")
-            .join("arcana-desktop")
-            .to_string_lossy()
-            .replace('\\', "/");
         let winapi_dep = repo_root()
             .join("grimoires")
             .join("arcana")
@@ -23111,10 +23042,7 @@ mod tests {
         let root = make_temp_package(
             "opaque_type_boundary_contract",
             "app",
-            &[
-                ("arcana_desktop", desktop_dep.as_str()),
-                ("arcana_winapi", winapi_dep.as_str()),
-            ],
+            &[("arcana_winapi", winapi_dep.as_str())],
             &[
                 (
                     "src/shelf.arc",
@@ -24529,19 +24457,6 @@ mod tests {
             .join("..")
             .canonicalize()
             .expect("repo root should resolve")
-    }
-
-    fn owned_root() -> PathBuf {
-        repo_root().join("grimoires").join("owned")
-    }
-
-    fn owned_app_root() -> PathBuf {
-        let libs = owned_root().join("libs");
-        if libs.is_dir() {
-            libs
-        } else {
-            owned_root().join("app")
-        }
     }
 
     fn unique_test_id() -> u64 {

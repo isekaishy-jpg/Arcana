@@ -2316,7 +2316,7 @@ mod tests {
         let dir = temp_dir("bundle_native_products");
         build_instance_product(
             &dir,
-            "arcana_desktop",
+            "child_runtime",
             "default",
             ArcanaCabiProductRole::Child,
             ARCANA_CABI_CHILD_CONTRACT_ID,
@@ -2343,13 +2343,13 @@ mod tests {
                 "support_files = [\"arcwin.dll\", \"tooling_tools.dll\"]\n",
                 "\n[runtime_child_binding]\n",
                 "consumer_member = \"app\"\n",
-                "dependency_alias = \"arcana_desktop\"\n",
-                "package_id = \"arcana_desktop\"\n",
-                "package_name = \"arcana_desktop\"\n",
+                "dependency_alias = \"child_runtime\"\n",
+                "package_id = \"child_runtime\"\n",
+                "package_name = \"child_runtime\"\n",
                 "product_name = \"default\"\n",
                 "\n[[native_products]]\n",
-                "package_id = \"arcana_desktop\"\n",
-                "package_name = \"arcana_desktop\"\n",
+                "package_id = \"child_runtime\"\n",
+                "package_name = \"child_runtime\"\n",
                 "product_name = \"default\"\n",
                 "role = \"child\"\n",
                 "contract_id = \"arcana.cabi.child.v1\"\n",
@@ -2363,9 +2363,9 @@ mod tests {
                 "file = \"tooling_tools.dll\"\n",
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"app\"\n",
-                "dependency_alias = \"arcana_desktop\"\n",
-                "package_id = \"arcana_desktop\"\n",
-                "package_name = \"arcana_desktop\"\n",
+                "dependency_alias = \"child_runtime\"\n",
+                "package_id = \"child_runtime\"\n",
+                "package_name = \"child_runtime\"\n",
                 "product_name = \"default\"\n",
             ),
         )
@@ -2378,9 +2378,9 @@ mod tests {
             catalog.runtime_child_binding(),
             Some(&RuntimeChildBindingInfo {
                 consumer_member: "app".to_string(),
-                dependency_alias: "arcana_desktop".to_string(),
-                package_id: "arcana_desktop".to_string(),
-                package_name: "arcana_desktop".to_string(),
+                dependency_alias: "child_runtime".to_string(),
+                package_id: "child_runtime".to_string(),
+                package_name: "child_runtime".to_string(),
                 product_name: "default".to_string(),
             })
         );
@@ -2426,7 +2426,7 @@ mod tests {
         let dir = temp_dir("bundle_native_products_root_scope");
         build_instance_product(
             &dir,
-            "arcana_desktop",
+            "child_runtime",
             "default",
             ArcanaCabiProductRole::Child,
             ARCANA_CABI_CHILD_CONTRACT_ID,
@@ -2453,13 +2453,13 @@ mod tests {
                 "support_files = [\"arcwin.dll\", \"tooling_default.dll\"]\n",
                 "\n[runtime_child_binding]\n",
                 "consumer_member = \"app\"\n",
-                "dependency_alias = \"arcana_desktop\"\n",
-                "package_id = \"arcana_desktop\"\n",
-                "package_name = \"arcana_desktop\"\n",
+                "dependency_alias = \"child_runtime\"\n",
+                "package_id = \"child_runtime\"\n",
+                "package_name = \"child_runtime\"\n",
                 "product_name = \"default\"\n",
                 "\n[[native_products]]\n",
-                "package_id = \"arcana_desktop\"\n",
-                "package_name = \"arcana_desktop\"\n",
+                "package_id = \"child_runtime\"\n",
+                "package_name = \"child_runtime\"\n",
                 "product_name = \"default\"\n",
                 "role = \"child\"\n",
                 "contract_id = \"arcana.cabi.child.v1\"\n",
@@ -2473,9 +2473,9 @@ mod tests {
                 "file = \"tooling_default.dll\"\n",
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"app\"\n",
-                "dependency_alias = \"arcana_desktop\"\n",
-                "package_id = \"arcana_desktop\"\n",
-                "package_name = \"arcana_desktop\"\n",
+                "dependency_alias = \"child_runtime\"\n",
+                "package_id = \"child_runtime\"\n",
+                "package_name = \"child_runtime\"\n",
                 "product_name = \"default\"\n",
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"tooling\"\n",
@@ -2493,9 +2493,9 @@ mod tests {
             catalog.runtime_child_binding(),
             Some(&RuntimeChildBindingInfo {
                 consumer_member: "app".to_string(),
-                dependency_alias: "arcana_desktop".to_string(),
-                package_id: "arcana_desktop".to_string(),
-                package_name: "arcana_desktop".to_string(),
+                dependency_alias: "child_runtime".to_string(),
+                package_id: "child_runtime".to_string(),
+                package_name: "child_runtime".to_string(),
                 product_name: "default".to_string(),
             })
         );
@@ -2624,7 +2624,7 @@ mod tests {
         let dir = temp_dir("bundle_native_products_embedded_manifest");
         build_instance_product(
             &dir,
-            "arcana_desktop",
+            "child_runtime",
             "default",
             ArcanaCabiProductRole::Child,
             ARCANA_CABI_CHILD_CONTRACT_ID,
@@ -2643,22 +2643,22 @@ mod tests {
             "support_files = [\"arcwin.dll\"]\n",
             "\n[runtime_child_binding]\n",
             "consumer_member = \"app\"\n",
-            "dependency_alias = \"arcana_desktop\"\n",
-            "package_id = \"arcana_desktop\"\n",
-            "package_name = \"arcana_desktop\"\n",
+            "dependency_alias = \"child_runtime\"\n",
+            "package_id = \"child_runtime\"\n",
+            "package_name = \"child_runtime\"\n",
             "product_name = \"default\"\n",
             "\n[[native_products]]\n",
-            "package_id = \"arcana_desktop\"\n",
-            "package_name = \"arcana_desktop\"\n",
+            "package_id = \"child_runtime\"\n",
+            "package_name = \"child_runtime\"\n",
             "product_name = \"default\"\n",
             "role = \"child\"\n",
             "contract_id = \"arcana.cabi.child.v1\"\n",
             "file = \"arcwin.dll\"\n",
             "\n[[child_bindings]]\n",
             "consumer_member = \"app\"\n",
-            "dependency_alias = \"arcana_desktop\"\n",
-            "package_id = \"arcana_desktop\"\n",
-            "package_name = \"arcana_desktop\"\n",
+            "dependency_alias = \"child_runtime\"\n",
+            "package_id = \"child_runtime\"\n",
+            "package_name = \"child_runtime\"\n",
             "product_name = \"default\"\n",
         );
         let payload = manifest_text.as_bytes();
@@ -2688,9 +2688,9 @@ mod tests {
             catalog.runtime_child_binding(),
             Some(&RuntimeChildBindingInfo {
                 consumer_member: "app".to_string(),
-                dependency_alias: "arcana_desktop".to_string(),
-                package_id: "arcana_desktop".to_string(),
-                package_name: "arcana_desktop".to_string(),
+                dependency_alias: "child_runtime".to_string(),
+                package_id: "child_runtime".to_string(),
+                package_name: "child_runtime".to_string(),
                 product_name: "default".to_string(),
             })
         );
@@ -2749,3 +2749,4 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+

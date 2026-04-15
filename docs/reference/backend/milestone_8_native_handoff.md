@@ -86,7 +86,7 @@ Typed DLL ABI:
 
 Native runtime/core-host coverage:
 - the runtime core-host is intentionally narrow and only covers stdout/stderr/stdin plus monotonic time and sleep
-- Win32 window/session/event/input/clipboard/text-input, software-surface mapping/present, audio device/playback, and process/filesystem operations now live below `arcana_winapi` and above it in `arcana_desktop`, `arcana_graphics.arcsb`, `arcana_audio`, and `arcana_process`
+- Win32 windowing, software-surface, audio device/playback, and process/filesystem operations now live below `arcana_winapi` and above it in retained substrate consumers such as `arcana_audio` and `arcana_process`
 - emitted-binary smokes now validate those consumer lanes instead of a runtime-owned Win32 host crate
 
 ## Recent Slices
@@ -170,3 +170,4 @@ Milestone 8 completion was verified with:
 
 If an IDE still shows `crates/arcana-native-shim/src/lib.rs`, that is stale context from the older transitional path.
 The workspace has moved past the generic native shim design; native package emission is now driven by package-specific generated native projects.
+

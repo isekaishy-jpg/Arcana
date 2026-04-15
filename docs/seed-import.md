@@ -35,5 +35,5 @@ Imported planning material does not define rewrite architecture unless `docs/spe
 `std` has been rebuilt as rewrite-owned first-party surface; historical MeadowLang toolchain/app corpus is archived outside the repo and is not rewrite authority.
 Historical `winspell`/`spell-events` style corpus expressed the requirement for first-party window/input/canvas and primitive graphics/text support, not a commitment to MeadowLang's prior VM/bytecode implementation stack.
 The current `grimoires/` tree is rewrite-owned, not a promise that Arcana's final bootstrap/selfhost package layout matches Meadow-era splits.
-Track rewrite-owned `std` modules and Arcana-owned app/media grimoire roles through `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md`.
+Track rewrite-owned `std` modules through `docs/specs/std/std/v1-status.md`.
 Architecture/selfhost-progress review should privilege approved docs plus `crates/*`; archived historical corpus and generated direct-emit artifacts are migration context unless a current scope explicitly ratifies the exact surface under discussion.

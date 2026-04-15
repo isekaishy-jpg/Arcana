@@ -96,27 +96,23 @@ shackle flags WinapiInternals:
     pub(crate) type CatalogEntryRef = &'static SystemFontEntry;
     pub(crate) type ResultCatalogRef = Result<CatalogStateRef, String>;
     pub(crate) type ResultCatalogEntryRef = Result<CatalogEntryRef, String>;
+    pub(crate) struct SoftwareSurfaceBufferState {
+        pub(crate) pixels: Vec<u8>,
+    }
     pub(crate) struct SoftwareSurfaceState {
         pub(crate) hwnd: HWND,
         pub(crate) width: i64,
         pub(crate) height: i64,
         pub(crate) stride: i64,
-        pub(crate) pixels: Vec<u8>,
-        pub(crate) current_map: i64,
-        pub(crate) presented_once: bool,
-    }
-    pub(crate) struct SoftwareSurfaceMapState {
-        pub(crate) surface: i64,
+        pub(crate) buffers: Vec<SoftwareSurfaceBufferState>,
     }
     pub(crate) struct WinapiPackageState {
         pub(crate) last_error_text: String,
         pub(crate) desktop_state_handle: u64,
         pub(crate) next_file_stream_handle: u64,
         pub(crate) file_streams: std::collections::BTreeMap<u64, crate::helpers_process_impl::WinapiFileStreamState>,
-        pub(crate) next_surface_handle: i64,
-        pub(crate) next_surface_map_handle: i64,
-        pub(crate) software_surfaces: std::collections::BTreeMap<i64, SoftwareSurfaceState>,
-        pub(crate) software_surface_maps: std::collections::BTreeMap<i64, SoftwareSurfaceMapState>,
+        pub(crate) next_surface_handle: u64,
+        pub(crate) software_surfaces: std::collections::BTreeMap<u64, SoftwareSurfaceState>,
         pub(crate) next_audio_device_handle: u64,
         pub(crate) audio_devices: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioDeviceState>,
         pub(crate) next_audio_buffer_handle: u64,
@@ -333,9 +329,9 @@ shackle flags WinapiInternals:
 
     pub(crate) fn software_surface_ref(
         instance: &crate::BindingInstance,
-        handle: i64,
+        handle: u64,
     ) -> Result<&SoftwareSurfaceState, String> {
-        if handle <= 0 {
+        if handle == 0 {
             return Err("software surface handle must be > 0".to_string());
         }
         package_state_data_ref(instance)?
@@ -346,47 +342,15 @@ shackle flags WinapiInternals:
 
     pub(crate) fn software_surface_mut(
         instance: &mut crate::BindingInstance,
-        handle: i64,
+        handle: u64,
     ) -> Result<&mut SoftwareSurfaceState, String> {
-        if handle <= 0 {
+        if handle == 0 {
             return Err("software surface handle must be > 0".to_string());
         }
         package_state_data_mut(instance)?
             .software_surfaces
             .get_mut(&handle)
             .ok_or_else(|| format!("invalid software surface handle `{handle}`"))
-    }
-
-    pub(crate) fn software_surface_map_ref(
-        instance: &crate::BindingInstance,
-        handle: i64,
-    ) -> Result<&SoftwareSurfaceMapState, String> {
-        if handle <= 0 {
-            return Err("software surface map handle must be > 0".to_string());
-        }
-        package_state_data_ref(instance)?
-            .software_surface_maps
-            .get(&handle)
-            .ok_or_else(|| format!("invalid software surface map handle `{handle}`"))
-    }
-
-    pub(crate) fn software_surface_map_remove(
-        instance: &mut crate::BindingInstance,
-        handle: i64,
-    ) -> Result<SoftwareSurfaceMapState, String> {
-        if handle <= 0 {
-            return Err("software surface map handle must be > 0".to_string());
-        }
-        let map = package_state_data_mut(instance)?
-            .software_surface_maps
-            .remove(&handle)
-            .ok_or_else(|| format!("invalid software surface map handle `{handle}`"))?;
-        if let Some(surface) = package_state_data_mut(instance)?.software_surfaces.get_mut(&map.surface)
-            && surface.current_map == handle
-        {
-            surface.current_map = 0;
-        }
-        Ok(map)
     }
 
 shackle import fn GetLastError() -> DWORD = kernel32.GetLastError
@@ -410,9 +374,7 @@ shackle fn package_state_init() = __binding.package_state_init:
         next_file_stream_handle: 1,
         file_streams: std::collections::BTreeMap::new(),
         next_surface_handle: 1,
-        next_surface_map_handle: 1,
         software_surfaces: std::collections::BTreeMap::new(),
-        software_surface_maps: std::collections::BTreeMap::new(),
         next_audio_device_handle: 1,
         audio_devices: std::collections::BTreeMap::new(),
         next_audio_buffer_handle: 1,

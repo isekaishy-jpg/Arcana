@@ -3561,6 +3561,38 @@ fn execute_main_runs_counter_style_workspace_artifact() {
 }
 
 #[test]
+fn execute_main_materializes_nested_edit_member_returns_before_frame_exit() {
+    let dir = temp_workspace_dir("materialize_nested_edit_member_return");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_materialize_nested_edit_member_return\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "fn inner(read pair: (Int, Int)) -> Int:\n",
+            "    return pair.0\n",
+            "\n",
+            "fn outer(edit pair: (Int, Int)) -> Int:\n",
+            "    return inner :: pair :: call\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut pair = (7, 8)\n",
+            "    return outer :: pair :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_materialize_nested_edit_member_return");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_runs_routine_calls_with_std_args() {
     let dir = temp_workspace_dir("args");
     write_file(
@@ -3875,7 +3907,7 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "    arcana_process.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_version) :: \"missing\" :: unwrap_or) :: call\n",
             "    arcana_process.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_registry) :: \"missing\" :: unwrap_or) :: call\n",
             "    arcana_process.io.print[Str] :: ((book_manifest :: \"bar\" :: dep_path) :: \"missing\" :: unwrap_or) :: call\n",
-            "    let lock_v1 = \"version = 1\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\n[fingerprints]\\ngame = \\\"fp1\\\"\\n[api_fingerprints]\\ngame = \\\"api1\\\"\\n[artifacts]\\ngame = \\\"build/app.artifact.toml\\\"\\n[kinds]\\ngame = \\\"app\\\"\\n[formats]\\ngame = \\\"arcana-aot-v2\\\"\\n\"\n",
+            "    let lock_v1 = \"version = 1\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\n[paths]\\ngame = \\\"packages/game\\\"\\n[fingerprints]\\ngame = \\\"fp1\\\"\\n[api_fingerprints]\\ngame = \\\"api1\\\"\\n[artifacts]\\ngame = \\\"build/app.artifact.toml\\\"\\n[kinds]\\ngame = \\\"app\\\"\\n[formats]\\ngame = \\\"arcana-aot-v2\\\"\\n\"\n",
             "    let parsed_lock_v1 = std.manifest.parse_lock_v1 :: lock_v1 :: call\n",
             "    if parsed_lock_v1 :: :: is_err:\n",
             "        arcana_process.io.print[Str] :: \"lock v1 parse error\" :: call\n",
@@ -3899,7 +3931,7 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "    let lock_manifest_generic_v1 = parsed_lock_generic_v1 :: (std.manifest.LockManifestV2 :: metadata = empty_metadata, member_tables = empty_members, build_tables = empty_builds :: call) :: unwrap_or\n",
             "    arcana_process.io.print[Str] :: ((lock_manifest_generic_v1 :: \"game\" :: source_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
             "    arcana_process.io.print[Str] :: ((lock_manifest_generic_v1 :: \"game\", \"internal-aot\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    let lock_v3 = \"version = 3\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\n[deps]\\ngame = [\\\"foo\\\"]\\n[kinds]\\ngame = \\\"app\\\"\\n[native_products]\\n\\n[native_products.\\\"game\\\".\\\"default\\\"]\\nkind = \\\"cdylib\\\"\\nrole = \\\"export\\\"\\nproducer = \\\"rust\\\"\\nfile = \\\"game.dll\\\"\\ncontract = \\\"arcana-desktop-v1\\\"\\nsidecars = [\\\"game.pdb\\\"]\\n\\n[builds]\\n\\n[builds.\\\"game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v7\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
+            "    let lock_v3 = \"version = 3\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\"]\\n[paths]\\ngame = \\\"packages/game\\\"\\n[deps]\\ngame = [\\\"foo\\\"]\\n[kinds]\\ngame = \\\"app\\\"\\n[native_products]\\n\\n[native_products.\\\"game\\\".\\\"default\\\"]\\nkind = \\\"cdylib\\\"\\nrole = \\\"export\\\"\\nproducer = \\\"rust\\\"\\nfile = \\\"game.dll\\\"\\ncontract = \\\"arcana-native-app-v1\\\"\\nsidecars = [\\\"game.pdb\\\"]\\n\\n[builds]\\n\\n[builds.\\\"game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v7\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
             "    let parsed_lock_v3 = std.manifest.parse_lock :: lock_v3 :: call\n",
             "    if parsed_lock_v3 :: :: is_err:\n",
             "        arcana_process.io.print[Str] :: \"lock v3 parse error\" :: call\n",
@@ -3907,7 +3939,7 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "    let lock_manifest_v3 = parsed_lock_v3 :: (std.manifest.LockManifestV2 :: metadata = empty_metadata, member_tables = empty_members, build_tables = empty_builds :: call) :: unwrap_or\n",
             "    arcana_process.io.print[Str] :: ((lock_manifest_v3 :: \"game\" :: source_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
             "    arcana_process.io.print[Str] :: ((lock_manifest_v3 :: \"game\", \"default\" :: native_product_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    let lock_v2 = \"version = 4\\nworkspace = \\\"demo\\\"\\nworkspace_root = \\\"path:game\\\"\\norder = [\\\"path:game\\\", \\\"path:tools\\\", \\\"registry:local:foo@1.2.3\\\", \\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\nworkspace_members = [\\\"path:game\\\", \\\"path:tools\\\"]\\n[packages]\\n\\n[packages.\\\"path:game\\\"]\\nname = \\\"game\\\"\\nkind = \\\"app\\\"\\nsource_kind = \\\"path\\\"\\npath = \\\"grimoires/owned/app/game\\\"\\n\\n[packages.\\\"path:tools\\\"]\\nname = \\\"tools\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"path\\\"\\npath = \\\"grimoires/owned/app/tools\\\"\\n\\n[packages.\\\"registry:local:foo@1.2.3\\\"]\\nname = \\\"foo\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"registry\\\"\\nversion = \\\"1.2.3\\\"\\nregistry = \\\"local\\\"\\nchecksum = \\\"sha256:abc123\\\"\\n\\n[packages.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\nname = \\\"tooling\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"git\\\"\\ngit = \\\"https://example.com/arcana/tooling.git\\\"\\ngit_selector = \\\"tag:v1.2.3\\\"\\n\\n[dependencies]\\n\\n[dependencies.\\\"path:game\\\"]\\nfoo = \\\"registry:local:foo@1.2.3\\\"\\nbar = \\\"path:tools\\\"\\n\\n[dependencies.\\\"path:tools\\\"]\\n\\n[dependencies.\\\"registry:local:foo@1.2.3\\\"]\\n\\n[dependencies.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\n\\n[native_products]\\n\\n[native_products.\\\"path:game\\\".\\\"default\\\"]\\nkind = \\\"cdylib\\\"\\nrole = \\\"export\\\"\\nproducer = \\\"rust\\\"\\nfile = \\\"game.dll\\\"\\ncontract = \\\"arcana-desktop-v1\\\"\\nrust_cdylib_crate = \\\"arcana_game\\\"\\nsidecars = [\\\"game.pdb\\\", \\\"game.json\\\"]\\n\\n[builds]\\n\\n[builds.\\\"path:game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp2\\\"\\napi_fingerprint = \\\"api2\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash2\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"path:tools\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/tools/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"registry:local:foo@1.2.3\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp4\\\"\\napi_fingerprint = \\\"api4\\\"\\nartifact = \\\".arcana/artifacts/foo/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash4\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp5\\\"\\napi_fingerprint = \\\"api5\\\"\\nartifact = \\\".arcana/artifacts/tooling/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash5\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
+            "    let lock_v2 = \"version = 4\\nworkspace = \\\"demo\\\"\\nworkspace_root = \\\"path:game\\\"\\norder = [\\\"path:game\\\", \\\"path:tools\\\", \\\"registry:local:foo@1.2.3\\\", \\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\nworkspace_members = [\\\"path:game\\\", \\\"path:tools\\\"]\\n[packages]\\n\\n[packages.\\\"path:game\\\"]\\nname = \\\"game\\\"\\nkind = \\\"app\\\"\\nsource_kind = \\\"path\\\"\\npath = \\\"packages/game\\\"\\n\\n[packages.\\\"path:tools\\\"]\\nname = \\\"tools\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"path\\\"\\npath = \\\"packages/tools\\\"\\n\\n[packages.\\\"registry:local:foo@1.2.3\\\"]\\nname = \\\"foo\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"registry\\\"\\nversion = \\\"1.2.3\\\"\\nregistry = \\\"local\\\"\\nchecksum = \\\"sha256:abc123\\\"\\n\\n[packages.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\nname = \\\"tooling\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"git\\\"\\ngit = \\\"https://example.com/arcana/tooling.git\\\"\\ngit_selector = \\\"tag:v1.2.3\\\"\\n\\n[dependencies]\\n\\n[dependencies.\\\"path:game\\\"]\\nfoo = \\\"registry:local:foo@1.2.3\\\"\\nbar = \\\"path:tools\\\"\\n\\n[dependencies.\\\"path:tools\\\"]\\n\\n[dependencies.\\\"registry:local:foo@1.2.3\\\"]\\n\\n[dependencies.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\n\\n[native_products]\\n\\n[native_products.\\\"path:game\\\".\\\"default\\\"]\\nkind = \\\"cdylib\\\"\\nrole = \\\"export\\\"\\nproducer = \\\"rust\\\"\\nfile = \\\"game.dll\\\"\\ncontract = \\\"arcana-native-app-v1\\\"\\nrust_cdylib_crate = \\\"arcana_game\\\"\\nsidecars = [\\\"game.pdb\\\", \\\"game.json\\\"]\\n\\n[builds]\\n\\n[builds.\\\"path:game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp2\\\"\\napi_fingerprint = \\\"api2\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash2\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"path:tools\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/tools/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"registry:local:foo@1.2.3\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp4\\\"\\napi_fingerprint = \\\"api4\\\"\\nartifact = \\\".arcana/artifacts/foo/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash4\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp5\\\"\\napi_fingerprint = \\\"api5\\\"\\nartifact = \\\".arcana/artifacts/tooling/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash5\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
             "    let parsed_lock_v2 = std.manifest.parse_lock :: lock_v2 :: call\n",
             "    if parsed_lock_v2 :: :: is_err:\n",
             "        arcana_process.io.print[Str] :: \"lock v2 parse error\" :: call\n",
@@ -3980,7 +4012,7 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "local".to_string(),
             "../bar".to_string(),
             "2".to_string(),
-            "grimoires/owned/app/game".to_string(),
+            "packages/game".to_string(),
             "app".to_string(),
             "arcana-aot-v2".to_string(),
             "path".to_string(),
@@ -4000,14 +4032,14 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "git".to_string(),
             "https://example.com/arcana/tooling.git".to_string(),
             "tag:v1.2.3".to_string(),
-            "grimoires/owned/app/game".to_string(),
+            "packages/game".to_string(),
             "app".to_string(),
             "1".to_string(),
             "cdylib".to_string(),
             "export".to_string(),
             "rust".to_string(),
             "game.dll".to_string(),
-            "arcana-desktop-v1".to_string(),
+            "arcana-native-app-v1".to_string(),
             "arcana_game".to_string(),
             "2".to_string(),
             ".arcana/artifacts/game/internal-aot/app.artifact.toml".to_string(),
@@ -11186,3 +11218,4 @@ fn execute_main_runs_owner_activation_with_explicit_context_clause() {
 
     let _ = fs::remove_dir_all(dir);
 }
+

@@ -8,7 +8,6 @@ Current std authority is:
 - `docs/specs/std/std/v1-scope.md`
 - `docs/specs/std/std/v1-status.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
-- `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
 
 Guardrails:
 - This ledger may schedule or classify follow-on std work, but it may not expand pre-selfhost std by itself.
@@ -36,8 +35,8 @@ status: deferred
 id: STD-D3
 title: higher-level audio engine and streaming support
 reason_deferred: the pre-selfhost plan only needs low-level audio device, buffer, and basic playback substrate.
-target_window: post-first-audio-grimoire stabilization
-trigger_condition: ready_when=low-level `arcana_audio` and the first audio grimoire are stable; verify=audio smoke demos and grimoire parity checks pass; blocked_by=missing rewrite-owned backend audio substrate.
+target_window: post-first-higher-level-audio-layer stabilization
+trigger_condition: ready_when=low-level `arcana_audio` and any re-approved higher-level audio layer are stable; verify=audio smoke demos and layer parity checks pass; blocked_by=missing rewrite-owned backend audio substrate.
 owner: Arcana std/audio team
 acceptance_criteria: any std-side audio growth remains substrate-level and does not absorb mixer/playback policy better owned by grimoires.
 status: deferred

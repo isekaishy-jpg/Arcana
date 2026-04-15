@@ -1,5 +1,0 @@
-name = "app"
-kind = "app"
-
-[deps]
-arcana_process = { path = "../../../grimoires/arcana/process" }

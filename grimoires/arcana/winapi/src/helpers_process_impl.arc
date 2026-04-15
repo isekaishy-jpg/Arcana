@@ -414,10 +414,10 @@ shackle fn process_fs_stream_open_read_impl(read path: Str) -> arcana_winapi.pro
         insert_file_stream(instance, &resolved, file, true, false)
     });
     match result {
-        Ok(value) => Ok(binding_int(value as i64)),
+        Ok(value) => Ok(binding_opaque(value)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            Ok(binding_int(0))
+            Ok(binding_opaque(0))
         }
     }
 
@@ -440,10 +440,10 @@ shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) 
         insert_file_stream(instance, &resolved, file, false, true)
     });
     match result {
-        Ok(value) => Ok(binding_int(value as i64)),
+        Ok(value) => Ok(binding_opaque(value)),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            Ok(binding_int(0))
+            Ok(binding_opaque(0))
         }
     }
 

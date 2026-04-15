@@ -4,8 +4,7 @@ This scope freezes the host-core package surface required before selfhost.
 
 Scope notes:
 - This file covers host-core packages only.
-- It does not define the window/input/canvas or primitive graphics/text app-facing substrate; those remain separate first-party pre-selfhost requirements from `PLAN.md` and `docs/rewrite-roadmap.md`.
-- The companion app/runtime substrate contract lives in `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`.
+- It does not define any future window/input/graphics app-facing layer; any such layer requires a separate scope if it returns.
 - Imported `std` and reference grimoires are behavioral carryover only and must be rebuilt against the rewrite architecture.
 
 ## Included

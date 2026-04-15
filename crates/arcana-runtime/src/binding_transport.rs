@@ -990,6 +990,18 @@ pub(super) fn runtime_binding_input_from_runtime_value_legacy(
         (ArcanaCabiBindingType::Unit, RuntimeValue::Unit) => {
             Ok(ArcanaCabiBindingValueV1::default())
         }
+        (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
+            if binding.package_id == package_id && binding.type_name == expected_type =>
+        {
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Opaque as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    opaque_value: binding.handle,
+                },
+            })
+        }
         (ArcanaCabiBindingType::Named(layout_id), value) => {
             let bytes = runtime_binding_encode_layout_value(layouts, layout_id, value)?;
             storage.bytes.push(bytes);
@@ -1003,18 +1015,6 @@ pub(super) fn runtime_binding_input_from_runtime_value_legacy(
                 reserved1: 0,
                 payload: ArcanaCabiBindingPayloadV1 {
                     view_value: contiguous_u8_view(stored.as_ptr(), stored.len(), 0),
-                },
-            })
-        }
-        (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
-            if binding.package_id == package_id && binding.type_name == expected_type =>
-        {
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Opaque as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    opaque_value: binding.handle,
                 },
             })
         }
@@ -1585,11 +1585,24 @@ pub(super) fn runtime_final_args_from_binding_import(
         if storage.in_place_edits.contains_key(&index) {
             continue;
         }
+        let expected_type = param.ty.render();
+        let write_back = &outcome.write_backs[index];
+        if write_back.tag()? == ArcanaCabiBindingValueTag::Unit {
+            if let Some(value) = runtime_binding_preserved_opaque_edit_arg(
+                package_id,
+                &expected_type,
+                args.get(index),
+                binding_args.get(index),
+            ) {
+                final_args[index] = value;
+                continue;
+            }
+        }
         match runtime_value_from_binding_cabi_output(
             layouts,
             package_id,
-            &param.ty.render(),
-            &outcome.write_backs[index],
+            &expected_type,
+            write_back,
             state,
             outcome.owned_bytes_free,
             outcome.owned_str_free,
@@ -1604,6 +1617,26 @@ pub(super) fn runtime_final_args_from_binding_import(
     }
     let _ = binding_args;
     Ok((final_args, skip_write_back_edit_indices))
+}
+
+fn runtime_binding_preserved_opaque_edit_arg(
+    package_id: &str,
+    expected_type: &str,
+    original_arg: Option<&RuntimeValue>,
+    binding_arg: Option<&RuntimeValue>,
+) -> Option<RuntimeValue> {
+    let candidates = [binding_arg, original_arg];
+    for candidate in candidates {
+        let Some(RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding))) = candidate else {
+            continue;
+        };
+        if binding.package_id == package_id && binding.type_name == expected_type {
+            return Some(RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(
+                binding.clone(),
+            )));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1712,17 +1745,6 @@ pub(super) fn runtime_binding_output_from_runtime_value_with_context(
         (ArcanaCabiBindingType::Unit, RuntimeValue::Unit) => {
             Ok(ArcanaCabiBindingValueV1::default())
         }
-        (ArcanaCabiBindingType::Named(layout_id), value) => {
-            let bytes = runtime_binding_encode_layout_value(layouts, layout_id, &value)?;
-            Ok(ArcanaCabiBindingValueV1 {
-                tag: ArcanaCabiBindingValueTag::Layout as u32,
-                reserved0: 0,
-                reserved1: 0,
-                payload: ArcanaCabiBindingPayloadV1 {
-                    owned_bytes_value: into_owned_bytes(bytes),
-                },
-            })
-        }
         (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
             if binding.package_id == package_id && binding.type_name == expected_type =>
         {
@@ -1732,6 +1754,17 @@ pub(super) fn runtime_binding_output_from_runtime_value_with_context(
                 reserved1: 0,
                 payload: ArcanaCabiBindingPayloadV1 {
                     opaque_value: binding.handle,
+                },
+            })
+        }
+        (ArcanaCabiBindingType::Named(layout_id), value) => {
+            let bytes = runtime_binding_encode_layout_value(layouts, layout_id, &value)?;
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Layout as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    owned_bytes_value: into_owned_bytes(bytes),
                 },
             })
         }

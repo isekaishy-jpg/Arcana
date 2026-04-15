@@ -1,6 +1,0 @@
-name = "arcana_audio"
-kind = "lib"
-
-[deps]
-arcana_winapi = { path = "../../arcana/winapi" }
-std = { path = "../../../std" }

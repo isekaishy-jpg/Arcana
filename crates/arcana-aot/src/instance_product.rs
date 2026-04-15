@@ -1173,12 +1173,70 @@ fn render_binding_param_decode(
         ),
     };
     let mut out = format!("    let {local_name} = {value_expr};\n");
-    if param.write_back_type.is_some() {
+    if let Some(write_back_type) = &param.write_back_type {
         out.push_str(&format!(
             "    let {local_name}_write_back = &mut out_write_backs[{index}];\n"
         ));
+        if !binding_type_uses_in_place_write_back(write_back_type) {
+            out.push_str(&format!(
+                "    *{local_name}_write_back = {};\n",
+                render_binding_write_back_value_expr(spec, write_back_type, &local_name)?
+            ));
+        }
     }
     Ok(out)
+}
+
+fn binding_type_uses_in_place_write_back(ty: &ArcanaCabiBindingType) -> bool {
+    matches!(
+        ty,
+        ArcanaCabiBindingType::ByteBuffer
+            | ArcanaCabiBindingType::Utf16Buffer
+            | ArcanaCabiBindingType::View(_)
+    )
+}
+
+fn render_binding_write_back_value_expr(
+    spec: &AotInstanceProductSpec,
+    ty: &ArcanaCabiBindingType,
+    expr: &str,
+) -> Result<String, String> {
+    let rendered = match ty {
+        ArcanaCabiBindingType::Int => format!("binding_int({expr} as i64)"),
+        ArcanaCabiBindingType::Bool => format!("binding_bool({expr})"),
+        ArcanaCabiBindingType::I8 => format!("binding_i8({expr} as i8)"),
+        ArcanaCabiBindingType::U8 => format!("binding_u8({expr} as u8)"),
+        ArcanaCabiBindingType::I16 => format!("binding_i16({expr} as i16)"),
+        ArcanaCabiBindingType::U16 => format!("binding_u16({expr} as u16)"),
+        ArcanaCabiBindingType::I32 => format!("binding_i32({expr} as i32)"),
+        ArcanaCabiBindingType::U32 => format!("binding_u32({expr} as u32)"),
+        ArcanaCabiBindingType::I64 => format!("binding_i64({expr} as i64)"),
+        ArcanaCabiBindingType::U64 => format!("binding_u64({expr} as u64)"),
+        ArcanaCabiBindingType::ISize => format!("binding_isize({expr} as isize)"),
+        ArcanaCabiBindingType::USize => format!("binding_usize({expr} as usize)"),
+        ArcanaCabiBindingType::F32 => format!("binding_f32({expr} as f32)"),
+        ArcanaCabiBindingType::F64 => format!("binding_f64({expr} as f64)"),
+        ArcanaCabiBindingType::Str => format!("binding_owned_str({expr}.clone())"),
+        ArcanaCabiBindingType::Bytes => format!("binding_owned_bytes({expr}.clone())"),
+        ArcanaCabiBindingType::Utf16 => format!("binding_owned_utf16({expr}.clone())"),
+        ArcanaCabiBindingType::ByteBuffer
+        | ArcanaCabiBindingType::Utf16Buffer
+        | ArcanaCabiBindingType::View(_) => {
+            return Err(format!(
+                "binding import whole-value write-back is not supported for in-place type `{}`",
+                ty.render()
+            ));
+        }
+        ArcanaCabiBindingType::Named(name) => {
+            if binding_named_type_has_layout(spec, name) {
+                format!("binding_layout({expr})")
+            } else {
+                format!("binding_opaque({expr} as u64)")
+            }
+        }
+        ArcanaCabiBindingType::Unit => "binding_unit()".to_string(),
+    };
+    Ok(rendered)
 }
 
 fn render_binding_import_impl_body(
@@ -2372,7 +2430,7 @@ fn binding_named_type_has_decl(spec: &AotInstanceProductSpec, name: &str) -> boo
 }
 
 fn binding_named_type_is_layoutless_opaque(spec: &AotInstanceProductSpec, name: &str) -> bool {
-    name.starts_with(&format!("{}.types.", spec.package_name))
+    name.starts_with(&format!("{}.", spec.package_name))
         && !binding_named_type_has_layout(spec, name)
         && !binding_named_type_has_decl(spec, name)
 }
@@ -2590,7 +2648,7 @@ fn render_shackle_rust_type(
     use arcana_ir::IrRoutineTypeKind;
 
     match &ty.kind {
-        IrRoutineTypeKind::Path(path) => render_shackle_rust_named_text(spec, &path.render()),
+        IrRoutineTypeKind::Path(path) => render_shackle_rust_path(spec, &path.segments),
         IrRoutineTypeKind::Apply { base, args }
             if base.root_name() == Some("View") && args.len() == 2 =>
         {
@@ -3079,8 +3137,8 @@ mod tests {
 
     fn child_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
-            package_id: "arcana_desktop".to_string(),
-            package_name: "arcana_desktop".to_string(),
+            package_id: "child_runtime".to_string(),
+            package_name: "child_runtime".to_string(),
             product_name: "default".to_string(),
             role: ArcanaCabiProductRole::Child,
             contract_id: ARCANA_CABI_CHILD_CONTRACT_ID.to_string(),
@@ -3288,6 +3346,87 @@ mod tests {
     }
 
     #[test]
+    fn generated_binding_instance_product_treats_handle_modules_as_opaque_handles() {
+        let mut spec = binding_spec();
+        spec.binding_shackle_decls.push(AotShackleDeclArtifact {
+            package_id: "arcana_winapi".to_string(),
+            module_id: "arcana_winapi.foundation".to_string(),
+            exported: false,
+            kind: "fn".to_string(),
+            name: "helper_uses_window_handle".to_string(),
+            params: vec![arcana_ir::IrRoutineParam {
+                binding_id: 0,
+                mode: Some("read".to_string()),
+                name: "window".to_string(),
+                ty: arcana_ir::parse_routine_type_text("arcana_winapi.desktop_handles.Window")
+                    .expect("type should parse"),
+            }],
+            return_type: Some(
+                arcana_ir::parse_routine_type_text("Int").expect("type should parse"),
+            ),
+            callback_type: None,
+            binding: None,
+            body_entries: vec!["return 0".to_string()],
+            raw_layout: None,
+            import_target: None,
+            thunk_target: None,
+            surface_text: String::new(),
+        });
+        let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
+
+        assert!(lib_rs.contains("fn helper_uses_window_handle(window: u64)"));
+        assert!(!lib_rs.contains("crate::desktop_handles::Window"));
+    }
+
+    #[test]
+    fn generated_binding_instance_product_defaults_handle_edit_write_backs() {
+        let mut spec = binding_spec();
+        spec.binding_imports = vec![NativeBindingImport {
+            name: "helpers.window.window_request_redraw".to_string(),
+            symbol_name: "arcana_binding_import_arcana_winapi_helpers_window_window_request_redraw"
+                .to_string(),
+            return_type: ArcanaCabiBindingType::Unit,
+            params: vec![ArcanaCabiBindingParam::binding(
+                "window",
+                ArcanaCabiParamSourceMode::Edit,
+                ArcanaCabiBindingType::Named(
+                    "arcana_winapi.desktop_handles.Window".to_string(),
+                ),
+            )],
+        }];
+        spec.binding_shackle_decls = vec![AotShackleDeclArtifact {
+            package_id: "arcana_winapi".to_string(),
+            module_id: "arcana_winapi.helpers.window".to_string(),
+            exported: false,
+            kind: "fn".to_string(),
+            name: "window_request_redraw_impl".to_string(),
+            params: vec![arcana_ir::IrRoutineParam {
+                binding_id: 0,
+                mode: Some("edit".to_string()),
+                name: "window".to_string(),
+                ty: arcana_ir::parse_routine_type_text("arcana_winapi.desktop_handles.Window")
+                    .expect("type should parse"),
+            }],
+            return_type: Some(
+                arcana_ir::parse_routine_type_text("Unit").expect("type should parse"),
+            ),
+            callback_type: None,
+            binding: Some("helpers.window.window_request_redraw".to_string()),
+            body_entries: vec!["Ok(binding_unit())".to_string()],
+            raw_layout: None,
+            import_target: None,
+            thunk_target: None,
+            surface_text: String::new(),
+        }];
+
+        let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
+
+        assert!(lib_rs.contains("let window = read_opaque_arg(&args[0], \"window\")?;"));
+        assert!(lib_rs.contains("let window_write_back = &mut out_write_backs[0];"));
+        assert!(lib_rs.contains("*window_write_back = binding_opaque(window as u64);"));
+    }
+
+    #[test]
     fn generated_binding_instance_product_projects_mapped_view_ops() {
         let mut spec = binding_spec();
         spec.binding_shackle_decls.push(mapped_view_shackle_decl(
@@ -3319,6 +3458,8 @@ mod tests {
         assert!(lib_rs.contains("binding_mapped_view_write_byte"));
         assert!(lib_rs.contains("mapped_view_ops: &BINDING_MAPPED_VIEW_OPS"));
         assert!(lib_rs.contains("binding mapped-view len requires non-null out_len"));
+        assert!(lib_rs.contains("binding_mapped_view_len_bytes_impl(\n    instance: &mut BindingInstance,\n    handle: i64"));
+        assert!(lib_rs.contains("binding_mapped_view_write_byte_impl(\n    instance: &mut BindingInstance,\n    handle: i64,\n    index: i64,\n    value: i64"));
     }
 
     #[test]
@@ -3542,9 +3683,9 @@ mod tests {
 
         let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
 
-        assert!(lib_rs.contains("pub fn GetCurrentProcessId() -> Int;"));
+        assert!(lib_rs.contains("pub fn GetCurrentProcessId() -> i64;"));
         assert!(lib_rs.contains("Ok(binding_int(unsafe { GetCurrentProcessId() } as i64))"));
-        assert!(lib_rs.contains("pub(crate) const MAGIC: Int = 7;"));
+        assert!(lib_rs.contains("pub(crate) const MAGIC: i64 = 7;"));
         assert!(lib_rs.contains("Ok(binding_int(MAGIC as i64))"));
     }
 

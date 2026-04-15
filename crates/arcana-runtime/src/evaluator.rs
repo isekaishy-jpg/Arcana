@@ -1,5 +1,29 @@
 use super::*;
 
+fn materialize_runtime_return_value(
+    value: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> Result<RuntimeValue, String> {
+    read_runtime_value_if_ref(
+        value,
+        scopes,
+        plan,
+        current_package_id,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )
+}
+
 pub(super) fn eval_expr(
     expr: &ParsedExpr,
     plan: &RuntimePackagePlan,
@@ -1826,7 +1850,7 @@ pub(super) fn execute_statements(
                 cleanup_footers,
                 availability,
             } => {
-                let values = into_iterable_values(force_runtime_value(
+                let iterable = read_runtime_value_if_ref(
                     eval_expr(
                         iterable,
                         plan,
@@ -1838,10 +1862,16 @@ pub(super) fn execute_statements(
                         state,
                         host,
                     )?,
+                    scopes,
                     plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
                     state,
                     host,
-                )?)?;
+                )?;
+                let values = into_iterable_values(force_runtime_value(iterable, plan, state, host)?)?;
                 let mut loop_signal = FlowSignal::Next;
                 for value in values {
                     let mut scope = RuntimeScope::default();
@@ -2783,6 +2813,18 @@ pub(super) fn execute_routine_call_with_state(
                             execute_cleanup_footers(frame, plan, &mut scopes, state, host)
                                 .map_err(runtime_eval_message)?;
                         }
+                        let value = materialize_runtime_return_value(
+                            value,
+                            plan,
+                            &routine.package_id,
+                            &routine.module_id,
+                            &mut scopes,
+                            &aliases,
+                            &type_bindings,
+                            state,
+                            host,
+                        )
+                        .map_err(RuntimeEvalSignal::from)?;
                         evaluate_owner_exit_checkpoints(
                             &final_scope.activated_owner_keys,
                             plan,
@@ -2914,7 +2956,17 @@ pub(super) fn execute_routine_call_with_state(
                 };
                 let value = match result {
                     FlowSignal::Next => RuntimeValue::Unit,
-                    FlowSignal::Return(value) => value,
+                    FlowSignal::Return(value) => materialize_runtime_return_value(
+                        value,
+                        plan,
+                        &routine.package_id,
+                        &routine.module_id,
+                        &mut scopes,
+                        &aliases,
+                        &type_bindings,
+                        state,
+                        host,
+                    )?,
                     FlowSignal::Break => {
                         return Err("break escaped the top-level routine".to_string().into());
                     }

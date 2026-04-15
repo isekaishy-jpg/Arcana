@@ -1,7 +1,6 @@
 import std.collections.list
 import std.option
 use arcana_winapi.desktop_handles.FrameInput
-use arcana_winapi.desktop_handles.Session
 use arcana_winapi.desktop_handles.WakeHandle
 use arcana_winapi.desktop_handles.Window
 use std.option.Option
@@ -34,7 +33,6 @@ native fn poll_key_location(read frame: FrameInput) -> Int = helpers.events.poll
 native fn poll_pointer_x(read frame: FrameInput) -> Int = helpers.events.poll_pointer_x
 native fn poll_pointer_y(read frame: FrameInput) -> Int = helpers.events.poll_pointer_y
 native fn poll_repeated(read frame: FrameInput) -> Bool = helpers.events.poll_repeated
-native fn session_window_for_id_raw(read session: Session, window_id: Int) -> Window = helpers.events.session_window_for_id
 
 fn event_raw_from_frame(read frame: FrameInput, kind: Int) -> EventRaw:
     let mut event = EventRaw :: kind = kind, window_id = (poll_window_id :: frame :: call), a = (poll_a :: frame :: call) :: call
@@ -58,32 +56,9 @@ export fn poll(edit frame: FrameInput) -> Option[EventRaw]:
         return Option.None[EventRaw] :: :: call
     return Option.Some[EventRaw] :: (event_raw_from_frame :: frame, kind :: call) :: call
 
-export native fn session_open() -> Session = helpers.events.session_open
-export native fn session_close(edit session: Session) = helpers.events.session_close
-export native fn session_attach_window(edit session: Session, read win: Window) = helpers.events.session_attach_window
-export native fn session_detach_window(edit session: Session, read win: Window) = helpers.events.session_detach_window
-
-export fn session_window_for_id(read session: Session, window_id: Int) -> Option[Window]:
-    let value = session_window_for_id_raw :: session, window_id :: call
-    if arcana_winapi.helpers.window.window_alive :: value :: call:
-        return Option.Some[Window] :: value :: call
-    return Option.None[Window] :: :: call
-
-native fn session_window_count(read session: Session) -> Int = helpers.events.session_window_count
-native fn session_window_id_at(read session: Session, index: Int) -> Int = helpers.events.session_window_id_at
-export native fn session_device_events(edit session: Session) -> Int = helpers.events.session_device_events
-export native fn session_set_device_events(edit session: Session, policy: Int) = helpers.events.session_set_device_events
-export native fn session_pump(edit session: Session) -> FrameInput = helpers.events.session_pump
-export native fn session_wait(edit session: Session, timeout_ms: Int) -> FrameInput = helpers.events.session_wait
-export native fn session_create_wake(edit session: Session) -> WakeHandle = helpers.events.session_create_wake
+export native fn wake_create() -> WakeHandle = helpers.events.wake_create
+export native fn wake_close(edit handle: WakeHandle) = helpers.events.wake_close
 export native fn wake_signal(read handle: WakeHandle) = helpers.events.wake_signal
-
-export fn session_window_ids(read session: Session) -> List[Int]:
-    let count = arcana_winapi.helpers.events.session_window_count :: session :: call
-    let mut out = std.collections.list.new[Int] :: :: call
-    let mut index = 0
-    while index < count:
-        out :: (arcana_winapi.helpers.events.session_window_id_at :: session, index :: call) :: push
-        index = index + 1
-    return out
+export native fn wake_take_pending(edit handle: WakeHandle) -> Int = helpers.events.wake_take_pending
+export native fn wait_wake_or_messages(read handle: WakeHandle, timeout_ms: Int) -> Bool = helpers.events.wait_wake_or_messages
 

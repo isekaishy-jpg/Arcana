@@ -62,6 +62,7 @@ export shackle type PCMSG = *const arcana_winapi.raw.types.MSG
 export shackle type PCREATESTRUCTW = *const arcana_winapi.raw.types.CREATESTRUCTW
 export shackle type LPRECT = *mut arcana_winapi.raw.types.RECT
 export shackle type PCRECT = *const arcana_winapi.raw.types.RECT
+export shackle type LPMINMAXINFO = *mut arcana_winapi.raw.types.MINMAXINFO
 export shackle type PCBITMAPINFO = *const arcana_winapi.raw.types.BITMAPINFO
 export shackle type PMONITORINFO = *mut arcana_winapi.raw.types.MONITORINFO
 export shackle type PMONITORINFOEXW = *mut arcana_winapi.raw.types.MONITORINFOEXW
@@ -69,6 +70,7 @@ export shackle type LPBITMAPINFO = *mut arcana_winapi.raw.types.BITMAPINFO
 export shackle type LPWAVEFORMATEX = *mut arcana_winapi.raw.types.WAVEFORMATEX
 export shackle type LPCWAVEFORMATEX = *const arcana_winapi.raw.types.WAVEFORMATEX
 export shackle type PCD2D1_FACTORY_OPTIONS = *const arcana_winapi.raw.types.D2D1_FACTORY_OPTIONS
+export shackle type LPCOMPOSITIONFORM = *const arcana_winapi.raw.types.COMPOSITIONFORM
 
 export shackle type DWRITE_FACTORY_TYPE = U32:
     Shared = 0
@@ -134,6 +136,18 @@ export shackle struct RECT:
     top: I32
     right: I32
     bottom: I32
+
+export shackle struct MINMAXINFO:
+    ptReserved: POINT
+    ptMaxSize: POINT
+    ptMaxPosition: POINT
+    ptMinTrackSize: POINT
+    ptMaxTrackSize: POINT
+
+export shackle struct COMPOSITIONFORM:
+    dwStyle: DWORD
+    ptCurrentPos: POINT
+    rcArea: RECT
 
 export shackle struct MSG:
     hwnd: HWND

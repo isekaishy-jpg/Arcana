@@ -106,7 +106,7 @@ promotion_condition: rewrite-owned toolchain uses a narrowed, explicitly justifi
 id: STD-BINARY
 classification: bootstrap-required
 why: explicit binary parsing/emission substrate for font/image/audio/tooling work on top of memory views
-consumers: `grimoires/libs/arcana-text`, future asset/codegen/runtime readers, owned tooling helpers
+consumers: future asset/codegen/runtime readers and owned tooling helpers
 current_source: rewrite-owned
 still_needs_rebuild: keep the surface narrow and explicit rather than turning it into a generic serialization framework
 update_note: `std.binary` now provides the narrow reader/writer floor over `std.memory` byte views plus explicit opt-in codec hooks (`BinaryReadable`, `ByteSink`); keep it to seek/skip/remaining, endian-aware integer reads/writes, subview operations, and explicit codec traits only, with structured formats still living in domain libraries or explicit cabi/tooling contracts
@@ -124,7 +124,7 @@ promotion_condition: rewrite-owned compiler/runtime corpus uses a documented, st
 id: STD-MEMORY
 classification: bootstrap-required
 why: memory phrases, views, and allocator/publication semantics are part of the approved pre-selfhost baseline
-consumers: memory examples, compiler/runtime paths, `std.binary`, and grimoires such as `arcana_text`
+consumers: memory examples, compiler/runtime paths, `std.binary`, and future higher-level text layers
 current_source: mixed
 still_needs_rebuild: preserve typed ownership/publication contract while hardening aliasing/runtime details under the approved family/view surface
 update_note: arena/frame/pool plus temp/session/ring/slab, executable memory phrases, the builtin `View[Elem, Family]` surface (`Contiguous`, `Strided`, `Mapped`), borrowed-slice syntax, the owned payload families (`Bytes`, `ByteBuffer`, `Utf16`, `Utf16Buffer`), deterministic pool compaction/live-id behavior, current `seal` / `unseal` publication state for session/slab, and the allocator/publication capability layer (`Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) now sit on the rewrite backend; further allocator or borrow/resource-model expansion still goes through explicit scope/deferred docs
@@ -151,7 +151,7 @@ promotion_condition: rewrite-owned runtime supports approved ECS/behavior surfac
 id: STD-TYPES-CORE
 classification: bootstrap-required
 why: shared low-level geometry/color/time/frame wrappers for app/media substrate and toolchain-facing helpers
-consumers: `arcana_desktop`, `arcana_graphics`, `std.time`, future Arcana-owned grimoire layers above the substrate
+consumers: `std.time` and future Arcana-owned layers above the substrate
 current_source: mixed
 still_needs_rebuild: keep types low-level and substrate-oriented
 update_note: new core types require concrete substrate consumers; gameplay/domain types do not automatically belong here
@@ -159,62 +159,62 @@ promotion_condition: rewrite-owned substrate uses a small stable core-type layer
 
 id: STD-WINDOW
 classification: removed-from-std
-why: the public desktop shell now belongs to `arcana_desktop`
-consumers: `grimoires/libs/arcana-desktop`
+why: the public desktop shell no longer belongs in `std`
+consumers: future non-std app-facing layers
 current_source: removed-from-std
-still_needs_rebuild: none in std; desktop shell work belongs in `arcana_desktop`
-update_note: any remaining std window code is migration debt only; the public owner is now `arcana_desktop`
+still_needs_rebuild: none in std; any replacement owner must be scoped separately
+update_note: any remaining std window code is migration debt only; `std` is not the public desktop owner
 promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-INPUT
 classification: removed-from-std
-why: public input handling now belongs to `arcana_desktop`
-consumers: `grimoires/libs/arcana-desktop`
+why: public input handling no longer belongs in `std`
+consumers: future non-std app-facing layers
 current_source: removed-from-std
-still_needs_rebuild: none in std; input semantics belong in `arcana_desktop`
-update_note: any remaining std input code is migration debt only; the public owner is now `arcana_desktop`
+still_needs_rebuild: none in std; any replacement owner must be scoped separately
+update_note: any remaining std input code is migration debt only; `std` is not the public input owner
 promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-TEXT-INPUT
 classification: removed-from-std
-why: public text-input handling now belongs to `arcana_desktop`
-consumers: `grimoires/libs/arcana-desktop`, future text/UI layers, showcase apps
+why: public text-input handling no longer belongs in `std`
+consumers: future text/UI layers and showcase apps
 current_source: removed-from-std
-still_needs_rebuild: none in std; text-input semantics belong in `arcana_desktop`
-update_note: the public std text-input lane is retired; remaining text-input work lives under `arcana_desktop` and the backend grimoires it consumes
+still_needs_rebuild: none in std; any replacement owner must be scoped separately
+update_note: the public std text-input lane is retired; remaining text-input work lives outside `std`
 promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-EVENTS
 classification: removed-from-std
-why: typed desktop event flow now belongs to `arcana_desktop`
-consumers: `grimoires/libs/arcana-desktop`
+why: typed desktop event flow no longer belongs in `std`
+consumers: future non-std app-facing layers
 current_source: removed-from-std
-still_needs_rebuild: none in std; event routing belongs in `arcana_desktop`
-update_note: any remaining std events code is migration debt only; the public owner is now `arcana_desktop`
+still_needs_rebuild: none in std; any replacement owner must be scoped separately
+update_note: any remaining std events code is migration debt only; `std` is not the public event owner
 promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-CLIPBOARD
 classification: removed-from-std
-why: public clipboard handling now belongs to `arcana_desktop.clipboard`
-consumers: `grimoires/libs/arcana-desktop`, future text/UI layers, showcase apps
+why: public clipboard handling no longer belongs in `std`
+consumers: future text/UI layers and showcase apps
 current_source: removed-from-std
-still_needs_rebuild: none in std; clipboard semantics belong in `arcana_desktop`
-update_note: the public std clipboard lane is retired; the active contract is `arcana_desktop.clipboard`
+still_needs_rebuild: none in std; any replacement owner must be scoped separately
+update_note: the public std clipboard lane is retired; any replacement contract lives outside `std`
 promotion_condition: only revisit if a future explicit scope restores a public std desktop lane
 
 id: STD-CANVAS
 classification: removed-from-std
-why: the public software-present backend now belongs to `arcana_graphics.arcsb`
-consumers: `grimoires/libs/arcana-graphics`, `grimoires/libs/arcana-text`
+why: the public software-present backend no longer belongs in `std`
+consumers: future non-std graphics and text layers
 current_source: removed-from-std
-still_needs_rebuild: none in std; graphics backend work belongs in `arcana_graphics`
-update_note: the public std canvas lane is retired; the active low-level software-present backend is `arcana_graphics.arcsb`
+still_needs_rebuild: none in std; any replacement owner must be scoped separately
+update_note: the public std canvas lane is retired; any replacement software-present backend lives outside `std`
 promotion_condition: only revisit if a future explicit scope restores a public std graphics lane
 
 id: STD-TIME
 classification: bootstrap-required
 why: low-level monotonic timing substrate for run-loop and frame-timing grimoires
-consumers: `grimoires/libs/arcana-desktop`, owned showcase/runtime-smoke proofs
+consumers: owned showcase/runtime-smoke proofs and future non-std layers
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of monotonic clocks beyond the current compile-time substrate
 update_note: keep `std.time` low-level; fixed-step or app-loop policy stays out of std
@@ -223,7 +223,7 @@ promotion_condition: rewrite-owned runtime implements the documented monotonic t
 id: STD-AUDIO
 classification: removed-from-std
 why: the public low-level audio lane now belongs to `arcana_audio`
-consumers: `grimoires/libs/arcana-audio`, owned audio-smoke proofs
+consumers: owned audio-smoke proofs and future higher-level audio layers
 current_source: removed-from-std
 still_needs_rebuild: none in std; low-level audio ownership now sits in `arcana_audio`
 update_note: the public std audio lane is retired; `AudioDevice`, `AudioBuffer`, and `AudioPlayback` remain active through `arcana_audio`, while higher-level playback policy stays in grimoires

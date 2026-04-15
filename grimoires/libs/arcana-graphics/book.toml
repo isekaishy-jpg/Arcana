@@ -1,7 +1,0 @@
-name = "arcana_graphics"
-kind = "lib"
-
-[deps]
-arcana_desktop = { path = "../arcana-desktop" }
-arcana_winapi = { path = "../../arcana/winapi" }
-std = { path = "../../../std" }

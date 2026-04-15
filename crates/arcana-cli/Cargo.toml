@@ -6,7 +6,7 @@ edition.workspace = true
 [features]
 default = []
 runtime-runner = ["dep:arcana-runtime"]
-legacy-native-host-tests = []
+windows-native-bundle-tests = []
 
 [dependencies]
 arcana-aot.workspace = true
@@ -28,3 +28,4 @@ path = "src/main.rs"
 name = "arcana-runner"
 path = "src/runtime_main.rs"
 required-features = ["runtime-runner"]
+

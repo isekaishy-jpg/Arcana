@@ -33,7 +33,6 @@ Scope notes:
 ## Approved First-Party `std` Domains Before Selfhost
 
 - Public host-core packages approved in `docs/specs/selfhost-host/selfhost-host/v1-scope.md` are owned by `arcana_process`, not by `std`
-- First-party app/runtime substrate approved in `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
 - ECS/runtime surface:
   - `std.ecs`
   - `std.behaviors`
@@ -68,7 +67,7 @@ Scope notes:
 - Low-level time substrate that remains in `std`:
   - `std.time`
 - Public audio ownership sits outside `std` in `arcana_audio`
-- Historical desktop/window/input/events/clipboard/canvas shell APIs are no longer the intended public std boundary; the active direction is to retire that lane in favor of `arcana_desktop` plus graphics backends.
+- Historical desktop/window/input/events/clipboard/canvas shell APIs are no longer the intended public std boundary; any future owner must be re-approved outside `std`.
 
 ## Not Yet Ratified As Rewrite-Defining `std`
 
@@ -107,4 +106,4 @@ Scope notes:
 - `std.binary` is approved as the narrow binary reader/writer layer over `std.memory` views; it is not a generic serialization umbrella.
 - `std.memory` is approved to expose the builtin `View[Elem, Family]` surface with `Contiguous`, `Strided`, and `Mapped` family markers plus the allocator/publication capability traits (`Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) as explicit generic glue only; the removed legacy `ReadView` / `EditView` / `ByteView` / `ByteEditView` / `StrView` names and source/view helper traits are not part of the rewrite contract.
 - `std.binary` is approved to expose narrow opt-in binary traits (`BinaryReadable`, `ByteSink`) alongside `Reader` / `Writer`; those traits are explicit codec hooks, not a generic serialization policy layer.
-- `std` no longer owns public host-core, desktop shell, graphics backend, or audio device/playback lanes; those public surfaces now belong to `arcana_process`, `arcana_desktop`, `arcana_graphics`, and `arcana_audio`.
+- `std` no longer owns public host-core, desktop shell, or graphics backend lanes; those surfaces live in `arcana_process`, `arcana_audio`, or future re-approved non-std packages.

@@ -35,7 +35,7 @@ export native fn window_alive(read win: Window) -> Bool = helpers.window.window_
 export fn window_size(read win: Window) -> (Int, Int):
     return pair :: (window_width :: win :: call), (window_height :: win :: call) :: call
 
-export native fn window_native_handle(read win: Window) -> Int = helpers.window.window_native_handle
+export native fn window_native_handle(read win: Window) -> arcana_winapi.raw.types.HWND = helpers.window.window_native_handle
 export native fn window_resized(read win: Window) -> Bool = helpers.window.window_resized
 export native fn window_fullscreen(read win: Window) -> Bool = helpers.window.window_fullscreen
 export native fn window_minimized(read win: Window) -> Bool = helpers.window.window_minimized

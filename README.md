@@ -6,10 +6,7 @@ This repository contains:
 - the rewrite-era compiler and tooling crates
 - the rewrite-owned `std` surface
 - the rewrite-owned core grimoires under `grimoires/arcana`
-- the rewrite-owned app/media grimoires under `grimoires/libs`
 - examples and conformance material used to pressure the new toolchain
-
-The current native path is Windows-first and already packages a real desktop proof app through `arcana_desktop` and `arcana_graphics.arcsb`.
 
 ## Status
 
@@ -19,15 +16,14 @@ What is working now:
 - `arcana publish <workspace-dir> --member <member>` for machine-local versioned lib publication
 - typed frontend and internal IR/runtime execution for the approved pre-selfhost language surface
 - native Windows `exe` / `dll` packaging
-- rewrite-owned core grimoires for WinAPI bindings and host/process substrate
-- rewrite-owned desktop and graphics backend grimoires sufficient to drive the checked-in desktop proof workspace
+- rewrite-owned core grimoires for WinAPI bindings plus host/process/audio substrate
 
 What is not done yet:
 - selfhost
 - named remote registries and Git dependencies
 - stable public backend artifact contracts
 - first-party `arcana test`, `arcana format`, and `arcana review`
-- full `arcana_text` closure on the current rewritten surface
+- any rebuilt higher-level app/media grimoires above the current substrate
 
 The language surface is frozen until selfhost except for contract-preserving fixes and the already-approved owner/object exception.
 
@@ -35,7 +31,7 @@ The language surface is frozen until selfhost except for contract-preserving fix
 
 Prerequisites:
 - Rust toolchain
-- Windows if you want to package and run the native desktop showcase
+- Windows if you want to exercise the native packaging path
 
 Check the Rust workspace:
 
@@ -49,22 +45,16 @@ Build the Rust workspace:
 cargo build --workspace
 ```
 
-Check a workspace:
+Check a first-party package:
 
 ```powershell
-cargo run -p arcana-cli -- check examples/arcana-desktop-proof
+cargo run -p arcana-cli --bin arcana -- check grimoires/arcana/winapi
 ```
 
-Package the desktop showcase:
+Package a minimal native bundle:
 
 ```powershell
-cargo run -p arcana-cli -- package examples/arcana-desktop-proof --target windows-exe --member arcsb_app
-```
-
-Run the desktop proof directly:
-
-```powershell
-cargo run -p arcana-cli -- run examples/arcana-desktop-proof --target windows-exe --member arcsb_app
+cargo test -q -p arcana-cli --features windows-native-bundle-tests package_workspace_stages_runnable_windows_exe_bundle -- --nocapture
 ```
 
 ## CLI Commands
@@ -88,27 +78,12 @@ Dependency source support today:
 - local path dependencies
 - local published versioned dependencies from the built-in `local` registry source
 
-## Desktop Showcase
-
-The checked-in showcase workspace lives at [examples/arcana-desktop-proof](examples/arcana-desktop-proof).
-
-The active checked-in member is `arcsb_app`.
-
-It demonstrates the current owned desktop shell and software-buffer backend through the public grimoire boundary:
-- window creation and redraw flow through `arcana_desktop`
-- mapped software-buffer presentation through `arcana_graphics.arcsb`
-- resize, buffer-age, and present-with-damage behavior
-- packaging through the real Windows native bundle path
-
-This is the current proof workspace for the owned desktop + graphics backend lane, not a substrate-only mock.
-
 ## Repository Layout
 
 - [crates](crates): Rust rewrite implementation for syntax, HIR, frontend, IR, package/build, runtime, AOT, and CLI
 - [std](std): rewrite-owned first-party standard library surface
 - [grimoires/arcana](grimoires/arcana): rewrite-owned core grimoires such as WinAPI bindings and process/host-core
-- [grimoires/libs](grimoires/libs): rewrite-owned app/media grimoires such as desktop, graphics, text, and audio
-- [examples](examples): checked-in proof workspaces, including the desktop showcase
+- [examples](examples): checked-in proof workspaces and fixtures
 - [docs/specs](docs/specs): frozen and approved rewrite contracts
 - [conformance](conformance): explicit language and contract fixtures
 
@@ -121,8 +96,8 @@ If you are trying to understand or contribute to the rewrite, start here:
 - [PLAN.md](PLAN.md)
 - [docs/rewrite-roadmap.md](docs/rewrite-roadmap.md)
 - [llm.md](llm.md) for Arcana source-form guidance and crate lookup notes
-- [docs/specs/grimoires/grimoires/v1-scope.md](docs/specs/grimoires/grimoires/v1-scope.md)
-- [docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md](docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md)
+- [docs/specs/os-bindings/os-bindings/v1-scope.md](docs/specs/os-bindings/os-bindings/v1-scope.md)
+- [docs/specs/selfhost-host/selfhost-host/v1-scope.md](docs/specs/selfhost-host/selfhost-host/v1-scope.md)
 
 Current rewrite authority order:
 1. `POLICY.md`
@@ -136,7 +111,7 @@ Current rewrite authority order:
 - no remote registry or Git dependencies yet
 - no stable public backend artifact contract yet
 - `std` is rewrite-owned first-party surface, not archived MeadowLang architecture to preserve wholesale
-- owned grimoires sit above the substrate and are meant to own their public contracts rather than act as thin wrappers over third-party crates
+- core grimoires sit above the substrate and are meant to own their public contracts rather than act as thin wrappers over third-party crates
 - `arcana_process` is the public host-core/process owner; old public `std.*` host-core lanes are retired
 
 ## License

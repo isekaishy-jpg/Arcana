@@ -3924,6 +3924,116 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn load_workspace_hir_winapi_surface_tracks_generic_handle_modules_only() {
+        let dir = temp_dir("load_workspace_winapi_surface");
+        let winapi_path = path_text(&repo_root().join("grimoires").join("arcana").join("winapi"));
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_winapi = {{ path = \"{winapi_path}\" }}\n",
+                ),
+                winapi_path = winapi_path,
+            ),
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+        let workspace = load_workspace_hir(&dir).expect("workspace hir should load");
+        let winapi = workspace
+            .packages
+            .values()
+            .find(|package| package.summary.package_name == "arcana_winapi")
+            .expect("arcana_winapi package should exist");
+
+        assert!(
+            winapi
+                .summary
+                .modules
+                .iter()
+                .any(|module| module.module_id == "arcana_winapi.graphics_handles"),
+            "arcana_winapi should publish a dedicated graphics handle module"
+        );
+
+        let desktop_handles =
+            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("desktop_handles.arc"))
+                .expect("desktop_handles source should load");
+        assert!(
+            !desktop_handles.contains("Session"),
+            "desktop handle source should not publish Session anymore"
+        );
+        assert!(
+            !desktop_handles.contains("lang window_handle")
+                && !desktop_handles.contains("lang app_frame_handle")
+                && !desktop_handles.contains("lang wake_handle"),
+            "desktop handle source should not publish alias-only lang handle shims"
+        );
+
+        let audio_handles =
+            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("audio_handles.arc"))
+                .expect("audio_handles source should load");
+        assert!(
+            !audio_handles.contains("lang audio_device_handle")
+                && !audio_handles.contains("lang audio_buffer_handle")
+                && !audio_handles.contains("lang audio_playback_handle"),
+            "audio handle source should not publish alias-only lang handle shims"
+        );
+
+        let process_handles =
+            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("process_handles.arc"))
+                .expect("process_handles source should load");
+        assert!(
+            !process_handles.contains("lang file_stream_handle"),
+            "process handle source should not publish alias-only lang handle shims"
+        );
+
+        let events_source =
+            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("helpers").join("events.arc"))
+                .expect("events helper source should load");
+        assert!(
+            !events_source.contains("session_open")
+                && !events_source.contains("session_close")
+                && !events_source.contains("session_attach_window")
+                && !events_source.contains("session_detach_window")
+                && !events_source.contains("session_pump")
+                && !events_source.contains("session_wait")
+                && !events_source.contains("session_create_wake"),
+            "events helper source should not expose desktop session helpers"
+        );
+
+        let graphics_source =
+            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("helpers").join("graphics.arc"))
+                .expect("graphics helper source should load");
+        assert!(
+            graphics_source.contains("use arcana_winapi.graphics_handles.GdiWindowSurface"),
+            "graphics helper source should use the canonical graphics handle module"
+        );
+        assert!(
+            !graphics_source.contains("gdi_window_surface_open_handle")
+                && !graphics_source.contains("software_surface_"),
+            "graphics helper source should only expose the generic GDI window-surface owner lane"
+        );
+
+        let window_source =
+            fs::read_to_string(repo_root().join("grimoires").join("arcana").join("winapi").join("src").join("helpers").join("window.arc"))
+                .expect("window helper source should load");
+        assert!(
+            window_source.contains(
+                "export native fn window_native_handle(read win: Window) -> arcana_winapi.raw.types.HWND"
+            ),
+            "window helper source should expose the raw HWND type, not Int"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[cfg(windows)]
     #[test]
     fn stage_distribution_bundle_records_generated_binding_native_products() {
@@ -4747,7 +4857,7 @@ mod tests {
         write_file(&dir.join("app/src/types.arc"), "// app types\n");
         write_file(
             &dir.join("desktop/book.toml"),
-            "name = \"arcana_desktop\"\nkind = \"lib\"\n",
+            "name = \"child_runtime\"\nkind = \"lib\"\n",
         );
         write_file(
             &dir.join("desktop/src/book.arc"),
@@ -4764,11 +4874,11 @@ mod tests {
         assert_eq!(spec.native_delivery, NativeDependencyDelivery::Dll);
         assert_eq!(
             app.direct_dep_ids.get("desktop"),
-            Some(&member_id(&graph, "arcana_desktop"))
+            Some(&member_id(&graph, "child_runtime"))
         );
         assert_eq!(
             app.direct_dep_packages.get("desktop"),
-            Some(&"arcana_desktop".to_string())
+            Some(&"child_runtime".to_string())
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -6014,7 +6124,7 @@ toolchain = \"future-toolchain\"\n"
         write_file(&dir.join("app/src/types.arc"), "// app types\n");
         write_file(
             &dir.join("desktop/book.toml"),
-            "name = \"arcana_desktop\"\nkind = \"lib\"\n",
+            "name = \"child_runtime\"\nkind = \"lib\"\n",
         );
         write_file(
             &dir.join("desktop/src/book.arc"),
@@ -6068,7 +6178,7 @@ toolchain = \"future-toolchain\"\n"
         write_file(
             &dir.join("desktop/book.toml"),
             concat!(
-                "name = \"arcana_desktop\"\n",
+                "name = \"child_runtime\"\n",
                 "kind = \"lib\"\n",
                 "\n[native.products.default]\n",
                 "kind = \"dll\"\n",

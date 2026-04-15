@@ -190,7 +190,7 @@ shackle fn audio_default_output_impl() -> arcana_winapi.audio_handles.AudioDevic
             gain_milli: 1000,
         },
     );
-    Ok(binding_int(handle as i64))
+    Ok(binding_opaque(handle))
 
 shackle fn audio_output_close_impl(take device: arcana_winapi.audio_handles.AudioDevice) -> Bool = helpers.audio.output_close:
     crate::shackle::clear_helper_error(instance);
@@ -215,14 +215,14 @@ shackle fn audio_buffer_load_wav_impl(read path: Str) -> arcana_winapi.audio_han
         Ok(buffer) => buffer,
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_int(0));
+            return Ok(binding_opaque(0));
         }
     };
     let state = crate::shackle::package_state_data_mut(instance)?;
     let handle = state.next_audio_buffer_handle;
     state.next_audio_buffer_handle += 1;
     state.audio_buffers.insert(handle, buffer);
-    Ok(binding_int(handle as i64))
+    Ok(binding_opaque(handle))
 
 shackle fn audio_buffer_frames_impl(read buffer: arcana_winapi.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_frames:
     Ok(binding_int(audio_buffer_ref(instance, buffer)?.frames))
@@ -239,14 +239,14 @@ shackle fn audio_play_buffer_impl(edit device: arcana_winapi.audio_handles.Audio
         Ok(value) => value.clone(),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_int(0));
+            return Ok(binding_opaque(0));
         }
     };
     let buffer_state = match audio_buffer_ref(instance, buffer) {
         Ok(value) => value.clone(),
         Err(err) => {
             crate::shackle::set_helper_error(instance, err);
-            return Ok(binding_int(0));
+            return Ok(binding_opaque(0));
         }
     };
     if let Err(err) = ensure_audio_buffer_matches_device(
@@ -256,7 +256,7 @@ shackle fn audio_play_buffer_impl(edit device: arcana_winapi.audio_handles.Audio
         buffer_state.channels,
     ) {
         crate::shackle::set_helper_error(instance, err);
-        return Ok(binding_int(0));
+        return Ok(binding_opaque(0));
     }
     let state = crate::shackle::package_state_data_mut(instance)?;
     let handle = state.next_audio_playback_handle;
@@ -273,7 +273,7 @@ shackle fn audio_play_buffer_impl(edit device: arcana_winapi.audio_handles.Audio
             position_frames: 0,
         },
     );
-    Ok(binding_int(handle as i64))
+    Ok(binding_opaque(handle))
 
 shackle fn audio_output_set_gain_milli_impl(edit device: arcana_winapi.audio_handles.AudioDevice, read milli: Int) = helpers.audio.output_set_gain_milli:
     audio_device_mut(instance, device)?.gain_milli = milli;

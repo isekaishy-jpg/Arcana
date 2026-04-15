@@ -1,5 +1,0 @@
-name = "app"
-kind = "app"
-
-[deps]
-tool = { path = "../tool", executable_forewords = true }

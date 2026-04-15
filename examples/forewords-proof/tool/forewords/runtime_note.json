@@ -1,1 +1,0 @@
-{"version":"arcana-foreword-stdio-v1","diagnostics":[],"emitted_metadata":[{"qualified_name":"tool.exec.runtime_note","target_kind":"fn","target_path":"app.smoke","retention":"runtime","args":[{"name":"slot","value":"\"smoke\""}]}],"registration_rows":[{"namespace":"tool.exec.registry","key":"smoke","value":"metadata","target_kind":"fn","target_path":"app.smoke"}]}

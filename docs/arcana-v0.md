@@ -298,7 +298,7 @@ Notes:
 - Integer overflow in `+ - * / %` and unary `-` is reported deterministically at runtime:
   `integer overflow in add|sub|mul|division|modulo|neg`.
 
-Historical note: the archived MeadowLang operator examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
+Historical note: the archived MeadowLang operator examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Collections (v0.9)
 
@@ -332,7 +332,7 @@ Notes:
 - Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
 - Exact recursive pair destructuring in `let` and `for` is part of the current pair-tuple baseline; parameter destructuring and tuple `match` patterns remain deferred.
 
-Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
+Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Collections Expansion (v0.10)
 
@@ -370,7 +370,7 @@ Notes:
 - Empty map literals are not supported yet; use `std.collections.map.new[K, V]()`.
 - Array literals are not part of v0.10 (use constructors).
 
-Historical note: archived MeadowLang array/map/`for` examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
+Historical note: archived MeadowLang array/map/`for` examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Library-Ready Language Additions (v0.13, current subset)
 
@@ -402,7 +402,7 @@ Notes:
 - Or-pattern binding capture (`A(x) | B(x)`) is not supported yet.
 - Trait dispatch remains static/monomorphized (no trait objects/dynamic dispatch).
 
-Historical note: the archived MeadowLang generic/trait proof examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
+Historical note: the archived MeadowLang generic/trait proof examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
 ## Iterator + ECS Trait Proof Slice (v0.27)
 
@@ -424,7 +424,7 @@ It does not freeze general ECS query syntax; broad query authoring remains outsi
 
 A std-style shelf layout now works in Grimoires using `impl` extension methods over kernel collection intrinsics.
 
-Current in-repo reference corpus for this direction lives primarily under `std/src`, `grimoires/libs/*`, and `grimoires/arcana/*`; the broader MeadowLang examples are now archived outside the repo. Key shelf-first surfaces include:
+Current in-repo reference corpus for this direction lives primarily under `std/src` and `grimoires/arcana/*`; the broader MeadowLang examples are now archived outside the repo. Key retained surfaces include:
 
 - `std.result` / `std.option` user enums
 - `std.collections.list` extension methods (`len`, `push`, `pop`, `try_pop_or`)
@@ -852,8 +852,7 @@ The old v0 desktop shell description has been retired from this document.
 
 Current rewrite authority for the desktop/runtime shell is:
 
-- `arcana_desktop` for the public window/event/input/text-input/clipboard shell
-- `arcana_graphics.arcsb` for the low-level software-buffer graphics backend
+- any future desktop/runtime shell layer must be re-approved outside this archival document
 - the approved scopes and ledgers under `docs/specs/`
 
 Historical v0 details for the legacy std desktop shell remain archival context only and should not be read as current rewrite surface.
@@ -896,7 +895,7 @@ Workspace/build notes:
 - Grimoire `[deps]` path dependencies are import-resolvable in compile/check/run flows (`import <dep>.*`).
 - Build/cache artifact layout is a toolchain detail and is not frozen here; current build artifacts are internal backend-contract output, not a public execution or bytecode format.
 
-Current in-repo app/showcase behavioral pressure comes from rewrite-owned `grimoires/libs/*`, `grimoires/arcana/*`, `std/src`, conformance fixtures, and crate runtime tests. The broader MeadowLang showcase/app corpus is archived outside this repo.
+Current in-repo app/showcase behavioral pressure comes from rewrite-owned `grimoires/arcana/*`, `std/src`, conformance fixtures, and crate runtime tests. The broader MeadowLang showcase/app corpus is archived outside this repo.
 
 ## Concurrency / IO Surface (v0.17)
 
@@ -1065,4 +1064,5 @@ Policy:
 Host-tool/bootstrap note:
 
 - The broader MeadowLang host/frontend bootstrap examples are now archived outside this repo.
-- Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/libs/*`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
+- Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
+

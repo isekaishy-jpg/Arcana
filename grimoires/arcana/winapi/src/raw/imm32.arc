@@ -1,3 +1,5 @@
 export shackle import fn ImmGetContext(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.HIMC = imm32.ImmGetContext
 export shackle import fn ImmReleaseContext(window: arcana_winapi.raw.types.HWND, context: arcana_winapi.raw.types.HIMC) -> arcana_winapi.raw.types.BOOL = imm32.ImmReleaseContext
+export shackle import fn ImmAssociateContextEx(window: arcana_winapi.raw.types.HWND, context: arcana_winapi.raw.types.HIMC, flags: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.BOOL = imm32.ImmAssociateContextEx
 export shackle import fn ImmGetCompositionStringW(context: arcana_winapi.raw.types.HIMC, index: arcana_winapi.raw.types.DWORD, buffer: arcana_winapi.raw.types.LPVOID, size: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.LONG = imm32.ImmGetCompositionStringW
+export shackle import fn ImmSetCompositionWindow(context: arcana_winapi.raw.types.HIMC, form: arcana_winapi.raw.types.LPCOMPOSITIONFORM) -> arcana_winapi.raw.types.BOOL = imm32.ImmSetCompositionWindow
