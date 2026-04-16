@@ -19,10 +19,13 @@ use arcana_cabi::{
     ArcanaCabiBindingScalarType, ArcanaCabiBindingSignature, ArcanaCabiBindingType,
     ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiBindingViewType,
     ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode,
-    ArcanaCabiViewFamily, ArcanaViewV1, binding_write_back_slots, clone_binding_view_bytes,
-    clone_owned_binding_bytes, clone_owned_binding_str, contiguous_u8_view,
-    copy_binding_input_view_bytes, into_owned_bytes, into_owned_str, raw_view,
-    release_binding_output_value, validate_binding_transport_type, view_total_bytes,
+    ArcanaCabiViewFamily, ArcanaViewV1, binding_write_back_slots, contiguous_u8_view,
+    into_owned_bytes, into_owned_str, raw_view, read_binding_input_bytes_arg,
+    read_binding_input_layout_bytes_arg, read_binding_input_utf8_arg, read_binding_input_utf16_arg,
+    read_binding_input_view_bytes_arg, read_binding_output_bytes_arg,
+    read_binding_output_layout_bytes_arg, read_binding_output_utf8_arg,
+    read_binding_output_utf16_arg, read_binding_output_view_arg, release_binding_output_value,
+    validate_binding_transport_type,
 };
 
 use arcana_ir::{

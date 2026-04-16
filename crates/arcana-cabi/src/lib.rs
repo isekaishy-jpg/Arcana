@@ -1804,6 +1804,265 @@ pub unsafe fn copy_binding_input_view_bytes(
     unsafe { copy_binding_input_bytes(view.ptr, total, label) }
 }
 
+fn decode_binding_utf16_units(bytes: Vec<u8>, label: &str) -> Result<Vec<u16>, String> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(format!(
+            "{label} utf16 byte length {} is not divisible by 2",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
+        .collect())
+}
+
+fn copy_layout_value<T: Copy>(bytes: &[u8], label: &str) -> Result<T, String> {
+    let expected_len = std::mem::size_of::<T>();
+    if bytes.len() != expected_len {
+        return Err(format!(
+            "{label} layout size mismatch: expected {expected_len}, got {}",
+            bytes.len()
+        ));
+    }
+    if expected_len == 0 {
+        return Ok(unsafe { std::mem::zeroed() });
+    }
+    let mut value = std::mem::MaybeUninit::<T>::uninit();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            value.as_mut_ptr().cast::<u8>(),
+            expected_len,
+        );
+        Ok(value.assume_init())
+    }
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Layout` input payload readable for the layout byte span.
+pub unsafe fn read_binding_input_layout_bytes_arg(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::Layout {
+        return Err(format!("binding arg `{name}` must be Layout"));
+    }
+    let view = unsafe { value.payload.view_value };
+    let label = format!("binding arg `{name}`");
+    unsafe { copy_binding_input_view_bytes(view, &label) }
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Layout` input payload readable for the layout byte span.
+pub unsafe fn read_binding_input_layout_arg<T: Copy>(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+) -> Result<T, String> {
+    let label = format!("binding arg `{name}`");
+    let bytes = unsafe { read_binding_input_layout_bytes_arg(value, name) }?;
+    copy_layout_value::<T>(&bytes, &label)
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Layout` output payload readable for the layout byte span.
+pub unsafe fn read_binding_output_layout_bytes_arg(
+    value: &ArcanaCabiBindingValueV1,
+    label: &str,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<Vec<u8>, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::Layout {
+        return Err(format!("{label} must be Layout"));
+    }
+    let owned = unsafe { value.payload.owned_bytes_value };
+    unsafe { clone_owned_binding_bytes(owned, free) }
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Layout` output payload readable for the layout byte span.
+pub unsafe fn read_binding_output_layout_arg<T: Copy>(
+    value: &ArcanaCabiBindingValueV1,
+    label: &str,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<T, String> {
+    let bytes = unsafe { read_binding_output_layout_bytes_arg(value, label, free) }?;
+    copy_layout_value::<T>(&bytes, label)
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Str` input payload readable for the declared byte span.
+pub unsafe fn read_binding_input_utf8_arg(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+) -> Result<String, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::Str {
+        return Err(format!("binding arg `{name}` must be Str"));
+    }
+    let view = unsafe { value.payload.view_value };
+    let bytes = unsafe { copy_binding_input_view_bytes(view, &format!("binding arg `{name}`")) }?;
+    String::from_utf8(bytes).map_err(|err| format!("binding arg `{name}` is not utf-8: {err}"))
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Bytes` input payload readable for the declared byte span.
+pub unsafe fn read_binding_input_bytes_arg(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::Bytes {
+        return Err(format!("binding arg `{name}` must be Bytes"));
+    }
+    let view = unsafe { value.payload.view_value };
+    unsafe { copy_binding_input_view_bytes(view, &format!("binding arg `{name}`")) }
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Bytes` input payload representing UTF-16 units.
+pub unsafe fn read_binding_input_utf16_arg(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+) -> Result<Vec<u16>, String> {
+    let bytes = unsafe { read_binding_input_bytes_arg(value, name) }?;
+    decode_binding_utf16_units(bytes, &format!("binding arg `{name}`"))
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `View` input payload readable for the byte span declared by
+/// the view metadata.
+pub unsafe fn read_binding_input_view_arg(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+    expected_family: u32,
+    expected_element_size: usize,
+) -> Result<ArcanaViewV1, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::View {
+        return Err(format!("binding arg `{name}` must be View"));
+    }
+    let view = unsafe { value.payload.view_value };
+    if view.family != expected_family {
+        return Err(format!(
+            "binding arg `{name}` view family mismatch: expected {expected_family}, got {}",
+            view.family
+        ));
+    }
+    let actual_element_size = usize::try_from(view.element_size)
+        .map_err(|_| format!("binding arg `{name}` view element size does not fit usize"))?;
+    if actual_element_size != expected_element_size {
+        return Err(format!(
+            "binding arg `{name}` view element size mismatch: expected {expected_element_size}, got {actual_element_size}"
+        ));
+    }
+    let total = view_total_bytes(view)?;
+    if total != 0 && view.ptr.is_null() {
+        return Err(format!(
+            "binding arg `{name}` returned null View data with len {}",
+            view.len
+        ));
+    }
+    Ok(view)
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `View` input payload readable for the byte span declared by
+/// the view metadata.
+pub unsafe fn read_binding_input_view_bytes_arg(
+    value: &ArcanaCabiBindingValueV1,
+    name: &str,
+    expected_family: u32,
+    expected_element_size: usize,
+) -> Result<(ArcanaViewV1, Vec<u8>), String> {
+    let view = unsafe {
+        read_binding_input_view_arg(value, name, expected_family, expected_element_size)
+    }?;
+    let bytes = unsafe { copy_binding_input_view_bytes(view, &format!("binding arg `{name}`")) }?;
+    Ok((view, bytes))
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Str` output payload readable for the declared byte span, and
+/// `free` must be the correct deallocator for that allocation.
+pub unsafe fn read_binding_output_utf8_arg(
+    value: &ArcanaCabiBindingValueV1,
+    label: &str,
+    free: ArcanaCabiOwnedStrFreeFn,
+) -> Result<String, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::Str {
+        return Err(format!("{label} must be Str"));
+    }
+    let owned = unsafe { value.payload.owned_str_value };
+    unsafe { clone_owned_binding_str(owned, free) }
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Bytes` output payload readable for the declared byte span, and
+/// `free` must be the correct deallocator for that allocation.
+pub unsafe fn read_binding_output_bytes_arg(
+    value: &ArcanaCabiBindingValueV1,
+    label: &str,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<Vec<u8>, String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::Bytes {
+        return Err(format!("{label} must be Bytes"));
+    }
+    let owned = unsafe { value.payload.owned_bytes_value };
+    unsafe { clone_owned_binding_bytes(owned, free) }
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `Bytes` output payload representing UTF-16 units.
+pub unsafe fn read_binding_output_utf16_arg(
+    value: &ArcanaCabiBindingValueV1,
+    label: &str,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<Vec<u16>, String> {
+    let bytes = unsafe { read_binding_output_bytes_arg(value, label, free) }?;
+    decode_binding_utf16_units(bytes, label)
+}
+
+/// # Safety
+///
+/// `value` must contain a valid `View` output payload readable for the declared byte span, and
+/// `free` must be the correct deallocator for that allocation.
+pub unsafe fn read_binding_output_view_arg(
+    value: &ArcanaCabiBindingValueV1,
+    label: &str,
+    expected_family: u32,
+    expected_element_size: usize,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<(ArcanaViewV1, Vec<u8>), String> {
+    if value.tag()? != ArcanaCabiBindingValueTag::View {
+        return Err(format!("{label} must be View"));
+    }
+    let view = unsafe { value.payload.view_value };
+    if view.family != expected_family {
+        return Err(format!(
+            "{label} view family mismatch: expected {expected_family}, got {}",
+            view.family
+        ));
+    }
+    let actual_element_size = usize::try_from(view.element_size)
+        .map_err(|_| format!("{label} view element size does not fit usize"))?;
+    if actual_element_size != expected_element_size {
+        return Err(format!(
+            "{label} view element size mismatch: expected {expected_element_size}, got {actual_element_size}"
+        ));
+    }
+    let bytes = unsafe { clone_binding_view_bytes(view, free) }?;
+    Ok((view, bytes))
+}
+
 pub fn render_c_value_type_defs() -> String {
     concat!(
         "#define ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS 1u\n",
@@ -2064,10 +2323,14 @@ mod tests {
         ArcanaCabiParamSourceMode, ArcanaCabiViewFamily, ArcanaViewV1, binding_write_back_slots,
         clone_owned_binding_bytes, clone_owned_binding_str, compare_binding_layouts,
         compare_binding_signatures, free_owned_bytes, free_owned_str, into_owned_bytes,
-        into_owned_str, release_binding_output_value, render_c_descriptor_type_defs,
-        render_c_value_type_defs, validate_binding_callbacks, validate_binding_layouts,
-        validate_binding_param, validate_binding_transport_type, validate_binding_write_backs,
-        view_total_bytes,
+        into_owned_str, read_binding_input_bytes_arg, read_binding_input_layout_bytes_arg,
+        read_binding_input_utf8_arg, read_binding_input_utf16_arg,
+        read_binding_input_view_bytes_arg, read_binding_output_bytes_arg,
+        read_binding_output_layout_arg, read_binding_output_layout_bytes_arg,
+        read_binding_output_utf8_arg, read_binding_output_utf16_arg, read_binding_output_view_arg,
+        release_binding_output_value, render_c_descriptor_type_defs, render_c_value_type_defs,
+        validate_binding_callbacks, validate_binding_layouts, validate_binding_param,
+        validate_binding_transport_type, validate_binding_write_backs, view_total_bytes,
     };
 
     unsafe extern "system" fn test_free_owned_bytes(ptr: *mut u8, len: usize) {
@@ -2327,6 +2590,205 @@ mod tests {
             .expect("write-back str should clone"),
             "edited"
         );
+    }
+
+    #[test]
+    fn canonical_binding_input_read_helpers_round_trip_transport_shapes() {
+        let utf16_bytes = vec![0x41, 0x00, 0xa9, 0x03];
+        let bytes_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Bytes as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                view_value: super::raw_view(
+                    utf16_bytes.as_ptr(),
+                    utf16_bytes.len(),
+                    1,
+                    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                    1,
+                    0,
+                ),
+            },
+        };
+        assert_eq!(
+            unsafe { read_binding_input_bytes_arg(&bytes_value, "bytes") }
+                .expect("bytes should decode"),
+            utf16_bytes
+        );
+        assert_eq!(
+            unsafe { read_binding_input_utf16_arg(&bytes_value, "utf16") }
+                .expect("utf16 should decode"),
+            vec![0x0041, 0x03a9]
+        );
+
+        let text = b"arcana";
+        let str_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Str as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                view_value: super::raw_view(
+                    text.as_ptr(),
+                    text.len(),
+                    1,
+                    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                    1,
+                    ARCANA_CABI_VIEW_FLAG_UTF8,
+                ),
+            },
+        };
+        assert_eq!(
+            unsafe { read_binding_input_utf8_arg(&str_value, "text") }.expect("utf8 should decode"),
+            "arcana"
+        );
+
+        let layout_bytes = 42i32.to_ne_bytes();
+        let layout_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Layout as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                view_value: super::raw_view(
+                    layout_bytes.as_ptr(),
+                    layout_bytes.len(),
+                    1,
+                    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                    1,
+                    0,
+                ),
+            },
+        };
+        assert_eq!(
+            unsafe { read_binding_input_layout_bytes_arg(&layout_value, "layout") }
+                .expect("layout bytes should decode"),
+            layout_bytes
+        );
+
+        let view_bytes = [1u8, 2, 3, 4];
+        let view_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::View as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                view_value: super::raw_view(
+                    view_bytes.as_ptr(),
+                    view_bytes.len(),
+                    1,
+                    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                    1,
+                    0,
+                ),
+            },
+        };
+        let (view, bytes) = unsafe {
+            read_binding_input_view_bytes_arg(
+                &view_value,
+                "view",
+                ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                1,
+            )
+        }
+        .expect("view bytes should decode");
+        assert_eq!(view.len, 4);
+        assert_eq!(bytes, view_bytes);
+    }
+
+    #[test]
+    fn canonical_binding_output_read_helpers_round_trip_transport_shapes() {
+        let bytes_value = binding_owned_bytes(&[7, 8, 9, 10]);
+        assert_eq!(
+            unsafe { read_binding_output_bytes_arg(&bytes_value, "bytes", test_free_owned_bytes) }
+                .expect("bytes should decode"),
+            vec![7, 8, 9, 10]
+        );
+
+        let text_value = binding_owned_str("arcana");
+        assert_eq!(
+            unsafe { read_binding_output_utf8_arg(&text_value, "text", test_free_owned_str) }
+                .expect("text should decode"),
+            "arcana"
+        );
+
+        let utf16_bytes = into_owned_bytes(vec![0x41, 0x00, 0xa9, 0x03]);
+        let utf16_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Bytes as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                owned_bytes_value: utf16_bytes,
+            },
+        };
+        assert_eq!(
+            unsafe { read_binding_output_utf16_arg(&utf16_value, "utf16", test_free_owned_bytes) }
+                .expect("utf16 should decode"),
+            vec![0x0041, 0x03a9]
+        );
+
+        let layout_bytes = 77i32.to_ne_bytes().to_vec();
+        let layout_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Layout as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                owned_bytes_value: into_owned_bytes(layout_bytes.clone()),
+            },
+        };
+        assert_eq!(
+            unsafe {
+                read_binding_output_layout_bytes_arg(&layout_value, "layout", test_free_owned_bytes)
+            }
+            .expect("layout bytes should decode"),
+            layout_bytes
+        );
+
+        let typed_layout_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Layout as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                owned_bytes_value: into_owned_bytes(55i32.to_ne_bytes().to_vec()),
+            },
+        };
+        assert_eq!(
+            unsafe {
+                read_binding_output_layout_arg::<i32>(
+                    &typed_layout_value,
+                    "layout",
+                    test_free_owned_bytes,
+                )
+            }
+            .expect("typed layout should decode"),
+            55
+        );
+
+        let view_owned = into_owned_bytes(vec![1, 2, 3, 4]);
+        let view_value = ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::View as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                view_value: super::raw_view(
+                    view_owned.ptr.cast_const(),
+                    4,
+                    1,
+                    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                    1,
+                    0,
+                ),
+            },
+        };
+        let (view, bytes) = unsafe {
+            read_binding_output_view_arg(
+                &view_value,
+                "view",
+                ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
+                1,
+                test_free_owned_bytes,
+            )
+        }
+        .expect("view should decode");
+        assert_eq!(view.len, 4);
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
     }
 
     #[test]

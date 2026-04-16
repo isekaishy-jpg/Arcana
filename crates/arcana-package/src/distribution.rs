@@ -31,7 +31,10 @@ use libloading::Library;
 use sha2::{Digest, Sha256};
 
 use crate::build::{BuildStatus, package_asset_bundle_dir, selected_native_product_for_build};
-use crate::build_identity::read_cached_output_metadata;
+use crate::build_identity::{
+    SupportFileMetadata, compute_file_sha256, read_cached_output_metadata,
+    validate_materialized_artifact_tree,
+};
 use crate::{
     BuildOutputKey, BuildTarget, NativeProductProducer, PackageResult, WorkspaceGraph,
     WorkspaceMember, collect_validated_support_file_paths, repo_root, support_file_identity_key,
@@ -112,38 +115,28 @@ pub fn distribution_bundle_is_ready(
     if !root_artifact_path.is_file() {
         return false;
     }
-    if let Some(expected_length) = manifest.root_artifact_length
-        && fs::metadata(&root_artifact_path)
-            .map(|metadata| metadata.len() != expected_length)
-            .unwrap_or(true)
-    {
-        return false;
-    }
-    if let Some(expected_hash) = &manifest.root_artifact_hash
-        && compute_file_sha256(&root_artifact_path)
-            .map(|actual| actual != *expected_hash)
-            .unwrap_or(true)
-    {
-        return false;
-    }
-    if manifest.support_files.len() != manifest.support_file_meta.len() {
-        return false;
-    }
-    manifest.support_files.iter().all(|path| {
-        let Some(expected_meta) = manifest.support_file_meta.get(path) else {
-            return false;
-        };
-        let support_path = bundle_dir.join(path);
-        let Ok(metadata) = fs::metadata(&support_path) else {
-            return false;
-        };
-        if metadata.len() != expected_meta.length {
-            return false;
-        }
-        compute_file_sha256(&support_path)
-            .map(|actual| actual == expected_meta.hash)
-            .unwrap_or(false)
-    })
+    let support_file_meta = manifest
+        .support_file_meta
+        .values()
+        .map(|meta| {
+            (
+                meta.path.clone(),
+                SupportFileMetadata {
+                    path: meta.path.clone(),
+                    length: meta.length,
+                    hash: meta.hash.clone(),
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    validate_materialized_artifact_tree(
+        &root_artifact_path,
+        manifest.root_artifact_length,
+        manifest.root_artifact_hash.as_deref(),
+        bundle_dir,
+        &manifest.support_files,
+        &support_file_meta,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2475,14 +2468,6 @@ fn validate_distribution_identity(
         ));
     }
     Ok(())
-}
-
-fn compute_file_sha256(path: &Path) -> PackageResult<String> {
-    let bytes = fs::read(path)
-        .map_err(|e| format!("failed to read `{}` for hashing: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn distribution_support_file_metadata(

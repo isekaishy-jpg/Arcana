@@ -29,10 +29,10 @@ pub struct CachedOutputMetadata {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SupportFileMetadata {
-    path: String,
-    length: u64,
-    hash: String,
+pub(crate) struct SupportFileMetadata {
+    pub(crate) path: String,
+    pub(crate) length: u64,
+    pub(crate) hash: String,
 }
 
 #[cfg(test)]
@@ -104,6 +104,54 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+pub(crate) fn compute_file_sha256(path: &Path) -> PackageResult<String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("failed to read `{}` for hashing: {e}", path.display()))?;
+    Ok(hash_bytes(&bytes))
+}
+
+pub(crate) fn validate_materialized_artifact_tree(
+    root_artifact_path: &Path,
+    root_artifact_length: Option<u64>,
+    root_artifact_hash: Option<&str>,
+    support_root: &Path,
+    support_files: &[String],
+    support_file_meta: &std::collections::HashMap<String, SupportFileMetadata>,
+) -> bool {
+    if support_files.len() != support_file_meta.len() {
+        return false;
+    }
+    if let Some(expected_length) = root_artifact_length
+        && fs::metadata(root_artifact_path)
+            .map(|metadata| metadata.len() != expected_length)
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    if let Some(expected_hash) = root_artifact_hash
+        && compute_file_sha256(root_artifact_path)
+            .map(|actual| actual != expected_hash)
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    support_files.iter().all(|relative_path| {
+        let Some(expected_meta) = support_file_meta.get(relative_path) else {
+            return false;
+        };
+        let path = support_root.join(relative_path);
+        let Ok(metadata) = fs::metadata(&path) else {
+            return false;
+        };
+        if metadata.len() != expected_meta.length {
+            return false;
+        }
+        compute_file_sha256(&path)
+            .map(|actual| actual == expected_meta.hash)
+            .unwrap_or(false)
+    })
 }
 
 pub fn render_cached_artifact(
@@ -596,61 +644,36 @@ fn cached_output_files_match(
     let Some(support_file_meta) = support_file_meta_from_table(table) else {
         return false;
     };
-    if !matches!(target, BuildTarget::InternalAot) {
+    let Ok(support_files) = support_files_from_table(table) else {
+        return false;
+    };
+    let artifact_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let (root_artifact_length, root_artifact_hash) = if matches!(target, BuildTarget::InternalAot) {
+        (None, None)
+    } else {
         let Some(expected_root_length) = table
             .get("root_artifact_length")
             .and_then(toml::Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
         else {
             return false;
         };
-        let Ok(metadata) = fs::metadata(output_path) else {
-            return false;
-        };
-        if metadata.len() != expected_root_length as u64 {
-            return false;
-        }
         let Some(expected_root_hash) = table
             .get("root_artifact_hash")
             .and_then(toml::Value::as_str)
         else {
             return false;
         };
-        let Ok(root_bytes) = fs::read(output_path) else {
-            return false;
-        };
-        if hash_bytes(&root_bytes) != expected_root_hash {
-            return false;
-        }
-    }
-    if support_file_meta.is_empty() {
-        return true;
-    }
-    let Ok(support_files) = support_files_from_table(table) else {
-        return false;
+        (Some(expected_root_length), Some(expected_root_hash))
     };
-    if support_files
-        .iter()
-        .any(|path| !support_file_meta.contains_key(path))
-    {
-        return false;
-    }
-    let artifact_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
-    support_files.into_iter().all(|relative_path| {
-        let Some(expected_meta) = support_file_meta.get(&relative_path) else {
-            return false;
-        };
-        let path = artifact_dir.join(relative_path);
-        let Ok(metadata) = fs::metadata(&path) else {
-            return false;
-        };
-        if metadata.len() != expected_meta.length {
-            return false;
-        }
-        let Ok(bytes) = fs::read(&path) else {
-            return false;
-        };
-        hash_bytes(&bytes) == expected_meta.hash
-    })
+    validate_materialized_artifact_tree(
+        output_path,
+        root_artifact_length,
+        root_artifact_hash,
+        artifact_dir,
+        &support_files,
+        &support_file_meta,
+    )
 }
 
 fn cached_output_index_matches(
@@ -658,32 +681,6 @@ fn cached_output_index_matches(
     target: &BuildTarget,
     table: &toml::Table,
 ) -> bool {
-    if !matches!(target, BuildTarget::InternalAot) {
-        let Some(expected_root_length) = table
-            .get("root_artifact_length")
-            .and_then(toml::Value::as_integer)
-        else {
-            return false;
-        };
-        let Ok(metadata) = fs::metadata(output_path) else {
-            return false;
-        };
-        if metadata.len() != expected_root_length as u64 {
-            return false;
-        }
-        let Some(expected_root_hash) = table
-            .get("root_artifact_hash")
-            .and_then(toml::Value::as_str)
-        else {
-            return false;
-        };
-        let Ok(root_bytes) = fs::read(output_path) else {
-            return false;
-        };
-        if hash_bytes(&root_bytes) != expected_root_hash {
-            return false;
-        }
-    }
     let artifact_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
     let Ok(support_files) = support_files_from_table(table) else {
         return false;
@@ -691,25 +688,32 @@ fn cached_output_index_matches(
     let Some(support_file_meta) = support_file_meta_from_table(table) else {
         return false;
     };
-    for relative_path in &support_files {
-        let Some(expected_meta) = support_file_meta.get(relative_path) else {
+    let (root_artifact_length, root_artifact_hash) = if matches!(target, BuildTarget::InternalAot) {
+        (None, None)
+    } else {
+        let Some(expected_root_length) = table
+            .get("root_artifact_length")
+            .and_then(toml::Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+        else {
             return false;
         };
-        let Ok(metadata) = fs::metadata(artifact_dir.join(relative_path)) else {
+        let Some(expected_root_hash) = table
+            .get("root_artifact_hash")
+            .and_then(toml::Value::as_str)
+        else {
             return false;
         };
-        let path = artifact_dir.join(relative_path);
-        if metadata.len() != expected_meta.length {
-            return false;
-        }
-        let Ok(bytes) = fs::read(&path) else {
-            return false;
-        };
-        if hash_bytes(&bytes) != expected_meta.hash {
-            return false;
-        }
-    }
-    true
+        (Some(expected_root_length), Some(expected_root_hash))
+    };
+    validate_materialized_artifact_tree(
+        output_path,
+        root_artifact_length,
+        root_artifact_hash,
+        artifact_dir,
+        &support_files,
+        &support_file_meta,
+    )
 }
 
 fn support_files_from_table(table: &toml::Table) -> Result<Vec<String>, String> {
