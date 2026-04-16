@@ -6389,14 +6389,13 @@ fn try_execute_arcana_owned_api_call(
                 "arcana_process.fs.stream_write",
             )?;
             let bytes = expect_byte_array(args[1].value.clone(), key.as_str())?;
-            let result = (|| -> Result<i64, String> {
-                host.runtime_fs_stream_write(handle, &bytes)
-                    .and_then(|written| {
-                        i64::try_from(written).map_err(|_| {
-                            "fs_stream_write wrote byte count that does not fit Int".to_string()
-                        })
+            let result = host
+                .runtime_fs_stream_write(handle, &bytes)
+                .and_then(|written| {
+                    i64::try_from(written).map_err(|_| {
+                        "fs_stream_write wrote byte count that does not fit Int".to_string()
                     })
-            })();
+                });
             match result {
                 Ok(written) => ok_variant(RuntimeValue::Int(written)),
                 Err(err) => err_variant(err),
@@ -6418,7 +6417,7 @@ fn try_execute_arcana_owned_api_call(
                 args[0].value.clone(),
                 "arcana_process.fs.stream_eof",
             )?;
-            let result = (|| -> Result<bool, String> { host.runtime_fs_stream_eof(handle) })();
+            let result = host.runtime_fs_stream_eof(handle);
             match result {
                 Ok(value) => ok_variant(RuntimeValue::Bool(value)),
                 Err(err) => err_variant(err),

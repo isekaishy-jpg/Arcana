@@ -400,6 +400,7 @@ struct AdapterArtifactIdentity {
 struct ResolvedAdapterRunnerProgram {
     token: String,
     source_program: String,
+    stage_program: bool,
     digest: Option<String>,
     sidecars: Vec<AdapterArtifactSidecarDigest>,
 }
@@ -5889,6 +5890,21 @@ fn fallback_adapter_runner_program(provider_package: &HirWorkspacePackage, runne
     }
 }
 
+fn candidate_matches_bare_adapter_runner(candidate: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::metadata(candidate)
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        candidate.is_file()
+    }
+}
+
 fn resolve_bare_adapter_runner_on_path(program: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     let has_explicit_extension = Path::new(program).extension().is_some();
@@ -5918,7 +5934,7 @@ fn resolve_bare_adapter_runner_on_path(program: &str) -> Option<PathBuf> {
                     format!("{program}{extension}")
                 };
                 let candidate = dir.join(candidate_name);
-                if candidate.is_file() {
+                if candidate_matches_bare_adapter_runner(&candidate) {
                     return Some(candidate);
                 }
             }
@@ -5926,7 +5942,7 @@ fn resolve_bare_adapter_runner_on_path(program: &str) -> Option<PathBuf> {
         #[cfg(not(windows))]
         {
             let candidate = dir.join(program);
-            if candidate.is_file() {
+            if candidate_matches_bare_adapter_runner(&candidate) {
                 return Some(candidate);
             }
         }
@@ -5986,21 +6002,25 @@ fn resolve_adapter_runner_program(
     runner: &str,
 ) -> Result<ResolvedAdapterRunnerProgram, String> {
     let runner_path = Path::new(runner);
-    let source_path = if runner_path.is_absolute() {
-        runner_path.to_path_buf()
+    let (source_path, stage_program) = if runner_path.is_absolute() {
+        (runner_path.to_path_buf(), true)
     } else if runner.contains('/') || runner.contains('\\') {
-        provider_package.root_dir.join(runner_path)
+        (provider_package.root_dir.join(runner_path), true)
     } else {
-        resolve_bare_adapter_runner_on_path(runner).ok_or_else(|| {
-            format!(
-                "failed to resolve foreword adapter runner `{runner}` on PATH from `{}`",
-                provider_package.root_dir.display()
-            )
-        })?
+        (
+            resolve_bare_adapter_runner_on_path(runner).ok_or_else(|| {
+                format!(
+                    "failed to resolve foreword adapter runner `{runner}` on PATH from `{}`",
+                    provider_package.root_dir.display()
+                )
+            })?,
+            false,
+        )
     };
     Ok(ResolvedAdapterRunnerProgram {
         token: runner.to_string(),
         source_program: external_process_path_string(&source_path),
+        stage_program,
         digest: digest_path_contents(&source_path),
         sidecars: collect_adapter_sidecar_digests(&source_path)?,
     })
@@ -6189,28 +6209,37 @@ fn materialize_foreword_adapter_artifact(
             )
         })?
         .to_owned();
-    let staged_product_path = root.join(product_file_name);
+    let staged_product_path = root.join("product").join(product_file_name);
     copy_adapter_artifact_if_needed(&source_product_path, &staged_product_path)?;
     let product_sidecars = sync_adapter_sidecars(&source_product_path, &staged_product_path)?;
 
     let (runner_token, runner_program, runner_sidecars, runner_digest) =
         if let Some(runner) = &source_identity.runner {
             let runner_path = Path::new(&runner.source_program);
-            let runner_file_name = runner_path.file_name().ok_or_else(|| {
-                format!(
-                    "foreword adapter `{}` has invalid runner path `{}`",
-                    product.name, runner.source_program
+            if runner.stage_program {
+                let runner_file_name = runner_path.file_name().ok_or_else(|| {
+                    format!(
+                        "foreword adapter `{}` has invalid runner path `{}`",
+                        product.name, runner.source_program
+                    )
+                })?;
+                let staged_runner_path = root.join("runner").join(runner_file_name);
+                copy_adapter_artifact_if_needed(runner_path, &staged_runner_path)?;
+                let runner_sidecars = sync_adapter_sidecars(runner_path, &staged_runner_path)?;
+                (
+                    Some(runner.token.clone()),
+                    Some(external_process_path_string(&staged_runner_path)),
+                    runner_sidecars,
+                    digest_path_contents(&staged_runner_path),
                 )
-            })?;
-            let staged_runner_path = root.join(runner_file_name);
-            copy_adapter_artifact_if_needed(runner_path, &staged_runner_path)?;
-            let runner_sidecars = sync_adapter_sidecars(runner_path, &staged_runner_path)?;
-            (
-                Some(runner.token.clone()),
-                Some(external_process_path_string(&staged_runner_path)),
-                runner_sidecars,
-                digest_path_contents(&staged_runner_path),
-            )
+            } else {
+                (
+                    Some(runner.token.clone()),
+                    Some(runner.source_program.clone()),
+                    runner.sidecars.clone(),
+                    runner.digest.clone(),
+                )
+            }
         } else {
             (None, None, Vec::new(), None)
         };
@@ -18571,9 +18600,13 @@ mod tests {
     };
     use arcana_syntax::Span;
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(unix)]
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -20600,16 +20633,169 @@ mod tests {
         let runner_path = identity
             .runner
             .as_deref()
-            .expect("bare runner should resolve to a materialized program");
+            .expect("bare runner should resolve to an executable program");
         assert!(
-            runner_path.contains(".arcana"),
-            "resolved runner should be staged under package cache: {runner_path}"
+            !runner_path.eq(runner_name),
+            "bare runner should resolve to a concrete executable path: {runner_path}"
         );
         assert!(
             Path::new(runner_path).is_file(),
-            "materialized runner should exist at {runner_path}"
+            "resolved runner should exist at {runner_path}"
         );
         assert!(identity.runner_digest.is_some());
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn materialize_foreword_adapter_artifact_separates_same_basename_product_and_runner() {
+        let root = test_temp_dir(
+            "arcana-frontend-tests",
+            "materialized_adapter_same_basename",
+        );
+        let product_rel = if cfg!(windows) {
+            "forewords/product/shared.cmd"
+        } else {
+            "forewords/product/shared.sh"
+        };
+        let runner_rel = if cfg!(windows) {
+            "forewords/runner/shared.cmd"
+        } else {
+            "forewords/runner/shared.sh"
+        };
+        write_test_file_contents(&root, product_rel, "product-marker\n", true);
+        write_test_file_contents(&root, runner_rel, "runner-marker\n", true);
+        let (package, mut product, _) = make_adapter_request_fixture(&root, product_rel);
+        product.runner = Some(runner_rel.to_string());
+
+        let materialized = materialize_foreword_adapter_artifact(&package, &product)
+            .expect("adapter artifact should materialize");
+        let runner_program = materialized
+            .runner_program
+            .as_deref()
+            .expect("runner should materialize");
+        let product_program = Path::new(&materialized.product_program);
+        let runner_program = Path::new(runner_program);
+
+        assert_ne!(
+            product_program, runner_program,
+            "product and runner should not alias the same staged file"
+        );
+        assert_ne!(
+            product_program.parent(),
+            runner_program.parent(),
+            "product and runner should stage under distinct directories"
+        );
+        assert!(
+            fs::read_to_string(product_program)
+                .expect("staged product should be readable")
+                .contains("product-marker")
+        );
+        assert!(
+            fs::read_to_string(runner_program)
+                .expect("staged runner should be readable")
+                .contains("runner-marker")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn materialize_foreword_adapter_artifact_keeps_same_stem_sidecars_isolated() {
+        let root = test_temp_dir(
+            "arcana-frontend-tests",
+            "materialized_adapter_sidecar_isolated",
+        );
+        let product_rel = if cfg!(windows) {
+            "forewords/product/shared.cmd"
+        } else {
+            "forewords/product/shared.sh"
+        };
+        let runner_rel = if cfg!(windows) {
+            "forewords/runner/shared.cmd"
+        } else {
+            "forewords/runner/shared.sh"
+        };
+        write_test_file_contents(&root, product_rel, "product-marker\n", true);
+        write_test_file_contents(&root, runner_rel, "runner-marker\n", true);
+        write_test_file_contents(
+            &root,
+            "forewords/product/shared.json",
+            "{\"kind\":\"product\"}\n",
+            false,
+        );
+        write_test_file_contents(
+            &root,
+            "forewords/runner/shared.json",
+            "{\"kind\":\"runner\"}\n",
+            false,
+        );
+        let (package, mut product, _) = make_adapter_request_fixture(&root, product_rel);
+        product.runner = Some(runner_rel.to_string());
+
+        let materialized = materialize_foreword_adapter_artifact(&package, &product)
+            .expect("adapter artifact should materialize");
+        let runner_program = materialized
+            .runner_program
+            .as_deref()
+            .expect("runner should materialize");
+        let staged_product_sidecar =
+            Path::new(&materialized.product_program).with_extension("json");
+        let staged_runner_sidecar = Path::new(runner_program).with_extension("json");
+
+        assert_ne!(
+            staged_product_sidecar, staged_runner_sidecar,
+            "product and runner sidecars should not alias the same staged file"
+        );
+        assert_eq!(
+            fs::read_to_string(&staged_product_sidecar)
+                .expect("staged product sidecar should exist"),
+            "{\"kind\":\"product\"}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&staged_runner_sidecar).expect("staged runner sidecar should exist"),
+            "{\"kind\":\"runner\"}\n"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_foreword_adapter_artifact_rejects_non_executable_bare_runner_on_path() {
+        let _env_guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = test_temp_dir(
+            "arcana-frontend-tests",
+            "materialized_adapter_nonexec_path_runner",
+        );
+        let adapter_rel_path = write_foreword_adapter_script(
+            &root,
+            "materialized_identity",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let path_dir = root.join("path-bin");
+        fs::create_dir_all(&path_dir).expect("path dir should be creatable");
+        let bare_runner_path = path_dir.join("fake-runner");
+        write_test_file_contents(&root, "path-bin/fake-runner", "#!/bin/sh\nexit 0\n", false);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut path_entries = vec![path_dir.clone()];
+        path_entries.extend(std::env::split_paths(&old_path));
+        let joined_path = std::env::join_paths(path_entries).expect("PATH should join");
+        let _path_guard = EnvVarGuard::set("PATH", joined_path);
+
+        let (package, mut product, _) = make_adapter_request_fixture(&root, &adapter_rel_path);
+        product.runner = Some("fake-runner".to_string());
+
+        let err = materialize_foreword_adapter_artifact(&package, &product)
+            .expect_err("non-executable PATH runner should not resolve");
+        assert!(
+            err.contains("failed to resolve foreword adapter runner `fake-runner` on PATH"),
+            "{err}"
+        );
+        assert!(
+            bare_runner_path.is_file(),
+            "test fixture should keep the non-executable PATH candidate in place"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -24584,6 +24770,24 @@ mod tests {
         relative
     }
 
+    fn write_test_file_contents(root: &Path, relative: &str, contents: &str, _executable: bool) {
+        let target = root.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).expect("test file parent should be creatable");
+        }
+        fs::write(&target, contents).expect("test file should be writable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = fs::metadata(&target)
+                .expect("test file metadata should load")
+                .permissions();
+            perms.set_mode(if _executable { 0o755 } else { 0o644 });
+            fs::set_permissions(&target, perms).expect("test file perms should update");
+        }
+    }
+
     fn write_foreword_adapter_script(root: &Path, name: &str, output: &str) -> String {
         if cfg!(windows) {
             let relative = format!("forewords/{name}.cmd");
@@ -24758,6 +24962,38 @@ mod tests {
                 .permissions();
             perms.set_mode(0o755);
             fs::set_permissions(target, perms).expect("adapter target perms should update");
+        }
+    }
+
+    #[cfg(unix)]
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    struct EnvVarGuard {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: OsString) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.old {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
         }
     }
 
