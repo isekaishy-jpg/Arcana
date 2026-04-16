@@ -100,11 +100,12 @@ Its current helper surface covers:
   - COM init/uninit, GUID text, property-key helpers
 - windowing
   - hidden window creation/destruction
-  - message posting/pumping
+  - generic wake/message primitives
   - DPI/monitor queries
   - dark-mode attribute roundtrip
   - client/frame rect queries
   - clipboard, file-drop, and IME helper routines
+- helper surfaces here stay thin Win32 substrate helpers; typed event/input framing and other higher-level windowing policy do not belong in `arcana_winapi.helpers.*`
 - graphics/text
   - GDI window-surface ownership and software-present path
   - DXGI adapter enumeration

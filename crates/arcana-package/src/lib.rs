@@ -4140,25 +4140,40 @@ mod tests {
             "process handle source should not publish alias-only lang handle shims"
         );
 
-        let events_source = fs::read_to_string(
+        let message_source = fs::read_to_string(
             repo_root()
                 .join("grimoires")
                 .join("arcana")
                 .join("winapi")
                 .join("src")
                 .join("helpers")
-                .join("events.arc"),
+                .join("message.arc"),
         )
-        .expect("events helper source should load");
+        .expect("message helper source should load");
         assert!(
-            !events_source.contains("session_open")
-                && !events_source.contains("session_close")
-                && !events_source.contains("session_attach_window")
-                && !events_source.contains("session_detach_window")
-                && !events_source.contains("session_pump")
-                && !events_source.contains("session_wait")
-                && !events_source.contains("session_create_wake"),
-            "events helper source should not expose desktop session helpers"
+            message_source.contains("arcana_winapi.backend.message.")
+                && !message_source.contains("FrameInput")
+                && !message_source.contains("helpers.events.")
+                && !message_source.contains("helpers.input."),
+            "message helper source should only expose the internal backend.message wake/message primitives"
+        );
+
+        let message_backend = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("backend")
+                .join("message.arc"),
+        )
+        .expect("message backend declarations should load");
+        assert!(
+            !message_backend.contains("export fn ")
+                && !message_backend.contains("result_unit")
+                && !message_backend.contains("helpers.message.")
+                && message_backend.contains("backend.message."),
+            "winapi backend/message.arc should be internal backend declarations, not a lingering helper or policy lane"
         );
 
         let graphics_source = fs::read_to_string(
@@ -4276,6 +4291,70 @@ mod tests {
                 && !winapi_process_backend.contains("helpers.process.")
                 && winapi_process_backend.contains("backend.process."),
             "winapi backend/process.arc should be internal backend declarations, not a lingering helpers.process semantic lane"
+        );
+    }
+
+    #[test]
+    fn winapi_public_helper_surface_excludes_event_policy_lane() {
+        let winapi_src = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .join("src");
+
+        let helpers_source = fs::read_to_string(winapi_src.join("helpers.arc"))
+            .expect("winapi helpers source should load");
+        assert!(
+            helpers_source.contains("reexport arcana_winapi.helpers.message"),
+            "winapi helpers source should publicly reexport the generic message helper lane"
+        );
+        assert!(
+            !helpers_source.contains("reexport arcana_winapi.helpers.events")
+                && !helpers_source.contains("reexport arcana_winapi.helpers.input")
+                && !helpers_source.contains("reexport arcana_winapi.helpers.windowing"),
+            "winapi helpers source should not publicly reexport the old event/input/windowing policy helpers"
+        );
+
+        let desktop_handles = fs::read_to_string(winapi_src.join("desktop_handles.arc"))
+            .expect("winapi desktop handle source should load");
+        assert!(
+            !desktop_handles.contains("FrameInput"),
+            "winapi desktop handles should not publicly expose FrameInput anymore"
+        );
+        assert!(
+            desktop_handles.contains("export opaque type WakeHandle as move, boundary_unsafe"),
+            "WakeHandle should remain public only as a move-owned wake primitive"
+        );
+
+        for removed in [
+            winapi_src.join("helpers").join("events.arc"),
+            winapi_src.join("helpers").join("input.arc"),
+            winapi_src.join("helpers").join("windowing.arc"),
+        ] {
+            assert!(
+                !removed.exists(),
+                "{} should not remain as a public helper surface",
+                removed.display()
+            );
+        }
+
+        let message_helper = fs::read_to_string(winapi_src.join("helpers").join("message.arc"))
+            .expect("winapi message helper source should load");
+        assert!(
+            message_helper.contains("arcana_winapi.backend.message.")
+                && !message_helper.contains("helpers.events.")
+                && !message_helper.contains("FrameInput"),
+            "winapi helpers.message should be a thin wrapper over internal backend.message primitives only"
+        );
+
+        let message_backend = fs::read_to_string(winapi_src.join("backend").join("message.arc"))
+            .expect("winapi backend message declarations should load");
+        assert!(
+            !message_backend.contains("export fn ")
+                && !message_backend.contains("result_unit")
+                && !message_backend.contains("helpers.message.")
+                && message_backend.contains("backend.message."),
+            "winapi backend/message.arc should exist as an internal declaration module"
         );
     }
 

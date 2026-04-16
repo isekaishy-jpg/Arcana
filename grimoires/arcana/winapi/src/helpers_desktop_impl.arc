@@ -1,32 +1,6 @@
 shackle flags WinapiDesktopInternals:
     static DESKTOP_WINDOW_CLASS: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 
-    pub(crate) const EVENT_WINDOW_RESIZED: i64 = 1;
-    pub(crate) const EVENT_WINDOW_CLOSE_REQUESTED: i64 = 2;
-    pub(crate) const EVENT_WINDOW_FOCUSED: i64 = 3;
-    pub(crate) const EVENT_KEY_DOWN: i64 = 4;
-    pub(crate) const EVENT_KEY_UP: i64 = 5;
-    pub(crate) const EVENT_MOUSE_DOWN: i64 = 6;
-    pub(crate) const EVENT_MOUSE_UP: i64 = 7;
-    pub(crate) const EVENT_MOUSE_MOVE: i64 = 8;
-    pub(crate) const EVENT_MOUSE_WHEEL: i64 = 9;
-    pub(crate) const EVENT_WINDOW_MOVED: i64 = 10;
-    pub(crate) const EVENT_MOUSE_ENTERED: i64 = 11;
-    pub(crate) const EVENT_MOUSE_LEFT: i64 = 12;
-    pub(crate) const EVENT_WINDOW_REDRAW_REQUESTED: i64 = 13;
-    pub(crate) const EVENT_TEXT_INPUT: i64 = 14;
-    pub(crate) const EVENT_FILE_DROPPED: i64 = 15;
-    pub(crate) const EVENT_WINDOW_SCALE_FACTOR_CHANGED: i64 = 16;
-    pub(crate) const EVENT_WINDOW_THEME_CHANGED: i64 = 17;
-    pub(crate) const EVENT_RAW_MOUSE_MOTION: i64 = 18;
-    pub(crate) const EVENT_RAW_MOUSE_BUTTON: i64 = 19;
-    pub(crate) const EVENT_TEXT_COMPOSITION_STARTED: i64 = 24;
-    pub(crate) const EVENT_TEXT_COMPOSITION_UPDATED: i64 = 25;
-    pub(crate) const EVENT_TEXT_COMPOSITION_COMMITTED: i64 = 26;
-    pub(crate) const EVENT_TEXT_COMPOSITION_CANCELLED: i64 = 27;
-    pub(crate) const EVENT_RAW_MOUSE_WHEEL: i64 = 28;
-    pub(crate) const EVENT_RAW_KEY: i64 = 29;
-
     pub(crate) const WM_DESTROY_NATIVE: u32 = 2;
     pub(crate) const WM_MOVE_NATIVE: u32 = 3;
     pub(crate) const WM_SIZE_NATIVE: u32 = 5;
@@ -110,23 +84,6 @@ shackle flags WinapiDesktopInternals:
         pub(crate) dwTimeout: u32,
     }
 
-    #[derive(Clone, Debug, Default)]
-    pub(crate) struct PendingDesktopEvent {
-        pub(crate) kind: i64,
-        pub(crate) window_id: i64,
-        pub(crate) a: i64,
-        pub(crate) b: i64,
-        pub(crate) flags: i64,
-        pub(crate) text: String,
-        pub(crate) key_code: i64,
-        pub(crate) physical_key: i64,
-        pub(crate) logical_key: i64,
-        pub(crate) key_location: i64,
-        pub(crate) pointer_x: i64,
-        pub(crate) pointer_y: i64,
-        pub(crate) repeated: bool,
-    }
-
     pub(crate) struct WinapiWindowState {
         pub(crate) hwnd: crate::raw::types::HWND,
         pub(crate) title: String,
@@ -159,26 +116,6 @@ shackle flags WinapiDesktopInternals:
         pub(crate) fullscreen_restore_size: (i64, i64),
         pub(crate) fullscreen_restore_maximized: bool,
         pub(crate) closed: bool,
-        pub(crate) events: std::collections::VecDeque<PendingDesktopEvent>,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    pub(crate) struct WinapiFrameInputState {
-        pub(crate) key_down: Vec<i64>,
-        pub(crate) key_pressed: Vec<i64>,
-        pub(crate) key_released: Vec<i64>,
-        pub(crate) mouse_pos: (i64, i64),
-        pub(crate) mouse_down: Vec<i64>,
-        pub(crate) mouse_pressed: Vec<i64>,
-        pub(crate) mouse_released: Vec<i64>,
-        pub(crate) mouse_wheel_y: i64,
-        pub(crate) mouse_in_window: bool,
-    }
-
-    pub(crate) struct WinapiFrameState {
-        pub(crate) events: std::collections::VecDeque<PendingDesktopEvent>,
-        pub(crate) input: WinapiFrameInputState,
-        pub(crate) last_polled: Option<PendingDesktopEvent>,
     }
 
     pub(crate) struct WinapiWakeState {
@@ -189,8 +126,6 @@ shackle flags WinapiDesktopInternals:
     pub(crate) struct WinapiDesktopState {
         pub(crate) next_window_handle: u64,
         pub(crate) windows: std::collections::BTreeMap<u64, WinapiWindowState>,
-        pub(crate) next_frame_handle: u64,
-        pub(crate) frames: std::collections::BTreeMap<u64, WinapiFrameState>,
         pub(crate) next_wake_handle: u64,
         pub(crate) wakes: std::collections::BTreeMap<u64, WinapiWakeState>,
     }
@@ -895,8 +830,6 @@ shackle flags WinapiDesktopInternals:
         let state = Box::new(WinapiDesktopState {
             next_window_handle: 1,
             windows: std::collections::BTreeMap::new(),
-            next_frame_handle: 1,
-            frames: std::collections::BTreeMap::new(),
             next_wake_handle: 1,
             wakes: std::collections::BTreeMap::new(),
         });
@@ -1027,26 +960,6 @@ shackle flags WinapiDesktopInternals:
             .ok_or_else(|| format!("invalid Window handle `{handle}`"))
     }
 
-    pub(crate) fn frame_mut(
-        instance: &mut crate::BindingInstance,
-        handle: u64,
-    ) -> Result<&mut WinapiFrameState, String> {
-        desktop_state_mut(instance)?
-            .frames
-            .get_mut(&handle)
-            .ok_or_else(|| format!("invalid FrameInput handle `{handle}`"))
-    }
-
-    pub(crate) fn frame_ref(
-        instance: &crate::BindingInstance,
-        handle: u64,
-    ) -> Result<&WinapiFrameState, String> {
-        desktop_state_ref(instance)?
-            .frames
-            .get(&handle)
-            .ok_or_else(|| format!("invalid FrameInput handle `{handle}`"))
-    }
-
     pub(crate) fn wake_ref(
         instance: &crate::BindingInstance,
         handle: u64,
@@ -1065,202 +978,6 @@ shackle flags WinapiDesktopInternals:
             .wakes
             .get_mut(&handle)
             .ok_or_else(|| format!("invalid WakeHandle `{handle}`"))
-    }
-
-    pub(crate) fn push_window_event(
-        instance: &mut crate::BindingInstance,
-        handle: u64,
-        event: PendingDesktopEvent,
-    ) -> Result<(), String> {
-        window_mut(instance, handle)?.events.push_back(event);
-        Ok(())
-    }
-
-    pub(crate) fn make_window_event(
-        handle: u64,
-        kind: i64,
-        a: i64,
-        b: i64,
-    ) -> Result<PendingDesktopEvent, String> {
-        Ok(PendingDesktopEvent {
-            kind,
-            window_id: window_id_value(handle)?,
-            a,
-            b,
-            ..PendingDesktopEvent::default()
-        })
-    }
-
-    pub(crate) fn push_unique(out: &mut Vec<i64>, value: i64) {
-        if !out.contains(&value) {
-            out.push(value);
-        }
-    }
-
-    pub(crate) fn retain_without(out: &mut Vec<i64>, value: i64) {
-        out.retain(|item| *item != value);
-    }
-
-    pub(crate) fn frame_input_from_events(
-        events: &std::collections::VecDeque<PendingDesktopEvent>,
-    ) -> WinapiFrameInputState {
-        let mut input = WinapiFrameInputState::default();
-        for event in events {
-            match event.kind {
-                EVENT_KEY_DOWN => {
-                    push_unique(&mut input.key_down, event.key_code);
-                    push_unique(&mut input.key_pressed, event.key_code);
-                }
-                EVENT_KEY_UP => {
-                    retain_without(&mut input.key_down, event.key_code);
-                    push_unique(&mut input.key_released, event.key_code);
-                }
-                EVENT_MOUSE_DOWN => {
-                    push_unique(&mut input.mouse_down, event.a);
-                    push_unique(&mut input.mouse_pressed, event.a);
-                    input.mouse_pos = (event.pointer_x, event.pointer_y);
-                    input.mouse_in_window = true;
-                }
-                EVENT_MOUSE_UP => {
-                    retain_without(&mut input.mouse_down, event.a);
-                    push_unique(&mut input.mouse_released, event.a);
-                    input.mouse_pos = (event.pointer_x, event.pointer_y);
-                    input.mouse_in_window = true;
-                }
-                EVENT_MOUSE_MOVE => {
-                    input.mouse_pos = (event.a, event.b);
-                    input.mouse_in_window = true;
-                }
-                EVENT_MOUSE_WHEEL => {
-                    input.mouse_wheel_y += event.a;
-                    if event.pointer_x != 0 || event.pointer_y != 0 {
-                        input.mouse_pos = (event.pointer_x, event.pointer_y);
-                    }
-                    input.mouse_in_window = true;
-                }
-                EVENT_MOUSE_ENTERED => {
-                    input.mouse_in_window = true;
-                }
-                EVENT_MOUSE_LEFT => {
-                    input.mouse_in_window = false;
-                }
-                EVENT_RAW_MOUSE_BUTTON => {
-                    if event.b != 0 {
-                        push_unique(&mut input.mouse_down, event.a);
-                        push_unique(&mut input.mouse_pressed, event.a);
-                    } else {
-                        retain_without(&mut input.mouse_down, event.a);
-                        push_unique(&mut input.mouse_released, event.a);
-                    }
-                }
-                EVENT_RAW_MOUSE_WHEEL => {
-                    input.mouse_wheel_y += event.b;
-                }
-                EVENT_RAW_KEY => {
-                    if event.b != 0 {
-                        push_unique(&mut input.key_down, event.key_code);
-                        push_unique(&mut input.key_pressed, event.key_code);
-                    } else {
-                        retain_without(&mut input.key_down, event.key_code);
-                        push_unique(&mut input.key_released, event.key_code);
-                    }
-                }
-                _ => {}
-            }
-        }
-        input
-    }
-
-    pub(crate) fn named_key_code(name: &str) -> i64 {
-        match name {
-            "Backspace" | "backspace" => 8,
-            "Tab" | "tab" => 9,
-            "Enter" | "enter" => 13,
-            "Shift" | "shift" => 16,
-            "ShiftLeft" | "shiftleft" | "LShift" | "lshift" => 160,
-            "ShiftRight" | "shiftright" | "RShift" | "rshift" => 161,
-            "Control" | "control" | "Ctrl" | "ctrl" => 17,
-            "ControlLeft" | "controlleft" | "CtrlLeft" | "ctrlleft" | "LControl" | "lcontrol"
-            | "LCtrl" | "lctrl" => 162,
-            "ControlRight" | "controlright" | "CtrlRight" | "ctrlright" | "RControl"
-            | "rcontrol" | "RCtrl" | "rctrl" => 163,
-            "Alt" | "alt" => 18,
-            "AltLeft" | "altleft" | "LAlt" | "lalt" => 164,
-            "AltRight" | "altright" | "RAlt" | "ralt" => 165,
-            "Pause" | "pause" => 19,
-            "CapsLock" | "capslock" => 20,
-            "Escape" | "escape" => 27,
-            "Space" | "space" => 32,
-            "PageUp" | "pageup" => 33,
-            "PageDown" | "pagedown" => 34,
-            "End" | "end" => 35,
-            "Home" | "home" => 36,
-            "Left" | "left" => 37,
-            "Up" | "up" => 38,
-            "Right" | "right" => 39,
-            "Down" | "down" => 40,
-            "Insert" | "insert" => 45,
-            "Delete" | "delete" => 46,
-            "Meta" | "meta" | "Super" | "super" | "Command" | "command" => 91,
-            "MetaLeft" | "metaleft" | "SuperLeft" | "superleft" | "CommandLeft"
-            | "commandleft" => 91,
-            "MetaRight" | "metaright" | "SuperRight" | "superright" | "CommandRight"
-            | "commandright" => 92,
-            "Select" | "select" => 93,
-            "NumLock" | "numlock" => 144,
-            "ScrollLock" | "scrolllock" => 145,
-            "Numpad0" | "numpad0" => 96,
-            "Numpad1" | "numpad1" => 97,
-            "Numpad2" | "numpad2" => 98,
-            "Numpad3" | "numpad3" => 99,
-            "Numpad4" | "numpad4" => 100,
-            "Numpad5" | "numpad5" => 101,
-            "Numpad6" | "numpad6" => 102,
-            "Numpad7" | "numpad7" => 103,
-            "Numpad8" | "numpad8" => 104,
-            "Numpad9" | "numpad9" => 105,
-            "NumpadMultiply" | "numpadmultiply" => 106,
-            "NumpadAdd" | "numpadadd" => 107,
-            "NumpadSubtract" | "numpadsubtract" => 109,
-            "NumpadDecimal" | "numpaddecimal" => 110,
-            "NumpadDivide" | "numpaddivide" => 111,
-            "F1" | "f1" => 112,
-            "F2" | "f2" => 113,
-            "F3" | "f3" => 114,
-            "F4" | "f4" => 115,
-            "F5" | "f5" => 116,
-            "F6" | "f6" => 117,
-            "F7" | "f7" => 118,
-            "F8" | "f8" => 119,
-            "F9" | "f9" => 120,
-            "F10" | "f10" => 121,
-            "F11" | "f11" => 122,
-            "F12" | "f12" => 123,
-            "Semicolon" | "semicolon" => 186,
-            "Equal" | "equal" | "Equals" | "equals" => 187,
-            "Comma" | "comma" => 188,
-            "Minus" | "minus" => 189,
-            "Period" | "period" => 190,
-            "Slash" | "slash" => 191,
-            "Backquote" | "backquote" | "Grave" | "grave" => 192,
-            "BracketLeft" | "bracketleft" => 219,
-            "Backslash" | "backslash" => 220,
-            "BracketRight" | "bracketright" => 221,
-            "Quote" | "quote" | "Apostrophe" | "apostrophe" => 222,
-            _ if name.len() == 1 => name.chars().next().unwrap().to_ascii_uppercase() as i64,
-            _ => -1,
-        }
-    }
-
-    pub(crate) fn named_mouse_button_code(name: &str) -> i64 {
-        match name {
-            "Left" | "left" => 1,
-            "Right" | "right" => 2,
-            "Middle" | "middle" => 3,
-            "Back" | "back" | "X1" | "x1" => 4,
-            "Forward" | "forward" | "X2" | "x2" => 5,
-            _ => -1,
-        }
     }
 
     pub(crate) fn register_desktop_window_class() -> Result<(), String> {
@@ -1400,41 +1117,6 @@ shackle flags WinapiDesktopInternals:
         Ok(0)
     }
 
-    pub(crate) fn create_frame(
-        instance: &mut crate::BindingInstance,
-        events: std::collections::VecDeque<PendingDesktopEvent>,
-    ) -> u64 {
-        let state = desktop_state_mut(instance).expect("desktop state must exist");
-        let handle = state.next_frame_handle;
-        state.next_frame_handle += 1;
-        let input = frame_input_from_events(&events);
-        state.frames.insert(
-            handle,
-            WinapiFrameState {
-                events,
-                input,
-                last_polled: None,
-            },
-        );
-        handle
-    }
-
-    pub(crate) fn drain_window_events(
-        instance: &mut crate::BindingInstance,
-        handle: u64,
-    ) -> Result<std::collections::VecDeque<PendingDesktopEvent>, String> {
-        let window = window_mut(instance, handle)?;
-        Ok(std::mem::take(&mut window.events))
-    }
-
-    pub(crate) fn collect_window_events(
-        instance: &mut crate::BindingInstance,
-        handle: u64,
-    ) -> Result<std::collections::VecDeque<PendingDesktopEvent>, String> {
-        process_pending_messages();
-        drain_window_events(instance, handle)
-    }
-
     pub(crate) fn wait_for_wake_or_messages(
         instance: &mut crate::BindingInstance,
         handle: u64,
@@ -1512,31 +1194,20 @@ shackle flags WinapiDesktopInternals:
                     window.resized = true;
                     window.minimized = wparam as usize == 1;
                     window.maximized = wparam as usize == 2;
-                    window.events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_RESIZED, window.width, window.height)?);
                 }
                 WM_MOVE_NATIVE => {
                     let x = (lparam as u32 & 0xFFFF) as u16 as i16 as i64;
                     let y = ((lparam as u32 >> 16) & 0xFFFF) as u16 as i16 as i64;
                     let window = window_mut_from_state(desktop_state_handle, handle)?;
                     window.position = (x, y);
-                    window
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_MOVED, x, y)?);
                 }
                 WM_SETFOCUS_NATIVE => {
                     let window = window_mut_from_state(desktop_state_handle, handle)?;
                     window.focused = true;
-                    window
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_FOCUSED, 1, 0)?);
                 }
                 WM_KILLFOCUS_NATIVE => {
                     let window = window_mut_from_state(desktop_state_handle, handle)?;
                     window.focused = false;
-                    window
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_FOCUSED, 0, 0)?);
                 }
                 WM_GETMINMAXINFO_NATIVE => {
                     let info = lparam as *mut crate::raw::types::MINMAXINFO;
@@ -1584,13 +1255,7 @@ shackle flags WinapiDesktopInternals:
                     return Ok(());
                 }
                 WM_CHAR_NATIVE => {
-                    if let Some(ch) = char::from_u32(wparam as u32) {
-                        let mut event = make_window_event(handle, EVENT_TEXT_INPUT, 0, 0)?;
-                        event.text = ch.to_string();
-                        window_mut_from_state(desktop_state_handle, handle)?
-                            .events
-                            .push_back(event);
-                    }
+                    let _ = char::from_u32(wparam as u32);
                 }
                 WM_DROPFILES_NATIVE => {
                     let drop = wparam as crate::raw::types::HDROP;
@@ -1620,12 +1285,7 @@ shackle flags WinapiDesktopInternals:
                                 len + 1,
                             );
                         }
-                        let text = String::from_utf16_lossy(&units[..len as usize]);
-                        let mut event = make_window_event(handle, EVENT_FILE_DROPPED, 0, 0)?;
-                        event.text = text;
-                        window_mut_from_state(desktop_state_handle, handle)?
-                            .events
-                            .push_back(event);
+                        let _ = String::from_utf16_lossy(&units[..len as usize]);
                     }
                     unsafe {
                         crate::raw::shell32::DragFinish(drop);
@@ -1635,42 +1295,26 @@ shackle flags WinapiDesktopInternals:
                 WM_IME_STARTCOMPOSITION_NATIVE => {
                     let window = window_mut_from_state(desktop_state_handle, handle)?;
                     window.ime_composing = true;
-                    window.events
-                        .push_back(make_window_event(handle, EVENT_TEXT_COMPOSITION_STARTED, 0, 0)?);
                     return Ok(());
                 }
                 WM_IME_COMPOSITION_NATIVE => {
                     let flags = lparam as usize as u32;
                     if flags & GCS_COMPSTR_NATIVE != 0 {
-                        let text = ime_string(hwnd, GCS_COMPSTR_NATIVE)?;
-                        let caret = ime_cursor(hwnd);
+                        let _ = ime_string(hwnd, GCS_COMPSTR_NATIVE)?;
+                        let _ = ime_cursor(hwnd);
                         let window = window_mut_from_state(desktop_state_handle, handle)?;
                         window.ime_composing = true;
-                        let mut event = make_window_event(handle, EVENT_TEXT_COMPOSITION_UPDATED, caret, 0)?;
-                        event.text = text;
-                        window.events.push_back(event);
                     }
                     if flags & GCS_RESULTSTR_NATIVE != 0 {
-                        let text = ime_string(hwnd, GCS_RESULTSTR_NATIVE)?;
-                        let caret = ime_cursor(hwnd);
+                        let _ = ime_string(hwnd, GCS_RESULTSTR_NATIVE)?;
+                        let _ = ime_cursor(hwnd);
                         let window = window_mut_from_state(desktop_state_handle, handle)?;
                         window.ime_composing = false;
-                        let mut event = make_window_event(handle, EVENT_TEXT_COMPOSITION_COMMITTED, caret, 0)?;
-                        event.text = text;
-                        window.events.push_back(event);
                     }
                     return Ok(());
                 }
                 WM_IME_ENDCOMPOSITION_NATIVE => {
                     let window = window_mut_from_state(desktop_state_handle, handle)?;
-                    if window.ime_composing {
-                        window.events.push_back(make_window_event(
-                            handle,
-                            EVENT_TEXT_COMPOSITION_CANCELLED,
-                            0,
-                            0,
-                        )?);
-                    }
                     window.ime_composing = false;
                     return Ok(());
                 }
@@ -1680,9 +1324,6 @@ shackle flags WinapiDesktopInternals:
                         let _ = BeginPaint(hwnd, &mut paint);
                         let _ = EndPaint(hwnd, &paint);
                     }
-                    window_mut_from_state(desktop_state_handle, handle)?
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_REDRAW_REQUESTED, 0, 0)?);
                     return Ok(());
                 }
                 WM_SETCURSOR_NATIVE => {
@@ -1692,15 +1333,9 @@ shackle flags WinapiDesktopInternals:
                 }
                 WM_THEMECHANGED_NATIVE => {
                     let window = window_ref_from_state(desktop_state_handle, handle)?;
-                    let theme_code = window_theme_code(window.hwnd, window.theme_override_code);
-                    window_mut_from_state(desktop_state_handle, handle)?
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_THEME_CHANGED, theme_code, 0)?);
+                    let _ = window_theme_code(window.hwnd, window.theme_override_code);
                 }
                 crate::raw::constants::WM_CLOSE => {
-                    window_mut_from_state(desktop_state_handle, handle)?
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_CLOSE_REQUESTED, 0, 0)?);
                     return Ok(());
                 }
                 WM_DESTROY_NATIVE | WM_NCDESTROY_NATIVE => {
@@ -1726,11 +1361,7 @@ shackle flags WinapiDesktopInternals:
                     }
                 }
                 WM_DPICHANGED_NATIVE => {
-                    let dpi = unsafe { crate::raw::user32::GetDpiForWindow(hwnd) };
-                    let scale = if dpi == 0 { 1000 } else { i64::from(dpi) * 1000 / 96 };
-                    window_mut_from_state(desktop_state_handle, handle)?
-                        .events
-                        .push_back(make_window_event(handle, EVENT_WINDOW_SCALE_FACTOR_CHANGED, scale, 0)?);
+                    let _ = unsafe { crate::raw::user32::GetDpiForWindow(hwnd) };
                 }
                 _ => {}
             }
@@ -1847,7 +1478,6 @@ shackle fn window_open_impl(read title: Str, read width: Int, read height: Int) 
             fullscreen_restore_size: ((rect.right - rect.left) as i64, (rect.bottom - rect.top) as i64),
             fullscreen_restore_maximized: false,
             closed: false,
-            events: std::collections::VecDeque::new(),
         },
     );
     unsafe {
@@ -2482,63 +2112,8 @@ shackle fn window_close_impl(take win: arcana_winapi.desktop_handles.Window) -> 
     desktop_state_mut(instance)?.windows.remove(&win);
     Ok(binding_bool(true))
 
-shackle fn events_pump_impl(edit win: arcana_winapi.desktop_handles.Window) -> arcana_winapi.desktop_handles.FrameInput = helpers.events.pump:
-    let events = collect_window_events(instance, win)?;
-    Ok(binding_opaque(create_frame(instance, events)))
-
-shackle fn events_poll_kind_impl(edit frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_kind:
-    let state = frame_mut(instance, frame)?;
-    let next = state.events.pop_front();
-    let kind = next.as_ref().map(|event| event.kind).unwrap_or(0);
-    state.last_polled = next;
-    let should_remove = kind == 0;
-    let _ = state;
-    if should_remove {
-        let _ = desktop_state_mut(instance)?.frames.remove(&frame);
-    }
-    Ok(binding_int(kind))
-
-shackle fn events_poll_window_id_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_window_id:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.window_id).unwrap_or(0)))
-
-shackle fn events_poll_a_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_a:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.a).unwrap_or(0)))
-
-shackle fn events_poll_b_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_b:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.b).unwrap_or(0)))
-
-shackle fn events_poll_flags_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_flags:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.flags).unwrap_or(0)))
-
-shackle fn events_poll_text_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Str = helpers.events.poll_text:
-    Ok(binding_owned_str(frame_ref(instance, frame)?
-        .last_polled
-        .as_ref()
-        .map(|event| event.text.clone())
-        .unwrap_or_default()))
-
-shackle fn events_poll_key_code_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_key_code:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.key_code).unwrap_or(0)))
-
-shackle fn events_poll_physical_key_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_physical_key:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.physical_key).unwrap_or(0)))
-
-shackle fn events_poll_logical_key_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_logical_key:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.logical_key).unwrap_or(0)))
-
-shackle fn events_poll_key_location_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_key_location:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.key_location).unwrap_or(0)))
-
-shackle fn events_poll_pointer_x_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_pointer_x:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.pointer_x).unwrap_or(0)))
-
-shackle fn events_poll_pointer_y_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.events.poll_pointer_y:
-    Ok(binding_int(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.pointer_y).unwrap_or(0)))
-
-shackle fn events_poll_repeated_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Bool = helpers.events.poll_repeated:
-    Ok(binding_bool(frame_ref(instance, frame)?.last_polled.as_ref().map(|event| event.repeated).unwrap_or(false)))
-
-shackle fn events_wake_create_impl() -> arcana_winapi.desktop_handles.WakeHandle = helpers.events.wake_create:
+shackle fn message_wake_create_impl() -> arcana_winapi.desktop_handles.WakeHandle = backend.message.wake_create:
+    crate::shackle::clear_helper_error(instance);
     let event = unsafe {
         crate::raw::kernel32::CreateEventW(
             std::ptr::null_mut(),
@@ -2548,30 +2123,53 @@ shackle fn events_wake_create_impl() -> arcana_winapi.desktop_handles.WakeHandle
         )
     };
     if event.is_null() {
-        return Err(format!(
-            "CreateEventW failed with Win32 error {}",
-            unsafe { crate::raw::kernel32::GetLastError() }
-        ));
+        crate::shackle::set_helper_error(
+            instance,
+            format!(
+                "CreateEventW failed with Win32 error {}",
+                unsafe { crate::raw::kernel32::GetLastError() }
+            ),
+        );
+        return Ok(binding_opaque(0));
     }
-    let state = desktop_state_mut(instance)?;
+    let state = match desktop_state_mut(instance) {
+        Ok(state) => state,
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            unsafe {
+                let _ = crate::raw::kernel32::CloseHandle(event);
+            }
+            return Ok(binding_opaque(0));
+        }
+    };
     let handle = state.next_wake_handle;
     state.next_wake_handle += 1;
     state.wakes.insert(handle, WinapiWakeState { event, pending: 0 });
     Ok(binding_opaque(handle))
 
-shackle fn events_wake_close_impl(edit handle: arcana_winapi.desktop_handles.WakeHandle) = helpers.events.wake_close:
-    let wake = desktop_state_mut(instance)?
-        .wakes
-        .remove(&handle)
-        .ok_or_else(|| format!("invalid WakeHandle `{handle}`"))?;
-    if !wake.event.is_null() {
-        unsafe {
-            let _ = crate::raw::kernel32::CloseHandle(wake.event);
+shackle fn message_wake_close_impl(take handle: arcana_winapi.desktop_handles.WakeHandle) -> Bool = backend.message.wake_close:
+    crate::shackle::clear_helper_error(instance);
+    let event = match wake_ref(instance, handle) {
+        Ok(wake) => wake.event,
+        Err(err) => {
+            crate::shackle::set_helper_error(instance, err);
+            return Ok(binding_bool(false));
         }
+    };
+    if !event.is_null() && unsafe { crate::raw::kernel32::CloseHandle(event) } == 0 {
+        crate::shackle::set_helper_error(
+            instance,
+            format!(
+                "CloseHandle failed with Win32 error {}",
+                unsafe { crate::raw::kernel32::GetLastError() }
+            ),
+        );
+        return Ok(binding_bool(false));
     }
-    Ok(binding_unit())
+    let _ = desktop_state_mut(instance)?.wakes.remove(&handle);
+    Ok(binding_bool(true))
 
-shackle fn events_wake_signal_impl(read handle: arcana_winapi.desktop_handles.WakeHandle) = helpers.events.wake_signal:
+shackle fn message_wake_signal_impl(read handle: arcana_winapi.desktop_handles.WakeHandle) = backend.message.wake_signal:
     let wake_state = wake_ref(instance, handle)?;
     let event = wake_state.event;
     wake_mut(instance, handle)?.pending += 1;
@@ -2583,7 +2181,7 @@ shackle fn events_wake_signal_impl(read handle: arcana_winapi.desktop_handles.Wa
     }
     Ok(binding_unit())
 
-shackle fn events_wake_take_pending_impl(edit handle: arcana_winapi.desktop_handles.WakeHandle) -> Int = helpers.events.wake_take_pending:
+shackle fn message_wake_take_pending_impl(edit handle: arcana_winapi.desktop_handles.WakeHandle) -> Int = backend.message.wake_take_pending:
     let wake = wake_mut(instance, handle)?;
     let pending = wake.pending;
     wake.pending = 0;
@@ -2598,44 +2196,8 @@ shackle fn events_wake_take_pending_impl(edit handle: arcana_winapi.desktop_hand
             .map_err(|_| format!("wake pending count `{pending}` does not fit in Int"))?
     ))
 
-shackle fn events_wait_wake_or_messages_impl(read handle: arcana_winapi.desktop_handles.WakeHandle, read timeout_ms: Int) -> Bool = helpers.events.wait_wake_or_messages:
+shackle fn message_wait_wake_or_messages_impl(read handle: arcana_winapi.desktop_handles.WakeHandle, read timeout_ms: Int) -> Bool = backend.message.wait_wake_or_messages:
     Ok(binding_bool(wait_for_wake_or_messages(instance, handle, timeout_ms)?))
-
-shackle fn input_key_code_impl(read name: Str) -> Int = helpers.input.input_key_code:
-    Ok(binding_int(named_key_code(&name)))
-
-shackle fn input_key_down_impl(read frame: arcana_winapi.desktop_handles.FrameInput, read key: Int) -> Bool = helpers.input.input_key_down:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.key_down.contains(&key)))
-
-shackle fn input_key_pressed_impl(read frame: arcana_winapi.desktop_handles.FrameInput, read key: Int) -> Bool = helpers.input.input_key_pressed:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.key_pressed.contains(&key)))
-
-shackle fn input_key_released_impl(read frame: arcana_winapi.desktop_handles.FrameInput, read key: Int) -> Bool = helpers.input.input_key_released:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.key_released.contains(&key)))
-
-shackle fn input_mouse_button_code_impl(read name: Str) -> Int = helpers.input.input_mouse_button_code:
-    Ok(binding_int(named_mouse_button_code(&name)))
-
-shackle fn input_mouse_x_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.input.input_mouse_x:
-    Ok(binding_int(frame_ref(instance, frame)?.input.mouse_pos.0))
-
-shackle fn input_mouse_y_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.input.input_mouse_y:
-    Ok(binding_int(frame_ref(instance, frame)?.input.mouse_pos.1))
-
-shackle fn input_mouse_down_impl(read frame: arcana_winapi.desktop_handles.FrameInput, read button: Int) -> Bool = helpers.input.input_mouse_down:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.mouse_down.contains(&button)))
-
-shackle fn input_mouse_pressed_impl(read frame: arcana_winapi.desktop_handles.FrameInput, read button: Int) -> Bool = helpers.input.input_mouse_pressed:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.mouse_pressed.contains(&button)))
-
-shackle fn input_mouse_released_impl(read frame: arcana_winapi.desktop_handles.FrameInput, read button: Int) -> Bool = helpers.input.input_mouse_released:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.mouse_released.contains(&button)))
-
-shackle fn input_mouse_wheel_y_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Int = helpers.input.input_mouse_wheel_y:
-    Ok(binding_int(frame_ref(instance, frame)?.input.mouse_wheel_y))
-
-shackle fn input_mouse_in_window_impl(read frame: arcana_winapi.desktop_handles.FrameInput) -> Bool = helpers.input.input_mouse_in_window:
-    Ok(binding_bool(frame_ref(instance, frame)?.input.mouse_in_window))
 
 shackle fn text_input_enabled_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.text_input.window_text_input_enabled:
     Ok(binding_bool(window_ref(instance, win)?.text_input_enabled))

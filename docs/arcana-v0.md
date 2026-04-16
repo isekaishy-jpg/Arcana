@@ -821,7 +821,7 @@ Arcana now has source-level opaque type declarations for trusted std-owned runti
 - v1 restriction:
   - opaque type declarations are currently allowed in package `std` and in packages that own an approved `binding` native product
 
-Current binding-owned opaque handle families such as `Window`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `FrameInput` now live as source-declared opaque types rather than Rust-only reserved builtin names.
+Current binding-owned opaque handle families such as `Window`, `WakeHandle`, `FileStream`, `AudioDevice`, `AudioBuffer`, and `AudioPlayback` now live as source-declared opaque types rather than Rust-only reserved builtin names.
 Binding-owning libraries such as `arcana_winapi` may also expose source-declared opaque handle types such as module handles, font catalogs, and hidden windows.
 
 ## Native Bindings (v0.18)

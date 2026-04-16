@@ -9,7 +9,6 @@ This scope extracts the current rewrite-era contract for typed opaque handles an
 - Source-declared opaque handle families remain part of the active Arcana surface.
 - Current approved families include:
   - `arcana_winapi.desktop_handles.Window`
-  - `arcana_winapi.desktop_handles.FrameInput`
   - `arcana_winapi.desktop_handles.WakeHandle`
   - `arcana_winapi.graphics_handles.GdiWindowSurface`
   - `arcana_winapi.process_handles.FileStream`

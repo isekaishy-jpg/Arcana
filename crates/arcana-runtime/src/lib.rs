@@ -8362,16 +8362,16 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../grimoires/arcana/process/src/process.arc"),
     ),
     (
+        "arcana_winapi.backend.message",
+        include_str!("../../../grimoires/arcana/winapi/src/backend/message.arc"),
+    ),
+    (
         "arcana_winapi.helpers.window",
         include_str!("../../../grimoires/arcana/winapi/src/helpers/window.arc"),
     ),
     (
-        "arcana_winapi.helpers.input",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/input.arc"),
-    ),
-    (
-        "arcana_winapi.helpers.events",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/events.arc"),
+        "arcana_winapi.helpers.message",
+        include_str!("../../../grimoires/arcana/winapi/src/helpers/message.arc"),
     ),
     (
         "arcana_winapi.helpers.clipboard",
@@ -9469,12 +9469,7 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         RuntimeValue::Pair(left, right) => {
             runtime_value_is_copy(left) && runtime_value_is_copy(right)
         }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => {
-            matches!(
-                binding.type_name,
-                "arcana_winapi.types.WakeHandle" | "arcana_winapi.desktop_handles.WakeHandle"
-            )
-        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(_)) => false,
         RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(_))
