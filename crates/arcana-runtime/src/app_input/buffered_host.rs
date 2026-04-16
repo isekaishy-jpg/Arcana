@@ -1,12 +1,6 @@
 use super::*;
 
-#[derive(Debug)]
-pub(crate) struct BufferedHostStream {
-    path: String,
-    file: fs::File,
-    readable: bool,
-    writable: bool,
-}
+pub(crate) type BufferedHostStream = HostCoreStreamState;
 
 #[derive(Debug, Default)]
 pub struct BufferedHost {
@@ -44,104 +38,33 @@ impl BufferedHost {
         })
     }
 
-    fn current_working_dir(&self) -> Result<PathBuf, String> {
-        if !self.cwd.is_empty() {
-            return Ok(normalize_lexical_path(Path::new(&self.cwd)));
-        }
-        std::env::current_dir()
-            .map(|path| normalize_lexical_path(&path))
-            .map_err(|err| format!("failed to resolve current directory: {err}"))
-    }
-
-    fn sandbox_root_path(&self) -> Result<Option<PathBuf>, String> {
-        if self.sandbox_root.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(normalize_lexical_path(Path::new(&self.sandbox_root))))
-    }
-
-    fn sandbox_checked_real_path(&self, path: &Path) -> Result<PathBuf, String> {
-        let mut current = Some(path);
-        while let Some(candidate) = current {
-            if candidate.exists() {
-                let real = fs::canonicalize(candidate).map_err(|err| {
-                    format!(
-                        "failed to canonicalize `{}`: {err}",
-                        runtime_path_string(candidate)
-                    )
-                })?;
-                let suffix = path.strip_prefix(candidate).map_err(|_| {
-                    format!(
-                        "failed to make `{}` relative to checked ancestor `{}`",
-                        runtime_path_string(path),
-                        runtime_path_string(candidate)
-                    )
-                })?;
-                return Ok(normalize_lexical_path(&real.join(suffix)));
-            }
-            current = candidate.parent();
-        }
-        Ok(normalize_lexical_path(path))
+    fn fs_policy(&self) -> Result<HostCoreFsPolicy, String> {
+        let cwd = if !self.cwd.is_empty() {
+            normalize_lexical_path(Path::new(&self.cwd))
+        } else {
+            std::env::current_dir()
+                .map(|path| normalize_lexical_path(&path))
+                .map_err(|err| format!("failed to resolve current directory: {err}"))?
+        };
+        let sandbox_root = (!self.sandbox_root.is_empty())
+            .then(|| normalize_lexical_path(Path::new(&self.sandbox_root)));
+        Ok(HostCoreFsPolicy::new(cwd, sandbox_root))
     }
 
     pub fn resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
-        let requested = PathBuf::from(path);
-        let candidate = if requested.is_absolute() {
-            normalize_lexical_path(&requested)
-        } else {
-            normalize_lexical_path(&self.current_working_dir()?.join(requested))
-        };
-        if let Some(root) = self.sandbox_root_path()? {
-            if !candidate.starts_with(&root) {
-                return Err(format!(
-                    "path `{}` escapes sandbox root `{}`",
-                    runtime_path_string(&candidate),
-                    runtime_path_string(&root)
-                ));
-            }
-            let real_root = self.sandbox_checked_real_path(&root)?;
-            let real_candidate = self.sandbox_checked_real_path(&candidate)?;
-            if !real_candidate.starts_with(&real_root) {
-                return Err(format!(
-                    "path `{}` escapes sandbox root `{}` via real path `{}`",
-                    runtime_path_string(&candidate),
-                    runtime_path_string(&root),
-                    runtime_path_string(&real_candidate)
-                ));
-            }
-        }
-        Ok(candidate)
+        self.fs_policy()?.resolve_fs_path(path)
     }
 
     pub(crate) fn path_canonicalize(&self, path: &str) -> Result<String, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        Ok(runtime_path_string(
-            &self.sandbox_checked_real_path(&resolved)?,
-        ))
+        self.fs_policy()?.path_canonicalize(path)
     }
 
     pub(crate) fn fs_read_text(&self, path: &str) -> Result<String, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        fs::read_to_string(&resolved)
-            .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
+        self.fs_policy()?.read_text(path)
     }
 
     pub(crate) fn fs_write_text(&self, path: &str, text: &str) -> Result<(), String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "failed to create parent directories for `{}`: {err}",
-                    runtime_path_string(&resolved)
-                )
-            })?;
-        }
-        fs::write(&resolved, text).map_err(|err| {
-            format!(
-                "failed to write `{}`: {err}",
-                runtime_path_string(&resolved)
-            )
-        })
+        self.fs_policy()?.write_text(path, text)
     }
 
     fn next_stream_handle(&mut self) -> u64 {
@@ -232,7 +155,7 @@ impl RuntimeCoreHost for BufferedHost {
     }
 
     fn runtime_current_working_dir(&self) -> Result<PathBuf, String> {
-        self.current_working_dir()
+        Ok(self.fs_policy()?.current_working_dir())
     }
 
     fn runtime_resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
@@ -243,113 +166,38 @@ impl RuntimeCoreHost for BufferedHost {
         self.path_canonicalize(path)
     }
 
+    fn runtime_fs_read_text(&self, path: &str) -> Result<String, String> {
+        self.fs_read_text(path)
+    }
+
+    fn runtime_fs_write_text(&self, path: &str, text: &str) -> Result<(), String> {
+        self.fs_write_text(path, text)
+    }
+
     fn runtime_fs_stream_open_read(&mut self, path: &str) -> Result<u64, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        let file = fs::File::open(&resolved).map_err(|err| {
-            format!(
-                "failed to open `{}` for reading: {err}",
-                runtime_path_string(&resolved)
-            )
-        })?;
         let handle = self.next_stream_handle();
-        self.streams.insert(
-            handle,
-            BufferedHostStream {
-                path: runtime_path_string(&resolved),
-                file,
-                readable: true,
-                writable: false,
-            },
-        );
+        let stream = BufferedHostStream::open_read(&self.fs_policy()?, path)?;
+        self.streams.insert(handle, stream);
         Ok(handle)
     }
 
     fn runtime_fs_stream_open_write(&mut self, path: &str, append: bool) -> Result<u64, String> {
-        let resolved = self.resolve_fs_path(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-            })?;
-        }
-        let mut options = fs::OpenOptions::new();
-        options.create(true).write(true);
-        if append {
-            options.append(true);
-        } else {
-            options.truncate(true);
-        }
-        let file = options.open(&resolved).map_err(|err| {
-            format!(
-                "failed to open `{}` for writing: {err}",
-                runtime_path_string(&resolved)
-            )
-        })?;
         let handle = self.next_stream_handle();
-        self.streams.insert(
-            handle,
-            BufferedHostStream {
-                path: runtime_path_string(&resolved),
-                file,
-                readable: false,
-                writable: true,
-            },
-        );
+        let stream = BufferedHostStream::open_write(&self.fs_policy()?, path, append)?;
+        self.streams.insert(handle, stream);
         Ok(handle)
     }
 
     fn runtime_fs_stream_read(&mut self, handle: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
-        let stream = self.stream_mut(handle)?;
-        if !stream.readable {
-            return Err(format!(
-                "FileStream `{}` is not opened for reading",
-                stream.path
-            ));
-        }
-        use std::io::Read;
-        let mut buffer = vec![0u8; max_bytes];
-        let read = stream
-            .file
-            .read(&mut buffer)
-            .map_err(|err| format!("failed to read from FileStream `{}`: {err}", stream.path))?;
-        buffer.truncate(read);
-        Ok(buffer)
+        self.stream_mut(handle)?.read(max_bytes)
     }
 
     fn runtime_fs_stream_write(&mut self, handle: u64, bytes: &[u8]) -> Result<usize, String> {
-        let stream = self.stream_mut(handle)?;
-        if !stream.writable {
-            return Err(format!(
-                "FileStream `{}` is not opened for writing",
-                stream.path
-            ));
-        }
-        use std::io::Write;
-        stream
-            .file
-            .write_all(bytes)
-            .map_err(|err| format!("failed to write to FileStream `{}`: {err}", stream.path))?;
-        Ok(bytes.len())
+        self.stream_mut(handle)?.write(bytes)
     }
 
     fn runtime_fs_stream_eof(&mut self, handle: u64) -> Result<bool, String> {
-        let stream = self.stream_mut(handle)?;
-        if !stream.readable {
-            return Err(format!(
-                "FileStream `{}` is not opened for reading",
-                stream.path
-            ));
-        }
-        use std::io::Seek;
-        let cursor = stream
-            .file
-            .stream_position()
-            .map_err(|err| format!("failed to inspect FileStream `{}`: {err}", stream.path))?;
-        let len = stream
-            .file
-            .metadata()
-            .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
-            .len();
-        Ok(cursor >= len)
+        self.stream_mut(handle)?.eof()
     }
 
     fn runtime_fs_stream_close(&mut self, handle: u64) -> Result<(), String> {
@@ -357,5 +205,23 @@ impl RuntimeCoreHost for BufferedHost {
             .remove(&handle)
             .map(|_| ())
             .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
+    }
+
+    fn runtime_process_exec_status(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> Result<i64, String> {
+        self.fs_policy()?
+            .execute_process_status(self.allow_process, program, args)
+    }
+
+    fn runtime_process_exec_capture(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> Result<RuntimeProcessCapture, String> {
+        self.fs_policy()?
+            .execute_process_capture(self.allow_process, program, args)
     }
 }

@@ -8888,9 +8888,17 @@ fn execute_main_runs_linked_std_process_routines() {
         "name = \"runtime_std_process\"\nkind = \"app\"\n",
     );
     let (program, status_a, status_b, capture_a, capture_b) = if cfg!(windows) {
-        ("cmd", "/C", "exit 7", "/C", "echo hello")
+        (
+            std::env::var("ComSpec")
+                .unwrap_or_else(|_| "C:/Windows/System32/cmd.exe".to_string())
+                .replace('\\', "/"),
+            "/C",
+            "exit 7",
+            "/C",
+            "echo hello",
+        )
     } else {
-        ("sh", "-c", "exit 7", "-c", "printf hello")
+        ("/bin/sh".to_string(), "-c", "exit 7", "-c", "printf hello")
     };
     write_file(
         &dir.join("src").join("shelf.arc"),

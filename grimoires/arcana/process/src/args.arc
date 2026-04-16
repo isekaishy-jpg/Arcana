@@ -1,7 +1,6 @@
-import arcana_winapi.helpers.process
-
+// `arcana_process.args` is runtime-owned host-core surface.
 export fn count() -> Int:
-    return arcana_winapi.helpers.process.arg_count :: :: call
+    return arcana_process.args.count :: :: call
 
 export fn get(index: Int) -> Str:
-    return arcana_winapi.helpers.process.arg_get :: index :: call
+    return arcana_process.args.get :: index :: call

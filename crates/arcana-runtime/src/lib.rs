@@ -64,6 +64,7 @@ mod app_input;
 mod binding_transport;
 mod core_intrinsics;
 mod evaluator;
+mod host_core_policy;
 mod intrinsic_resolution;
 mod json_abi;
 mod native_abi;
@@ -84,6 +85,7 @@ use binding_transport::*;
 use core_intrinsics::*;
 use evaluator::*;
 pub use evaluator::{execute_entrypoint_routine, execute_main};
+pub(crate) use host_core_policy::{HostCoreFsPolicy, HostCoreStreamState};
 use intrinsic_resolution::*;
 pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
@@ -102,6 +104,7 @@ pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
 use process_runtime_host::ProcessRuntimeHost;
+pub use process_runtime_host::ProcessRuntimeHostConfig;
 pub use routine_plan::{
     RuntimeEntrypointPlan, RuntimeNativeCallbackPlan, RuntimeParamPlan, RuntimeRoutinePlan,
 };
@@ -122,7 +125,13 @@ thread_local! {
 }
 
 pub fn current_process_core_host() -> Result<Box<dyn RuntimeCoreHost>, String> {
-    Ok(Box::new(ProcessRuntimeHost::current_process()))
+    current_process_core_host_with_config(ProcessRuntimeHostConfig::from_current_process()?)
+}
+
+pub fn current_process_core_host_with_config(
+    config: ProcessRuntimeHostConfig,
+) -> Result<Box<dyn RuntimeCoreHost>, String> {
+    Ok(Box::new(ProcessRuntimeHost::from_config(config)))
 }
 
 pub fn execute_current_bundle_entrypoint(
@@ -905,7 +914,7 @@ pub trait RuntimeCoreHost {
         Err("runtime core host sleep_ms is not implemented".to_string())
     }
     fn allows_process_execution(&self) -> bool {
-        true
+        false
     }
     fn runtime_arg_count(&self) -> Result<i64, String> {
         Ok(std::env::args().skip(1).count() as i64)
@@ -931,18 +940,189 @@ pub trait RuntimeCoreHost {
             .map_err(|err| format!("failed to resolve current directory: {err}"))
     }
     fn runtime_resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
-        let requested = PathBuf::from(path);
-        Ok(if requested.is_absolute() {
-            normalize_lexical_path(&requested)
-        } else {
-            normalize_lexical_path(&self.runtime_current_working_dir()?.join(requested))
-        })
+        let _ = path;
+        Err("runtime core host fs path resolution is not implemented".to_string())
     }
     fn runtime_path_canonicalize(&self, path: &str) -> Result<String, String> {
         let resolved = self.runtime_resolve_fs_path(path)?;
         fs::canonicalize(&resolved)
             .map(|real| runtime_path_string(&normalize_lexical_path(&real)))
             .map_err(|err| format!("failed to canonicalize `{path}`: {err}"))
+    }
+    fn runtime_fs_exists(&self, path: &str) -> Result<bool, String> {
+        Ok(self.runtime_resolve_fs_path(path)?.exists())
+    }
+    fn runtime_fs_is_file(&self, path: &str) -> Result<bool, String> {
+        Ok(self.runtime_resolve_fs_path(path)?.is_file())
+    }
+    fn runtime_fs_is_dir(&self, path: &str) -> Result<bool, String> {
+        Ok(self.runtime_resolve_fs_path(path)?.is_dir())
+    }
+    fn runtime_fs_read_text(&self, path: &str) -> Result<String, String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::read_to_string(&resolved)
+            .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
+    }
+    fn runtime_fs_read_bytes(&self, path: &str) -> Result<Vec<u8>, String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::read(&resolved)
+            .map_err(|err| format!("failed to read `{}`: {err}", runtime_path_string(&resolved)))
+    }
+    fn runtime_fs_write_text(&self, path: &str, text: &str) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        if let Some(parent) = resolved.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+            })?;
+        }
+        fs::write(&resolved, text).map_err(|err| {
+            format!(
+                "failed to write `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_write_bytes(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        if let Some(parent) = resolved.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+            })?;
+        }
+        fs::write(&resolved, bytes).map_err(|err| {
+            format!(
+                "failed to write `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_list_dir(&self, path: &str) -> Result<Vec<String>, String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        let mut entries = fs::read_dir(&resolved)
+            .map_err(|err| format!("failed to list `{}`: {err}", runtime_path_string(&resolved)))?
+            .map(|entry| {
+                entry
+                    .map(|entry| runtime_path_string(&normalize_lexical_path(&entry.path())))
+                    .map_err(|err| {
+                        format!(
+                            "failed to read directory entry in `{}`: {err}",
+                            runtime_path_string(&resolved)
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        entries.sort();
+        Ok(entries)
+    }
+    fn runtime_fs_mkdir_all(&self, path: &str) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::create_dir_all(&resolved).map_err(|err| {
+            format!(
+                "failed to create `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_create_dir(&self, path: &str) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::create_dir(&resolved).map_err(|err| {
+            format!(
+                "failed to create directory `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_remove_file(&self, path: &str) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::remove_file(&resolved).map_err(|err| {
+            format!(
+                "failed to remove file `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_remove_dir(&self, path: &str) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::remove_dir(&resolved).map_err(|err| {
+            format!(
+                "failed to remove directory `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_remove_dir_all(&self, path: &str) -> Result<(), String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        fs::remove_dir_all(&resolved).map_err(|err| {
+            format!(
+                "failed to remove directory tree `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })
+    }
+    fn runtime_fs_copy_file(&self, from: &str, to: &str) -> Result<(), String> {
+        let from_resolved = self.runtime_resolve_fs_path(from)?;
+        let to_resolved = self.runtime_resolve_fs_path(to)?;
+        if let Some(parent) = to_resolved.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+            })?;
+        }
+        fs::copy(&from_resolved, &to_resolved).map_err(|err| {
+            format!(
+                "failed to copy `{}` to `{}`: {err}",
+                runtime_path_string(&from_resolved),
+                runtime_path_string(&to_resolved)
+            )
+        })?;
+        Ok(())
+    }
+    fn runtime_fs_rename(&self, from: &str, to: &str) -> Result<(), String> {
+        let from_resolved = self.runtime_resolve_fs_path(from)?;
+        let to_resolved = self.runtime_resolve_fs_path(to)?;
+        if let Some(parent) = to_resolved.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
+            })?;
+        }
+        fs::rename(&from_resolved, &to_resolved).map_err(|err| {
+            format!(
+                "failed to rename `{}` to `{}`: {err}",
+                runtime_path_string(&from_resolved),
+                runtime_path_string(&to_resolved)
+            )
+        })
+    }
+    fn runtime_fs_file_size(&self, path: &str) -> Result<i64, String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        let metadata = fs::metadata(&resolved)
+            .map_err(|err| format!("failed to stat `{}`: {err}", runtime_path_string(&resolved)))?;
+        i64::try_from(metadata.len())
+            .map_err(|_| format!("file size for `{path}` does not fit in i64"))
+    }
+    fn runtime_fs_modified_unix_ms(&self, path: &str) -> Result<i64, String> {
+        let resolved = self.runtime_resolve_fs_path(path)?;
+        let metadata = fs::metadata(&resolved)
+            .map_err(|err| format!("failed to stat `{}`: {err}", runtime_path_string(&resolved)))?;
+        let modified = metadata.modified().map_err(|err| {
+            format!(
+                "failed to read modified time for `{}`: {err}",
+                runtime_path_string(&resolved)
+            )
+        })?;
+        let duration = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| {
+                format!(
+                    "modified time for `{}` predates unix epoch: {err}",
+                    runtime_path_string(&resolved)
+                )
+            })?;
+        i64::try_from(duration.as_millis()).map_err(|_| {
+            format!(
+                "modified time for `{}` does not fit in i64 milliseconds",
+                runtime_path_string(&resolved)
+            )
+        })
     }
     fn runtime_fs_stream_open_read(&mut self, path: &str) -> Result<u64, String> {
         let _ = path;
@@ -968,15 +1148,31 @@ pub trait RuntimeCoreHost {
         let _ = handle;
         Err("runtime core host fs stream_close is not implemented".to_string())
     }
+    fn runtime_process_exec_status(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> Result<i64, String> {
+        let _ = (program, args);
+        Err("runtime core host process execution is not implemented".to_string())
+    }
+    fn runtime_process_exec_capture(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> Result<RuntimeProcessCapture, String> {
+        let _ = (program, args);
+        Err("runtime core host process execution is not implemented".to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeProcessCapture {
-    status: i64,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_utf8: bool,
-    stderr_utf8: bool,
+pub struct RuntimeProcessCapture {
+    pub status: i64,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdout_utf8: bool,
+    pub stderr_utf8: bool,
 }
 
 fn runtime_memory_strategy_from_name(name: &str) -> Result<RuntimeMemoryStrategy, String> {
@@ -6179,13 +6375,12 @@ fn try_execute_arcana_owned_api_call(
                 state,
                 host,
             )?;
-            let path =
-                host.runtime_resolve_fs_path(&expect_str(args[0].value.clone(), key.as_str())?)?;
+            let path = expect_str(args[0].value.clone(), key.as_str())?;
             let result = match key.as_str() {
-                "arcana_process.fs.exists" => path.exists(),
-                "arcana_process.fs.is_file" => path.is_file(),
-                _ => path.is_dir(),
-            };
+                "arcana_process.fs.exists" => host.runtime_fs_exists(&path),
+                "arcana_process.fs.is_file" => host.runtime_fs_is_file(&path),
+                _ => host.runtime_fs_is_dir(&path),
+            }?;
             RuntimeValue::Bool(result)
         }
         "arcana_process.fs.read_text" => {
@@ -6201,11 +6396,7 @@ fn try_execute_arcana_owned_api_call(
                 host,
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                fs::read_to_string(&resolved).map_err(|err| {
-                    format!("failed to read `{}`: {err}", runtime_path_string(&resolved))
-                })
-            }) {
+            match host.runtime_fs_read_text(&path) {
                 Ok(text) => ok_variant(RuntimeValue::Str(text)),
                 Err(err) => err_variant(err),
             }
@@ -6223,11 +6414,7 @@ fn try_execute_arcana_owned_api_call(
                 host,
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                fs::read(&resolved).map_err(|err| {
-                    format!("failed to read `{}`: {err}", runtime_path_string(&resolved))
-                })
-            }) {
+            match host.runtime_fs_read_bytes(&path) {
                 Ok(bytes) => ok_variant(RuntimeValue::Bytes(bytes)),
                 Err(err) => err_variant(err),
             }
@@ -6246,19 +6433,7 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
             let text = expect_str(args[1].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                if let Some(parent) = resolved.parent() {
-                    fs::create_dir_all(parent).map_err(|err| {
-                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-                    })?;
-                }
-                fs::write(&resolved, text).map_err(|err| {
-                    format!(
-                        "failed to write `{}`: {err}",
-                        runtime_path_string(&resolved)
-                    )
-                })
-            }) {
+            match host.runtime_fs_write_text(&path, &text) {
                 Ok(()) => ok_variant(RuntimeValue::Unit),
                 Err(err) => err_variant(err),
             }
@@ -6277,19 +6452,7 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
             let bytes = expect_byte_array(args[1].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                if let Some(parent) = resolved.parent() {
-                    fs::create_dir_all(parent).map_err(|err| {
-                        format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-                    })?;
-                }
-                fs::write(&resolved, bytes).map_err(|err| {
-                    format!(
-                        "failed to write `{}`: {err}",
-                        runtime_path_string(&resolved)
-                    )
-                })
-            }) {
+            match host.runtime_fs_write_bytes(&path, &bytes) {
                 Ok(()) => ok_variant(RuntimeValue::Unit),
                 Err(err) => err_variant(err),
             }
@@ -6460,27 +6623,7 @@ fn try_execute_arcana_owned_api_call(
                 host,
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
-            match host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                let mut entries = fs::read_dir(&resolved)
-                    .map_err(|err| {
-                        format!("failed to list `{}`: {err}", runtime_path_string(&resolved))
-                    })?
-                    .map(|entry| {
-                        entry
-                            .map(|entry| {
-                                runtime_path_string(&normalize_lexical_path(&entry.path()))
-                            })
-                            .map_err(|err| {
-                                format!(
-                                    "failed to read directory entry in `{}`: {err}",
-                                    runtime_path_string(&resolved)
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                entries.sort();
-                Ok(entries)
-            }) {
+            match host.runtime_fs_list_dir(&path) {
                 Ok(entries) => ok_variant(RuntimeValue::List(
                     entries.into_iter().map(RuntimeValue::Str).collect(),
                 )),
@@ -6504,48 +6647,13 @@ fn try_execute_arcana_owned_api_call(
                 host,
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
-            let result =
-                host.runtime_resolve_fs_path(&path)
-                    .and_then(|resolved| match key.as_str() {
-                        "arcana_process.fs.mkdir_all" => {
-                            fs::create_dir_all(&resolved).map_err(|err| {
-                                format!(
-                                    "failed to create `{}`: {err}",
-                                    runtime_path_string(&resolved)
-                                )
-                            })
-                        }
-                        "arcana_process.fs.create_dir" => {
-                            fs::create_dir(&resolved).map_err(|err| {
-                                format!(
-                                    "failed to create directory `{}`: {err}",
-                                    runtime_path_string(&resolved)
-                                )
-                            })
-                        }
-                        "arcana_process.fs.remove_file" => {
-                            fs::remove_file(&resolved).map_err(|err| {
-                                format!(
-                                    "failed to remove file `{}`: {err}",
-                                    runtime_path_string(&resolved)
-                                )
-                            })
-                        }
-                        "arcana_process.fs.remove_dir" => {
-                            fs::remove_dir(&resolved).map_err(|err| {
-                                format!(
-                                    "failed to remove directory `{}`: {err}",
-                                    runtime_path_string(&resolved)
-                                )
-                            })
-                        }
-                        _ => fs::remove_dir_all(&resolved).map_err(|err| {
-                            format!(
-                                "failed to remove directory tree `{}`: {err}",
-                                runtime_path_string(&resolved)
-                            )
-                        }),
-                    });
+            let result = match key.as_str() {
+                "arcana_process.fs.mkdir_all" => host.runtime_fs_mkdir_all(&path),
+                "arcana_process.fs.create_dir" => host.runtime_fs_create_dir(&path),
+                "arcana_process.fs.remove_file" => host.runtime_fs_remove_file(&path),
+                "arcana_process.fs.remove_dir" => host.runtime_fs_remove_dir(&path),
+                _ => host.runtime_fs_remove_dir_all(&path),
+            };
             match result {
                 Ok(()) => ok_variant(RuntimeValue::Unit),
                 Err(err) => err_variant(err),
@@ -6565,37 +6673,10 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let from = expect_str(args[0].value.clone(), key.as_str())?;
             let to = expect_str(args[1].value.clone(), key.as_str())?;
-            let result = host
-                .runtime_resolve_fs_path(&from)
-                .and_then(|from_resolved| {
-                    let to_resolved = host.runtime_resolve_fs_path(&to)?;
-                    if let Some(parent) = to_resolved.parent() {
-                        fs::create_dir_all(parent).map_err(|err| {
-                            format!("failed to prepare `{}`: {err}", runtime_path_string(parent))
-                        })?;
-                    }
-                    match key.as_str() {
-                        "arcana_process.fs.copy_file" => {
-                            fs::copy(&from_resolved, &to_resolved).map_err(|err| {
-                                format!(
-                                    "failed to copy `{}` to `{}`: {err}",
-                                    runtime_path_string(&from_resolved),
-                                    runtime_path_string(&to_resolved)
-                                )
-                            })?;
-                        }
-                        _ => {
-                            fs::rename(&from_resolved, &to_resolved).map_err(|err| {
-                                format!(
-                                    "failed to rename `{}` to `{}`: {err}",
-                                    runtime_path_string(&from_resolved),
-                                    runtime_path_string(&to_resolved)
-                                )
-                            })?;
-                        }
-                    }
-                    Ok(())
-                });
+            let result = match key.as_str() {
+                "arcana_process.fs.copy_file" => host.runtime_fs_copy_file(&from, &to),
+                _ => host.runtime_fs_rename(&from, &to),
+            };
             match result {
                 Ok(()) => ok_variant(RuntimeValue::Unit),
                 Err(err) => err_variant(err),
@@ -6614,38 +6695,10 @@ fn try_execute_arcana_owned_api_call(
                 host,
             )?;
             let path = expect_str(args[0].value.clone(), key.as_str())?;
-            let result = host.runtime_resolve_fs_path(&path).and_then(|resolved| {
-                let metadata = fs::metadata(&resolved).map_err(|err| {
-                    format!("failed to stat `{}`: {err}", runtime_path_string(&resolved))
-                })?;
-                match key.as_str() {
-                    "arcana_process.fs.file_size" => i64::try_from(metadata.len())
-                        .map_err(|_| format!("file size for `{path}` does not fit in i64")),
-                    _ => {
-                        let modified = metadata.modified().map_err(|err| {
-                            format!(
-                                "failed to read modified time for `{}`: {err}",
-                                runtime_path_string(&resolved)
-                            )
-                        })?;
-                        let duration =
-                            modified
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_err(|err| {
-                                    format!(
-                                        "modified time for `{}` predates unix epoch: {err}",
-                                        runtime_path_string(&resolved)
-                                    )
-                                })?;
-                        i64::try_from(duration.as_millis()).map_err(|_| {
-                            format!(
-                                "modified time for `{}` does not fit in i64 milliseconds",
-                                runtime_path_string(&resolved)
-                            )
-                        })
-                    }
-                }
-            });
+            let result = match key.as_str() {
+                "arcana_process.fs.file_size" => host.runtime_fs_file_size(&path),
+                _ => host.runtime_fs_modified_unix_ms(&path),
+            };
             match result {
                 Ok(value) => ok_variant(RuntimeValue::Int(value)),
                 Err(err) => err_variant(err),
@@ -6665,15 +6718,7 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let program = expect_str(args[0].value.clone(), key.as_str())?;
             let argv = expect_string_list(args[1].value.clone(), key.as_str())?;
-            let result = if !host.allows_process_execution() {
-                Err("process execution is disabled by the runtime host".to_string())
-            } else {
-                std::process::Command::new(&program)
-                    .args(&argv)
-                    .status()
-                    .map(|status| i64::from(status.code().unwrap_or(-1)))
-                    .map_err(|err| format!("failed to run process `{program}`: {err}"))
-            };
+            let result = host.runtime_process_exec_status(&program, &argv);
             match result {
                 Ok(status) => ok_variant(RuntimeValue::Int(status)),
                 Err(err) => err_variant(err),
@@ -6693,21 +6738,7 @@ fn try_execute_arcana_owned_api_call(
             )?;
             let program = expect_str(args[0].value.clone(), key.as_str())?;
             let argv = expect_string_list(args[1].value.clone(), key.as_str())?;
-            let result = if !host.allows_process_execution() {
-                Err("process execution is disabled by the runtime host".to_string())
-            } else {
-                std::process::Command::new(&program)
-                    .args(&argv)
-                    .output()
-                    .map(|output| RuntimeProcessCapture {
-                        status: i64::from(output.status.code().unwrap_or(-1)),
-                        stdout_utf8: std::str::from_utf8(&output.stdout).is_ok(),
-                        stderr_utf8: std::str::from_utf8(&output.stderr).is_ok(),
-                        stdout: output.stdout,
-                        stderr: output.stderr,
-                    })
-                    .map_err(|err| format!("failed to run process `{program}`: {err}"))
-            };
+            let result = host.runtime_process_exec_capture(&program, &argv);
             match result {
                 Ok(capture) => ok_variant(runtime_exec_capture_record(capture)),
                 Err(err) => err_variant(err),

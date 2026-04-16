@@ -215,57 +215,57 @@ shackle flags WinapiProcessInternals:
         Ok(out)
     }
 
-shackle fn process_arg_count_impl() -> Int = helpers.process.arg_count:
+shackle fn process_arg_count_impl() -> Int = backend.process.arg_count:
     Ok(binding_int(std::env::args().skip(1).count() as i64))
 
-shackle fn process_arg_get_impl(index: Int) -> Str = helpers.process.arg_get:
+shackle fn process_arg_get_impl(index: Int) -> Str = backend.process.arg_get:
     if index < 0 {
         return Err("arg_get index must be non-negative".to_string());
     }
     Ok(binding_owned_str(std::env::args().skip(1).nth(index as usize).unwrap_or_default()))
 
-shackle fn process_env_has_impl(read name: Str) -> Bool = helpers.process.env_has:
+shackle fn process_env_has_impl(read name: Str) -> Bool = backend.process.env_has:
     Ok(binding_bool(std::env::var_os(&name).is_some()))
 
-shackle fn process_env_get_impl(read name: Str) -> Str = helpers.process.env_get:
+shackle fn process_env_get_impl(read name: Str) -> Str = backend.process.env_get:
     Ok(binding_owned_str(std::env::var(&name).unwrap_or_default()))
 
-shackle fn process_take_last_error_impl() -> Str = helpers.process.take_last_error:
+shackle fn process_take_last_error_impl() -> Str = backend.process.take_last_error:
     Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
 
-shackle fn process_path_cwd_impl() -> Str = helpers.process.path_cwd:
+shackle fn process_path_cwd_impl() -> Str = backend.process.path_cwd:
     Ok(binding_owned_str(runtime_path_string(&current_working_dir()?)))
 
-shackle fn process_path_join_impl(read a: Str, read b: Str) -> Str = helpers.process.path_join:
+shackle fn process_path_join_impl(read a: Str, read b: Str) -> Str = backend.process.path_join:
     Ok(binding_owned_str(runtime_path_string(&normalize_lexical_path(
         &std::path::Path::new(&a).join(b),
     ))))
 
-shackle fn process_path_normalize_impl(read path: Str) -> Str = helpers.process.path_normalize:
+shackle fn process_path_normalize_impl(read path: Str) -> Str = backend.process.path_normalize:
     Ok(binding_owned_str(runtime_path_string(&normalize_lexical_path(std::path::Path::new(&path)))))
 
-shackle fn process_path_parent_impl(read path: Str) -> Str = helpers.process.path_parent:
+shackle fn process_path_parent_impl(read path: Str) -> Str = backend.process.path_parent:
     Ok(binding_owned_str(std::path::Path::new(&path)
         .parent()
         .map(runtime_path_string)
         .unwrap_or_default()))
 
-shackle fn process_path_file_name_impl(read path: Str) -> Str = helpers.process.path_file_name:
+shackle fn process_path_file_name_impl(read path: Str) -> Str = backend.process.path_file_name:
     Ok(binding_owned_str(std::path::Path::new(&path)
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default()))
 
-shackle fn process_path_ext_impl(read path: Str) -> Str = helpers.process.path_ext:
+shackle fn process_path_ext_impl(read path: Str) -> Str = backend.process.path_ext:
     Ok(binding_owned_str(std::path::Path::new(&path)
         .extension()
         .map(|ext| ext.to_string_lossy().to_string())
         .unwrap_or_default()))
 
-shackle fn process_path_is_absolute_impl(read path: Str) -> Bool = helpers.process.path_is_absolute:
+shackle fn process_path_is_absolute_impl(read path: Str) -> Bool = backend.process.path_is_absolute:
     Ok(binding_bool(std::path::Path::new(&path).is_absolute()))
 
-shackle fn process_path_stem_impl(read path: Str) -> Str = helpers.process.path_stem:
+shackle fn process_path_stem_impl(read path: Str) -> Str = backend.process.path_stem:
     crate::shackle::clear_helper_error(instance);
     match std::path::Path::new(&path)
         .file_stem()
@@ -279,12 +279,12 @@ shackle fn process_path_stem_impl(read path: Str) -> Str = helpers.process.path_
         }
     }
 
-shackle fn process_path_with_ext_impl(read path: Str, read ext: Str) -> Str = helpers.process.path_with_ext:
+shackle fn process_path_with_ext_impl(read path: Str, read ext: Str) -> Str = backend.process.path_with_ext:
     let mut updated = std::path::PathBuf::from(path);
     updated.set_extension(ext);
     Ok(binding_owned_str(runtime_path_string(&updated)))
 
-shackle fn process_path_relative_to_impl(read path: Str, read base: Str) -> Str = helpers.process.path_relative_to:
+shackle fn process_path_relative_to_impl(read path: Str, read base: Str) -> Str = backend.process.path_relative_to:
     crate::shackle::clear_helper_error(instance);
     match relative_path(std::path::Path::new(&path), std::path::Path::new(&base))
         .map(|value| runtime_path_string(&value))
@@ -296,7 +296,7 @@ shackle fn process_path_relative_to_impl(read path: Str, read base: Str) -> Str 
         }
     }
 
-shackle fn process_path_canonicalize_impl(read path: Str) -> Str = helpers.process.path_canonicalize:
+shackle fn process_path_canonicalize_impl(read path: Str) -> Str = backend.process.path_canonicalize:
     crate::shackle::clear_helper_error(instance);
     let value = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::canonicalize(&resolved)
@@ -311,7 +311,7 @@ shackle fn process_path_canonicalize_impl(read path: Str) -> Str = helpers.proce
         }
     }
 
-shackle fn process_path_strip_prefix_impl(read path: Str, read prefix: Str) -> Str = helpers.process.path_strip_prefix:
+shackle fn process_path_strip_prefix_impl(read path: Str, read prefix: Str) -> Str = backend.process.path_strip_prefix:
     crate::shackle::clear_helper_error(instance);
     let path = normalize_lexical_path(std::path::Path::new(&path));
     let prefix = normalize_lexical_path(std::path::Path::new(&prefix));
@@ -333,16 +333,16 @@ shackle fn process_path_strip_prefix_impl(read path: Str, read prefix: Str) -> S
         }
     }
 
-shackle fn process_fs_exists_impl(read path: Str) -> Bool = helpers.process.fs_exists:
+shackle fn process_fs_exists_impl(read path: Str) -> Bool = backend.process.fs_exists:
     Ok(binding_bool(resolve_fs_path(&path)?.exists()))
 
-shackle fn process_fs_is_file_impl(read path: Str) -> Bool = helpers.process.fs_is_file:
+shackle fn process_fs_is_file_impl(read path: Str) -> Bool = backend.process.fs_is_file:
     Ok(binding_bool(resolve_fs_path(&path)?.is_file()))
 
-shackle fn process_fs_is_dir_impl(read path: Str) -> Bool = helpers.process.fs_is_dir:
+shackle fn process_fs_is_dir_impl(read path: Str) -> Bool = backend.process.fs_is_dir:
     Ok(binding_bool(resolve_fs_path(&path)?.is_dir()))
 
-shackle fn process_fs_read_text_impl(read path: Str) -> Str = helpers.process.fs_read_text:
+shackle fn process_fs_read_text_impl(read path: Str) -> Str = backend.process.fs_read_text:
     crate::shackle::clear_helper_error(instance);
     let value = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::read_to_string(&resolved)
@@ -356,7 +356,7 @@ shackle fn process_fs_read_text_impl(read path: Str) -> Str = helpers.process.fs
         }
     }
 
-shackle fn process_fs_read_bytes_impl(read path: Str) -> Bytes = helpers.process.fs_read_bytes:
+shackle fn process_fs_read_bytes_impl(read path: Str) -> Bytes = backend.process.fs_read_bytes:
     crate::shackle::clear_helper_error(instance);
     let value = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::read(&resolved)
@@ -370,7 +370,7 @@ shackle fn process_fs_read_bytes_impl(read path: Str) -> Bytes = helpers.process
         }
     }
 
-shackle fn process_fs_write_text_impl(read path: Str, read text: Str) -> Bool = helpers.process.fs_write_text:
+shackle fn process_fs_write_text_impl(read path: Str, read text: Str) -> Bool = backend.process.fs_write_text:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         if let Some(parent) = resolved.parent() {
@@ -388,7 +388,7 @@ shackle fn process_fs_write_text_impl(read path: Str, read text: Str) -> Bool = 
         }
     }
 
-shackle fn process_fs_write_bytes_impl(read path: Str, read bytes: Bytes) -> Bool = helpers.process.fs_write_bytes:
+shackle fn process_fs_write_bytes_impl(read path: Str, read bytes: Bytes) -> Bool = backend.process.fs_write_bytes:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         if let Some(parent) = resolved.parent() {
@@ -406,7 +406,7 @@ shackle fn process_fs_write_bytes_impl(read path: Str, read bytes: Bytes) -> Boo
         }
     }
 
-shackle fn process_fs_stream_open_read_impl(read path: Str) -> arcana_winapi.process_handles.FileStream = helpers.process.fs_stream_open_read:
+shackle fn process_fs_stream_open_read_impl(read path: Str) -> arcana_winapi.process_handles.FileStream = backend.process.fs_stream_open_read:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         let file = std::fs::File::open(&resolved)
@@ -421,7 +421,7 @@ shackle fn process_fs_stream_open_read_impl(read path: Str) -> arcana_winapi.pro
         }
     }
 
-shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) -> arcana_winapi.process_handles.FileStream = helpers.process.fs_stream_open_write:
+shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) -> arcana_winapi.process_handles.FileStream = backend.process.fs_stream_open_write:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         if let Some(parent) = resolved.parent() {
@@ -447,7 +447,7 @@ shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) 
         }
     }
 
-shackle fn process_fs_stream_read_impl(edit stream: arcana_winapi.process_handles.FileStream, read max_bytes: Int) -> Bytes = helpers.process.fs_stream_read:
+shackle fn process_fs_stream_read_impl(edit stream: arcana_winapi.process_handles.FileStream, read max_bytes: Int) -> Bytes = backend.process.fs_stream_read:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         if max_bytes < 0 {
@@ -471,7 +471,7 @@ shackle fn process_fs_stream_read_impl(edit stream: arcana_winapi.process_handle
         }
     }
 
-shackle fn process_fs_stream_write_impl(edit stream: arcana_winapi.process_handles.FileStream, read bytes: Bytes) -> Int = helpers.process.fs_stream_write:
+shackle fn process_fs_stream_write_impl(edit stream: arcana_winapi.process_handles.FileStream, read bytes: Bytes) -> Int = backend.process.fs_stream_write:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         let stream = file_stream_mut(instance, stream)?;
@@ -490,7 +490,7 @@ shackle fn process_fs_stream_write_impl(edit stream: arcana_winapi.process_handl
         }
     }
 
-shackle fn process_fs_stream_eof_impl(read stream: arcana_winapi.process_handles.FileStream) -> Bool = helpers.process.fs_stream_eof:
+shackle fn process_fs_stream_eof_impl(read stream: arcana_winapi.process_handles.FileStream) -> Bool = backend.process.fs_stream_eof:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         let stream = file_stream_mut(instance, stream)?;
@@ -512,7 +512,7 @@ shackle fn process_fs_stream_eof_impl(read stream: arcana_winapi.process_handles
         }
     }
 
-shackle fn process_fs_stream_close_impl(take stream: arcana_winapi.process_handles.FileStream) -> Bool = helpers.process.fs_stream_close:
+shackle fn process_fs_stream_close_impl(take stream: arcana_winapi.process_handles.FileStream) -> Bool = backend.process.fs_stream_close:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         let state = crate::shackle::package_state_data_mut(instance)?;
@@ -533,7 +533,7 @@ shackle fn process_fs_stream_close_impl(take stream: arcana_winapi.process_handl
         }
     }
 
-shackle fn process_fs_list_dir_impl(read path: Str) -> Bytes = helpers.process.fs_list_dir:
+shackle fn process_fs_list_dir_impl(read path: Str) -> Bytes = backend.process.fs_list_dir:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         let mut entries = std::fs::read_dir(&resolved)
@@ -560,7 +560,7 @@ shackle fn process_fs_list_dir_impl(read path: Str) -> Bytes = helpers.process.f
         }
     }
 
-shackle fn process_fs_mkdir_all_impl(read path: Str) -> Bool = helpers.process.fs_mkdir_all:
+shackle fn process_fs_mkdir_all_impl(read path: Str) -> Bool = backend.process.fs_mkdir_all:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::create_dir_all(&resolved)
@@ -574,7 +574,7 @@ shackle fn process_fs_mkdir_all_impl(read path: Str) -> Bool = helpers.process.f
         }
     }
 
-shackle fn process_fs_create_dir_impl(read path: Str) -> Bool = helpers.process.fs_create_dir:
+shackle fn process_fs_create_dir_impl(read path: Str) -> Bool = backend.process.fs_create_dir:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::create_dir(&resolved)
@@ -588,7 +588,7 @@ shackle fn process_fs_create_dir_impl(read path: Str) -> Bool = helpers.process.
         }
     }
 
-shackle fn process_fs_remove_file_impl(read path: Str) -> Bool = helpers.process.fs_remove_file:
+shackle fn process_fs_remove_file_impl(read path: Str) -> Bool = backend.process.fs_remove_file:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::remove_file(&resolved)
@@ -602,7 +602,7 @@ shackle fn process_fs_remove_file_impl(read path: Str) -> Bool = helpers.process
         }
     }
 
-shackle fn process_fs_remove_dir_impl(read path: Str) -> Bool = helpers.process.fs_remove_dir:
+shackle fn process_fs_remove_dir_impl(read path: Str) -> Bool = backend.process.fs_remove_dir:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::remove_dir(&resolved)
@@ -616,7 +616,7 @@ shackle fn process_fs_remove_dir_impl(read path: Str) -> Bool = helpers.process.
         }
     }
 
-shackle fn process_fs_remove_dir_all_impl(read path: Str) -> Bool = helpers.process.fs_remove_dir_all:
+shackle fn process_fs_remove_dir_all_impl(read path: Str) -> Bool = backend.process.fs_remove_dir_all:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         std::fs::remove_dir_all(&resolved)
@@ -630,7 +630,7 @@ shackle fn process_fs_remove_dir_all_impl(read path: Str) -> Bool = helpers.proc
         }
     }
 
-shackle fn process_fs_copy_file_impl(read from: Str, read to: Str) -> Bool = helpers.process.fs_copy_file:
+shackle fn process_fs_copy_file_impl(read from: Str, read to: Str) -> Bool = backend.process.fs_copy_file:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&from).and_then(|from_resolved| {
         let to_resolved = resolve_fs_path(&to)?;
@@ -655,7 +655,7 @@ shackle fn process_fs_copy_file_impl(read from: Str, read to: Str) -> Bool = hel
         }
     }
 
-shackle fn process_fs_rename_impl(read from: Str, read to: Str) -> Bool = helpers.process.fs_rename:
+shackle fn process_fs_rename_impl(read from: Str, read to: Str) -> Bool = backend.process.fs_rename:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&from).and_then(|from_resolved| {
         let to_resolved = resolve_fs_path(&to)?;
@@ -680,7 +680,7 @@ shackle fn process_fs_rename_impl(read from: Str, read to: Str) -> Bool = helper
         }
     }
 
-shackle fn process_fs_file_size_impl(read path: Str) -> Int = helpers.process.fs_file_size:
+shackle fn process_fs_file_size_impl(read path: Str) -> Int = backend.process.fs_file_size:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         let len = std::fs::metadata(&resolved)
@@ -696,7 +696,7 @@ shackle fn process_fs_file_size_impl(read path: Str) -> Int = helpers.process.fs
         }
     }
 
-shackle fn process_fs_modified_unix_ms_impl(read path: Str) -> Int = helpers.process.fs_modified_unix_ms:
+shackle fn process_fs_modified_unix_ms_impl(read path: Str) -> Int = backend.process.fs_modified_unix_ms:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         let modified = std::fs::metadata(&resolved)
@@ -721,7 +721,7 @@ shackle fn process_fs_modified_unix_ms_impl(read path: Str) -> Int = helpers.pro
         }
     }
 
-shackle fn process_exec_status_impl(read program: Str, read args: Bytes) -> Int = helpers.process.process_exec_status:
+shackle fn process_exec_status_impl(read program: Str, read args: Bytes) -> Int = backend.process.process_exec_status:
     crate::shackle::clear_helper_error(instance);
     let result = decode_string_list_payload(&args).and_then(|argv| {
         let status = std::process::Command::new(&program)
@@ -738,7 +738,7 @@ shackle fn process_exec_status_impl(read program: Str, read args: Bytes) -> Int 
         }
     }
 
-shackle fn process_exec_capture_impl(read program: Str, read args: Bytes) -> Bytes = helpers.process.process_exec_capture:
+shackle fn process_exec_capture_impl(read program: Str, read args: Bytes) -> Bytes = backend.process.process_exec_capture:
     crate::shackle::clear_helper_error(instance);
     let result = decode_string_list_payload(&args).and_then(|argv| {
         let output = std::process::Command::new(&program)

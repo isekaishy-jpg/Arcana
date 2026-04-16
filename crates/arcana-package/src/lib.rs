@@ -3453,9 +3453,9 @@ mod tests {
         write_file(
             &dir.join("arcana_process/src/io.arc"),
             concat!(
-                "import std.io\n",
+                "// runtime-owned host-core surface\n",
                 "export fn print[T](read value: T):\n",
-                "    std.io.print[T] :: value :: call\n",
+                "    arcana_process.io.print[T] :: value :: call\n",
             ),
         );
     }
@@ -4199,6 +4199,84 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_grimoire_owns_public_host_core_surface_without_winapi_process_forwarders() {
+        let process_src = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("process")
+            .join("src");
+        for module in [
+            "args.arc",
+            "env.arc",
+            "io.arc",
+            "path.arc",
+            "fs.arc",
+            "process.arc",
+        ] {
+            let source = fs::read_to_string(process_src.join(module))
+                .unwrap_or_else(|err| panic!("failed to load {module}: {err}"));
+            assert!(
+                !source.contains("arcana_winapi.helpers.process"),
+                "{module} should not import or call arcana_winapi.helpers.process"
+            );
+        }
+
+        let io_source =
+            fs::read_to_string(process_src.join("io.arc")).expect("process io source should load");
+        assert!(
+            !io_source.contains("std.kernel.io"),
+            "arcana_process.io should not forward through std.kernel.io"
+        );
+
+        let winapi_helpers = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("helpers.arc"),
+        )
+        .expect("winapi helpers source should load");
+        assert!(
+            !winapi_helpers.contains("reexport arcana_winapi.helpers.process"),
+            "arcana_winapi.helpers should not publicly reexport helpers.process"
+        );
+        let winapi_process_backend = fs::read_to_string(
+            repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("backend")
+                .join("process.arc"),
+        )
+        .expect("winapi process backend declarations should load");
+        assert!(
+            !repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("helpers")
+                .join("process.arc")
+                .exists(),
+            "winapi process backend glue should not live under helpers/process.arc anymore"
+        );
+        assert!(
+            !winapi_process_backend.contains("export fn ")
+                && !winapi_process_backend.contains("result_unit")
+                && !winapi_process_backend.contains("result_str")
+                && !winapi_process_backend.contains("result_bytes")
+                && !winapi_process_backend.contains("result_stream")
+                && !winapi_process_backend.contains("result_int")
+                && !winapi_process_backend.contains("result_bool")
+                && !winapi_process_backend.contains("helpers.process.")
+                && winapi_process_backend.contains("backend.process."),
+            "winapi backend/process.arc should be internal backend declarations, not a lingering helpers.process semantic lane"
+        );
     }
 
     #[cfg(windows)]
@@ -5981,7 +6059,7 @@ toolchain = \"future-toolchain\"\n"
         let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
         assert_eq!(
             parsed.runtime_requirements,
-            vec!["std.kernel.io".to_string()]
+            vec!["arcana_process.io".to_string()]
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -6027,7 +6105,7 @@ toolchain = \"future-toolchain\"\n"
         assert!(announce.exported);
         assert_eq!(
             parsed.runtime_requirements,
-            vec!["std.kernel.io".to_string()]
+            vec!["arcana_process.io".to_string()]
         );
 
         let _ = fs::remove_dir_all(&dir);

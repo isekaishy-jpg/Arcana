@@ -31,6 +31,9 @@ pub fn derive_runtime_requirements_with_roots(
         let Some(routine) = routines_by_key.get(routine_key.as_str()) else {
             continue;
         };
+        if let Some(requirement) = runtime_requirement_for_arcana_owned_routine(routine) {
+            requirements.insert(requirement.to_string());
+        }
         let Some(intrinsic_impl) = &routine.intrinsic_impl else {
             continue;
         };
@@ -605,6 +608,18 @@ fn resolve_routine_key(
         .map(|routine| routine.routine_key.clone())
 }
 
+fn runtime_requirement_for_arcana_owned_routine(routine: &IrRoutine) -> Option<&'static str> {
+    match routine.module_id.as_str() {
+        "arcana_process.io" => Some("arcana_process.io"),
+        "arcana_process.args" => Some("arcana_process.args"),
+        "arcana_process.env" => Some("arcana_process.env"),
+        "arcana_process.path" => Some("arcana_process.path"),
+        "arcana_process.fs" => Some("arcana_process.fs"),
+        "arcana_process.process" => Some("arcana_process.process"),
+        _ => None,
+    }
+}
+
 fn runtime_requirement_for_intrinsic_impl(intrinsic_impl: &str) -> Option<&'static str> {
     let requirement = match intrinsic_impl {
         "IoPrint" | "IoEprint" | "IoFlushStdout" | "IoFlushStderr" | "IoStdinReadLineTry" => {
@@ -919,7 +934,7 @@ mod tests {
                     "arcana_process.io",
                     "arcana_process.io#sym-0",
                     "print",
-                    Some("IoPrint"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
@@ -1001,9 +1016,14 @@ mod tests {
         assert_eq!(
             derive_runtime_requirements(&package),
             vec![
+                "arcana_process.args".to_string(),
+                "arcana_process.env".to_string(),
+                "arcana_process.fs".to_string(),
+                "arcana_process.io".to_string(),
+                "arcana_process.path".to_string(),
+                "arcana_process.process".to_string(),
                 "std.kernel.collections".to_string(),
                 "std.kernel.concurrency".to_string(),
-                "std.kernel.io".to_string(),
                 "std.kernel.memory".to_string(),
                 "std.kernel.text".to_string(),
                 "std.kernel.time".to_string(),
@@ -1106,7 +1126,7 @@ mod tests {
                     "arcana_process.io",
                     "arcana_process.io#sym-0",
                     "print",
-                    Some("IoPrint"),
+                    None,
                     Vec::new(),
                 ),
                 routine(
@@ -1131,7 +1151,11 @@ mod tests {
 
         assert_eq!(
             derive_runtime_requirements(&package),
-            vec!["std.kernel.io".to_string(), "std.kernel.text".to_string(),]
+            vec![
+                "arcana_process.args".to_string(),
+                "arcana_process.io".to_string(),
+                "std.kernel.text".to_string(),
+            ]
         );
     }
 
@@ -1281,7 +1305,10 @@ mod tests {
             owners: Vec::new(),
         };
 
-        assert!(derive_runtime_requirements(&package).is_empty());
+        assert_eq!(
+            derive_runtime_requirements(&package),
+            vec!["arcana_process.fs".to_string()]
+        );
     }
 
     #[test]
@@ -1336,7 +1363,7 @@ mod tests {
                     "arcana_process.io",
                     "arcana_process.io#sym-0",
                     "print",
-                    Some("IoPrint"),
+                    None,
                     Vec::new(),
                 ),
             ],
@@ -1350,7 +1377,7 @@ mod tests {
                 &package,
                 RuntimeRequirementRoots::ExportedRootPackageRoutines
             ),
-            vec!["std.kernel.io".to_string()]
+            vec!["arcana_process.io".to_string()]
         );
     }
 
@@ -1406,7 +1433,7 @@ mod tests {
                     "arcana_process.io",
                     "arcana_process.io#sym-0",
                     "print",
-                    Some("IoPrint"),
+                    None,
                     Vec::new(),
                 ),
             ],
@@ -1420,7 +1447,7 @@ mod tests {
                 &package,
                 RuntimeRequirementRoots::ExportedRootPackageRoutines
             ),
-            vec!["std.kernel.io".to_string()]
+            vec!["arcana_process.io".to_string()]
         );
     }
 

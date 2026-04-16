@@ -1,29 +1,66 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, Read, Seek, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::RuntimeCoreHost;
+use crate::{
+    ARCANA_NATIVE_BUNDLE_DIR_ENV, HostCoreFsPolicy, HostCoreStreamState, RuntimeCoreHost,
+    RuntimeProcessCapture, normalize_lexical_path,
+};
 
-#[derive(Debug)]
-struct ProcessRuntimeHostStream {
-    path: String,
-    file: File,
-    readable: bool,
-    writable: bool,
+type ProcessRuntimeHostStream = HostCoreStreamState;
+
+#[derive(Clone, Debug)]
+pub struct ProcessRuntimeHostConfig {
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub cwd: PathBuf,
+    pub sandbox_root: PathBuf,
+    pub allow_process: bool,
+}
+
+impl ProcessRuntimeHostConfig {
+    pub fn from_current_process() -> Result<Self, String> {
+        let cwd = std::env::current_dir()
+            .map(|path| normalize_lexical_path(&path))
+            .map_err(|err| format!("failed to resolve current directory: {err}"))?;
+        let sandbox_root = std::env::var(ARCANA_NATIVE_BUNDLE_DIR_ENV)
+            .map(PathBuf::from)
+            .map(|path| normalize_lexical_path(&path))
+            .unwrap_or_else(|_| cwd.clone());
+        let mut args = Vec::new();
+        let mut allow_process = false;
+        for arg in std::env::args().skip(1) {
+            if arg == "--allow-process" {
+                allow_process = true;
+                continue;
+            }
+            args.push(arg);
+        }
+        Ok(Self {
+            args,
+            env: std::env::vars().collect(),
+            cwd,
+            sandbox_root,
+            allow_process,
+        })
+    }
 }
 
 pub(crate) struct ProcessRuntimeHost {
     start: Instant,
+    config: ProcessRuntimeHostConfig,
+    fs_policy: HostCoreFsPolicy,
     next_stream_handle: u64,
     streams: BTreeMap<u64, ProcessRuntimeHostStream>,
 }
 
 impl ProcessRuntimeHost {
-    pub(crate) fn current_process() -> Self {
+    pub(crate) fn from_config(config: ProcessRuntimeHostConfig) -> Self {
         Self {
             start: Instant::now(),
+            fs_policy: HostCoreFsPolicy::new(config.cwd.clone(), Some(config.sandbox_root.clone())),
+            config,
             next_stream_handle: 1,
             streams: BTreeMap::new(),
         }
@@ -37,10 +74,6 @@ impl ProcessRuntimeHost {
         let handle = self.next_stream_handle.max(1);
         self.next_stream_handle = handle + 1;
         handle
-    }
-
-    fn stream_path(&self, path: &str) -> Result<PathBuf, String> {
-        self.runtime_resolve_fs_path(path)
     }
 
     fn stream_mut(&mut self, handle: u64) -> Result<&mut ProcessRuntimeHostStream, String> {
@@ -109,110 +142,70 @@ impl RuntimeCoreHost for ProcessRuntimeHost {
         Ok(())
     }
 
+    fn allows_process_execution(&self) -> bool {
+        self.config.allow_process
+    }
+
+    fn runtime_arg_count(&self) -> Result<i64, String> {
+        Ok(self.config.args.len() as i64)
+    }
+
+    fn runtime_arg_get(&self, index: i64) -> Result<String, String> {
+        if index < 0 {
+            return Err("arg_get index must be non-negative".to_string());
+        }
+        Ok(self
+            .config
+            .args
+            .get(index as usize)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn runtime_env_has(&self, name: &str) -> Result<bool, String> {
+        Ok(self.config.env.contains_key(name))
+    }
+
+    fn runtime_env_get(&self, name: &str) -> Result<String, String> {
+        Ok(self.config.env.get(name).cloned().unwrap_or_default())
+    }
+
+    fn runtime_current_working_dir(&self) -> Result<PathBuf, String> {
+        Ok(self.fs_policy.current_working_dir())
+    }
+
+    fn runtime_resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
+        self.fs_policy.resolve_fs_path(path)
+    }
+
+    fn runtime_path_canonicalize(&self, path: &str) -> Result<String, String> {
+        self.fs_policy.path_canonicalize(path)
+    }
+
     fn runtime_fs_stream_open_read(&mut self, path: &str) -> Result<u64, String> {
-        let resolved = self.stream_path(path)?;
-        let file = File::open(&resolved).map_err(|err| {
-            format!(
-                "failed to open `{}` for reading: {err}",
-                resolved.to_string_lossy()
-            )
-        })?;
         let handle = self.next_stream_handle();
-        self.streams.insert(
-            handle,
-            ProcessRuntimeHostStream {
-                path: resolved.to_string_lossy().into_owned(),
-                file,
-                readable: true,
-                writable: false,
-            },
-        );
+        let stream = ProcessRuntimeHostStream::open_read(&self.fs_policy, path)?;
+        self.streams.insert(handle, stream);
         Ok(handle)
     }
 
     fn runtime_fs_stream_open_write(&mut self, path: &str, append: bool) -> Result<u64, String> {
-        let resolved = self.stream_path(path)?;
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("failed to prepare `{}`: {err}", parent.to_string_lossy())
-            })?;
-        }
-        let mut options = OpenOptions::new();
-        options.create(true).write(true);
-        if append {
-            options.append(true);
-        } else {
-            options.truncate(true);
-        }
-        let file = options.open(&resolved).map_err(|err| {
-            format!(
-                "failed to open `{}` for writing: {err}",
-                resolved.to_string_lossy()
-            )
-        })?;
         let handle = self.next_stream_handle();
-        self.streams.insert(
-            handle,
-            ProcessRuntimeHostStream {
-                path: resolved.to_string_lossy().into_owned(),
-                file,
-                readable: false,
-                writable: true,
-            },
-        );
+        let stream = ProcessRuntimeHostStream::open_write(&self.fs_policy, path, append)?;
+        self.streams.insert(handle, stream);
         Ok(handle)
     }
 
     fn runtime_fs_stream_read(&mut self, handle: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
-        let stream = self.stream_mut(handle)?;
-        if !stream.readable {
-            return Err(format!(
-                "FileStream `{}` is not opened for reading",
-                stream.path
-            ));
-        }
-        let mut buffer = vec![0u8; max_bytes];
-        let read = stream
-            .file
-            .read(&mut buffer)
-            .map_err(|err| format!("failed to read from FileStream `{}`: {err}", stream.path))?;
-        buffer.truncate(read);
-        Ok(buffer)
+        self.stream_mut(handle)?.read(max_bytes)
     }
 
     fn runtime_fs_stream_write(&mut self, handle: u64, bytes: &[u8]) -> Result<usize, String> {
-        let stream = self.stream_mut(handle)?;
-        if !stream.writable {
-            return Err(format!(
-                "FileStream `{}` is not opened for writing",
-                stream.path
-            ));
-        }
-        stream
-            .file
-            .write_all(bytes)
-            .map_err(|err| format!("failed to write to FileStream `{}`: {err}", stream.path))?;
-        Ok(bytes.len())
+        self.stream_mut(handle)?.write(bytes)
     }
 
     fn runtime_fs_stream_eof(&mut self, handle: u64) -> Result<bool, String> {
-        let stream = self.stream_mut(handle)?;
-        if !stream.readable {
-            return Err(format!(
-                "FileStream `{}` is not opened for reading",
-                stream.path
-            ));
-        }
-        let cursor = stream
-            .file
-            .stream_position()
-            .map_err(|err| format!("failed to inspect FileStream `{}`: {err}", stream.path))?;
-        let len = stream
-            .file
-            .metadata()
-            .map_err(|err| format!("failed to stat FileStream `{}`: {err}", stream.path))?
-            .len();
-        Ok(cursor >= len)
+        self.stream_mut(handle)?.eof()
     }
 
     fn runtime_fs_stream_close(&mut self, handle: u64) -> Result<(), String> {
@@ -220,5 +213,125 @@ impl RuntimeCoreHost for ProcessRuntimeHost {
             .remove(&handle)
             .map(|_| ())
             .ok_or_else(|| format!("invalid FileStream handle `{handle}`"))
+    }
+
+    fn runtime_process_exec_status(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> Result<i64, String> {
+        self.fs_policy
+            .execute_process_status(self.config.allow_process, program, args)
+    }
+
+    fn runtime_process_exec_capture(
+        &mut self,
+        program: &str,
+        args: &[String],
+    ) -> Result<RuntimeProcessCapture, String> {
+        self.fs_policy
+            .execute_process_capture(self.config.allow_process, program, args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("arcana-process-host-{label}-{stamp}"));
+        fs::create_dir_all(&dir).expect("temp dir should create");
+        dir
+    }
+
+    #[test]
+    fn configured_host_filters_allow_process_flag_from_public_args() {
+        let dir = temp_dir("args");
+        let host = ProcessRuntimeHost::from_config(ProcessRuntimeHostConfig {
+            args: vec!["visible".to_string()],
+            env: BTreeMap::new(),
+            cwd: dir.clone(),
+            sandbox_root: dir.clone(),
+            allow_process: true,
+        });
+        assert!(host.allows_process_execution());
+        assert_eq!(host.runtime_arg_count().expect("arg count should work"), 1);
+        assert_eq!(
+            host.runtime_arg_get(0).expect("arg get should work"),
+            "visible"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn configured_host_rejects_sandbox_escape_paths() {
+        let dir = temp_dir("sandbox");
+        let host = ProcessRuntimeHost::from_config(ProcessRuntimeHostConfig {
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: dir.clone(),
+            sandbox_root: dir.clone(),
+            allow_process: false,
+        });
+        let outside = dir
+            .parent()
+            .expect("temp dir should have parent")
+            .join("outside.txt");
+        let err = host
+            .runtime_resolve_fs_path(outside.to_string_lossy().as_ref())
+            .expect_err("absolute path outside root should fail");
+        assert!(err.contains("escapes sandbox root"), "{err}");
+
+        let err = host
+            .runtime_resolve_fs_path("../escape.txt")
+            .expect_err("parent escape should fail");
+        assert!(err.contains("escapes sandbox root"), "{err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn configured_host_denies_process_execution_without_flag() {
+        let dir = temp_dir("process");
+        let mut host = ProcessRuntimeHost::from_config(ProcessRuntimeHostConfig {
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: dir.clone(),
+            sandbox_root: dir.clone(),
+            allow_process: false,
+        });
+        let err = host
+            .runtime_process_exec_status("child.exe", &[])
+            .expect_err("process execution should be denied");
+        assert!(err.contains("process execution is disabled"), "{err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn configured_host_reads_env_from_explicit_config() {
+        let dir = temp_dir("env");
+        let mut env = BTreeMap::new();
+        env.insert("ARCANA_SAMPLE".to_string(), "value".to_string());
+        let host = ProcessRuntimeHost::from_config(ProcessRuntimeHostConfig {
+            args: Vec::new(),
+            env,
+            cwd: dir.clone(),
+            sandbox_root: dir.clone(),
+            allow_process: false,
+        });
+        assert!(
+            host.runtime_env_has("ARCANA_SAMPLE")
+                .expect("env has should work")
+        );
+        assert_eq!(
+            host.runtime_env_get("ARCANA_SAMPLE")
+                .expect("env get should work"),
+            "value"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 }

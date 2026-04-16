@@ -110,7 +110,7 @@ shackle flags WinapiInternals:
         pub(crate) last_error_text: String,
         pub(crate) desktop_state_handle: u64,
         pub(crate) next_file_stream_handle: u64,
-        pub(crate) file_streams: std::collections::BTreeMap<u64, crate::helpers_process_impl::WinapiFileStreamState>,
+        pub(crate) file_streams: std::collections::BTreeMap<u64, crate::backend_process_impl::WinapiFileStreamState>,
         pub(crate) next_surface_handle: u64,
         pub(crate) software_surfaces: std::collections::BTreeMap<u64, SoftwareSurfaceState>,
         pub(crate) next_audio_device_handle: u64,

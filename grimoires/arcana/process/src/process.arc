@@ -1,4 +1,3 @@
-import arcana_winapi.helpers.process
 import std.result
 use std.result.Result
 
@@ -7,14 +6,12 @@ export record ExecCapture:
     output: (Bytes, Bytes)
     utf8: (Bool, Bool)
 
+// `arcana_process.process` is runtime-owned host-core surface.
 export fn exec_status(program: Str, read args: List[Str]) -> Result[Int, Str]:
-    return arcana_winapi.helpers.process.process_exec_status :: program, args :: call
+    return arcana_process.process.exec_status :: program, args :: call
 
 export fn exec_capture(program: Str, read args: List[Str]) -> Result[arcana_process.process.ExecCapture, Str]:
-    let capture = arcana_winapi.helpers.process.process_exec_capture :: program, args :: call
-    return match capture:
-        Result.Ok(payload) => Result.Ok[arcana_process.process.ExecCapture, Str] :: (arcana_process.process.ExecCapture :: status = payload.0, output = (payload.1.0, payload.1.1.0), utf8 = (payload.1.1.1.0, payload.1.1.1.1) :: call) :: call
-        Result.Err(err) => Result.Err[arcana_process.process.ExecCapture, Str] :: err :: call
+    return arcana_process.process.exec_capture :: program, args :: call
 
 impl ExecCapture:
     fn success(read self: arcana_process.process.ExecCapture) -> Bool:

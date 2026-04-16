@@ -1,39 +1,39 @@
-import arcana_winapi.helpers.process
 import std.result
 use std.result.Result
 
+// `arcana_process.path` is runtime-owned host-core surface.
 export fn cwd() -> Str:
-    return arcana_winapi.helpers.process.path_cwd :: :: call
+    return arcana_process.path.cwd :: :: call
 
 export fn join(a: Str, b: Str) -> Str:
-    return arcana_winapi.helpers.process.path_join :: a, b :: call
+    return arcana_process.path.join :: a, b :: call
 
 export fn normalize(path: Str) -> Str:
-    return arcana_winapi.helpers.process.path_normalize :: path :: call
+    return arcana_process.path.normalize :: path :: call
 
 export fn parent(path: Str) -> Str:
-    return arcana_winapi.helpers.process.path_parent :: path :: call
+    return arcana_process.path.parent :: path :: call
 
 export fn file_name(path: Str) -> Str:
-    return arcana_winapi.helpers.process.path_file_name :: path :: call
+    return arcana_process.path.file_name :: path :: call
 
 export fn ext(path: Str) -> Str:
-    return arcana_winapi.helpers.process.path_ext :: path :: call
+    return arcana_process.path.ext :: path :: call
 
 export fn is_absolute(path: Str) -> Bool:
-    return arcana_winapi.helpers.process.path_is_absolute :: path :: call
+    return arcana_process.path.is_absolute :: path :: call
 
 export fn stem(path: Str) -> Result[Str, Str]:
-    return arcana_winapi.helpers.process.path_stem :: path :: call
+    return arcana_process.path.stem :: path :: call
 
 export fn with_ext(path: Str, ext: Str) -> Str:
-    return arcana_winapi.helpers.process.path_with_ext :: path, ext :: call
+    return arcana_process.path.with_ext :: path, ext :: call
 
 export fn relative_to(path: Str, base: Str) -> Result[Str, Str]:
-    return arcana_winapi.helpers.process.path_relative_to :: path, base :: call
+    return arcana_process.path.relative_to :: path, base :: call
 
 export fn canonicalize(path: Str) -> Result[Str, Str]:
-    return arcana_winapi.helpers.process.path_canonicalize :: path :: call
+    return arcana_process.path.canonicalize :: path :: call
 
 export fn strip_prefix(path: Str, prefix: Str) -> Result[Str, Str]:
-    return arcana_winapi.helpers.process.path_strip_prefix :: path, prefix :: call
+    return arcana_process.path.strip_prefix :: path, prefix :: call
