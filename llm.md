@@ -958,6 +958,12 @@ Binding products are the current package-owned foreign seam for library packages
 - `arcana_winapi` currently exposes:
   - `arcana_winapi.raw.*`
   - no package-visible backend/helper/wrapper layer
+- The raw leaves under `grimoires/arcana/winapi/src/raw/*.arc` are checked-in generated files.
+- Handwritten boundary files stay:
+  - `grimoires/arcana/winapi/src/book.arc`
+  - `grimoires/arcana/winapi/src/raw.arc`
+- Edit `grimoires/arcana/winapi/generation/*` and rerun `scripts/dev/regenerate-winapi-raw.ps1`; do not hand-edit generated raw leaves.
+- The pinned Windows SDK metadata snapshot is the authority for raw coverage. `windows-sys` is only the parity target for exposed names/signatures.
 - The current raw module set includes:
   - desktop/kernel families:
     - `callbacks`, `constants`, `kernel32`, `user32`, `gdi32`, `dwmapi`, `shcore`, `shell32`, `imm32`
@@ -970,6 +976,9 @@ Binding products are the current package-owned foreign seam for library packages
 - `arcana_winapi` does not expose a public helper, wrapper, or handle surface.
 - There is no package-visible backend module layer under `arcana_winapi` anymore.
 - If `winapi` regrows backend/helper/wrapper module namespaces or typed handle modules, that is drift. Remaining implementation support belongs under `shackle`/private support, not as Arcana package modules.
+- Current explicitly classified bootstrap-ish survivors:
+  - `audiopolicy` session policy constants, `avrt` registration imports, and `xaudio2.XAudio2CreateWithVersionInfo` are ordinary generated raw coverage
+  - `x3daudio.X3DAudioInitialize` is the initial raw-shim exception-manifest entry
 - In HIR, exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` are projected into visible symbol surface so dependent packages can call/read them through ordinary path resolution.
 - Current binding CABI semantics are symmetric for imports and callbacks:
   - same param metadata model

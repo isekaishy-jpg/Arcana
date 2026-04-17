@@ -28,6 +28,9 @@ jobs:
       - name: AnyBox Guard
         shell: pwsh
         run: ./scripts/ci/anybox_policy_guard.ps1
+      - name: WinAPI Raw Regen And Windows-Sys Parity Guard
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File ./scripts/dev/regenerate-winapi-raw.ps1 -Check
       - name: Cargo Fmt
         run: cargo fmt --all -- --check
       - name: Cargo Clippy

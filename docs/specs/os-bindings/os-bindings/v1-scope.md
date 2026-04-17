@@ -76,6 +76,8 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 Its public package shape is:
 - `arcana_winapi.raw.*` for the public raw Win32-facing surface
 - any remaining implementation support lives under `shackle`/private support only; there is no package-visible helper, wrapper, handle, or `backend.*` module layer
+- checked-in generated raw leaves live under `grimoires/arcana/winapi/src/raw/*.arc`, while `book.arc` and `raw.arc` remain handwritten routing files
+- the pinned Windows SDK metadata snapshot is the authority for raw coverage; `windows-sys` is the parity target for names/signatures, not the source of truth
 
 Its current v1 raw surface covers:
 - core type/layout families in `arcana_winapi.raw.types`
@@ -90,9 +92,10 @@ Its current v1 raw surface covers:
   - window-proc callback declaration through `arcana_winapi.raw.callbacks.WNDPROC`
   - representative audio callback declarations such as `XAUDIO2_ENGINE_ON_CRITICAL_ERROR` and `XAUDIO2_VOICE_ON_BUFFER_END`
   - raw COM-style interface/vtable layouts for the supported graphics/text/audio families
-  - session policy bootstrap
-  - AVRT registration helper
-  - XAudio2 and X3DAudio bootstrap helpers
+  - session policy bootstrap as ordinary generated raw coverage in `arcana_winapi.raw.audiopolicy`
+  - AVRT registration helper as ordinary generated raw coverage in `arcana_winapi.raw.avrt`
+  - XAudio2 versioned bootstrap import as ordinary generated raw coverage in `arcana_winapi.raw.xaudio2.XAudio2CreateWithVersionInfo`
+  - X3DAudio bootstrap helper as the initial raw-shim exception-manifest entry for `arcana_winapi.raw.x3daudio.X3DAudioInitialize`
 
 ## Boundaries
 
@@ -101,6 +104,7 @@ Its current v1 raw surface covers:
 - Host-core stream handles are owned by `arcana_process.fs.FileStream`, not by `arcana_winapi`.
 - Any unavoidable `winapi` implementation support must stay shackle-private and must not surface as package-visible backend/helper modules.
 - Package-visible `backend.*`, helper, wrapper, or handle module layers must not reappear under `arcana_winapi`.
+- New public raw leaves must come from the configured projection set. They must not appear as ad hoc handwritten modules outside the generator/config path.
 - Higher-level consumers must not regain direct runtime special cases once this seam exists.
 - No library package should talk to `windows-sys` directly in the library binding seam.
 - Rewrite crates must not keep a parallel `windows-sys` host lane beside this binding seam; Win32 access should flow through `arcana_winapi` and consumer packages.

@@ -1,0 +1,33 @@
+[[entries]]
+name = "WNDPROC"
+kind = "delegate"
+source_type = "WNDPROC"
+param_names = ["hwnd", "message", "wparam", "lparam"]
+
+[[entries]]
+name = "XAUDIO2_ENGINE_ON_PROCESSING_PASS_START"
+kind = "interface-method"
+source_type = "IXAudio2EngineCallback"
+source_method = "OnProcessingPassStart"
+
+[[entries]]
+name = "XAUDIO2_ENGINE_ON_PROCESSING_PASS_END"
+kind = "interface-method"
+source_type = "IXAudio2EngineCallback"
+source_method = "OnProcessingPassEnd"
+
+[[entries]]
+name = "XAUDIO2_ENGINE_ON_CRITICAL_ERROR"
+kind = "interface-method"
+source_type = "IXAudio2EngineCallback"
+source_method = "OnCriticalError"
+param_names = ["error"]
+param_modes = ["read"]
+
+[[entries]]
+name = "XAUDIO2_VOICE_ON_BUFFER_END"
+kind = "interface-method"
+source_type = "IXAudio2VoiceCallback"
+source_method = "OnBufferEnd"
+param_names = ["context"]
+param_modes = ["read"]

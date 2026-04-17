@@ -1,0 +1,23 @@
+# Explicit skiplist for metadata constructs or symbols that are intentionally not projected yet.
+# Keep this file checked in even when the current lists are empty so unsupported cases are fenced
+# as explicit config, not silent generator behavior.
+
+[[entries]]
+kind = "note"
+id = "reserved-for-unsupported-metadata"
+reason = "No current raw projections are skipped, but unsupported future metadata shapes must be recorded here explicitly instead of being hand-waved or hand-added."
+
+[[entries]]
+kind = "constant"
+id = "ksmedia.KSAUDIO_SPEAKER_STEREO"
+reason = "The pinned Windows.Win32 metadata snapshot does not expose KSAUDIO_SPEAKER_STEREO, so it is retired from generated raw coverage instead of being preserved as a handwritten pseudo-raw constant."
+
+[[entries]]
+kind = "type"
+id = "types.PROPVARIANT"
+reason = "PROPVARIANT lowers through nested anonymous struct and union layers in the pinned metadata snapshot, so the public Arcana raw surface keeps an explicit manual-normalized record instead of projecting the nested metadata shape directly."
+
+[[entries]]
+kind = "import"
+id = "Windows.Win32.UI.Shell.FileIconInit"
+reason = "The pinned metadata snapshot exposes FileIconInit under Windows.Win32.UI.Shell, but the generated native-product build cannot link that symbol from shell32 on the current toolchain, so it stays explicitly skipped until it can be supported as true raw coverage."

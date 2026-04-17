@@ -1,1 +1,16 @@
-// WIC bootstrap uses ole32.CoCreateInstance with IWICImagingFactory.
+// GENERATED FILE. DO NOT EDIT BY HAND.
+// Source of truth: grimoires/arcana/winapi/generation/imports.toml
+// Projection config: grimoires/arcana/winapi/generation/projection.toml
+// Source authority: Pinned Windows SDK metadata snapshot
+// Metadata authority: Windows.Win32.winmd Microsoft.Windows.SDK.Win32Metadata 63.0.31 sha256:97D24CF1A9DC3E50782BBF1DBA0952BF6A025FA583D8B3AE6C5EF713B463C869
+// Parity target: windows-sys; pinned metadata wins on disagreement.
+
+export shackle import fn WICConvertBitmapSource(dst_format: arcana_winapi.raw.types.PGUID, p_isrc: arcana_winapi.raw.types.LPVOID, pp_idst: arcana_winapi.raw.types.PLPVOID) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICConvertBitmapSource
+export shackle import fn WICCreateBitmapFromSection(width: arcana_winapi.raw.types.U32, height: arcana_winapi.raw.types.U32, pixel_format: arcana_winapi.raw.types.PGUID, h_section: arcana_winapi.raw.types.HANDLE, stride: arcana_winapi.raw.types.U32, offset: arcana_winapi.raw.types.U32, pp_ibitmap: arcana_winapi.raw.types.PLPVOID) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICCreateBitmapFromSection
+export shackle import fn WICCreateBitmapFromSectionEx(width: arcana_winapi.raw.types.U32, height: arcana_winapi.raw.types.U32, pixel_format: arcana_winapi.raw.types.PGUID, h_section: arcana_winapi.raw.types.HANDLE, stride: arcana_winapi.raw.types.U32, offset: arcana_winapi.raw.types.U32, desired_access_level: arcana_winapi.raw.types.I32, pp_ibitmap: arcana_winapi.raw.types.PLPVOID) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICCreateBitmapFromSectionEx
+export shackle import fn WICGetMetadataContentSize(guid_container_format: arcana_winapi.raw.types.PGUID, p_iwriter: arcana_winapi.raw.types.LPVOID, pcb_size: arcana_winapi.raw.types.PU64) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICGetMetadataContentSize
+export shackle import fn WICMapGuidToShortName(guid: arcana_winapi.raw.types.PGUID, cch_name: arcana_winapi.raw.types.U32, wz_name: arcana_winapi.raw.types.PWSTR, pcch_actual: arcana_winapi.raw.types.PUINT) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICMapGuidToShortName
+export shackle import fn WICMapSchemaToName(guid_metadata_format: arcana_winapi.raw.types.PGUID, pwz_schema: arcana_winapi.raw.types.PWSTR, cch_name: arcana_winapi.raw.types.U32, wz_name: arcana_winapi.raw.types.PWSTR, pcch_actual: arcana_winapi.raw.types.PUINT) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICMapSchemaToName
+export shackle import fn WICMapShortNameToGuid(wz_name: arcana_winapi.raw.types.PWSTR, pguid: arcana_winapi.raw.types.PGUID) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICMapShortNameToGuid
+export shackle import fn WICMatchMetadataContent(guid_container_format: arcana_winapi.raw.types.PGUID, pguid_vendor: arcana_winapi.raw.types.PGUID, p_istream: arcana_winapi.raw.types.LPVOID, pguid_metadata_format: arcana_winapi.raw.types.PGUID) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICMatchMetadataContent
+export shackle import fn WICSerializeMetadataContent(guid_container_format: arcana_winapi.raw.types.PGUID, p_iwriter: arcana_winapi.raw.types.LPVOID, dw_persist_options: arcana_winapi.raw.types.U32, p_istream: arcana_winapi.raw.types.LPVOID) -> arcana_winapi.raw.types.HRESULT = windowscodecs.WICSerializeMetadataContent

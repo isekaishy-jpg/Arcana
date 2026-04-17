@@ -1,0 +1,34 @@
+[[legacy_items]]
+name = "session_policy_bootstrap"
+resolution = "ordinary-generated"
+leaf = "audiopolicy"
+symbols = ["AUDIO_STREAM_CATEGORY_GAME_EFFECTS"]
+
+[[legacy_items]]
+name = "avrt_registration_helper"
+resolution = "ordinary-generated"
+leaf = "avrt"
+symbols = [
+    "AvSetMmThreadCharacteristicsW",
+    "AvRevertMmThreadCharacteristics",
+]
+
+[[legacy_items]]
+name = "xaudio2_bootstrap_helper"
+resolution = "ordinary-generated"
+leaf = "xaudio2"
+symbols = ["XAudio2CreateWithVersionInfo"]
+
+[[legacy_items]]
+name = "x3daudio_bootstrap_helper"
+resolution = "exception"
+leaf = "x3daudio"
+symbols = ["X3DAudioInitialize"]
+exception_id = "x3daudio_initialize_dynload"
+
+[[exceptions]]
+id = "x3daudio_initialize_dynload"
+leaf = "x3daudio"
+symbol = "X3DAudioInitialize"
+reason = "X3DAudioInitialize still requires dynamic loading in the current raw binding lane, so it cannot lower as a plain declarative import yet."
+implementation = "shackle-private"

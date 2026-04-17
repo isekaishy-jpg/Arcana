@@ -1,0 +1,13 @@
+[package]
+name = "arcana-winapi-gen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+toml.workspace = true
+windows-metadata.workspace = true
+windows-sys = "0.61.2"

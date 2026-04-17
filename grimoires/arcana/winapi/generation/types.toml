@@ -1,0 +1,704 @@
+[[aliases]]
+name = "BOOL"
+expr = "i32"
+
+[[aliases]]
+name = "I32"
+expr = "i32"
+
+[[aliases]]
+name = "I16"
+expr = "i16"
+
+[[aliases]]
+name = "U32"
+expr = "u32"
+
+[[aliases]]
+name = "I64"
+expr = "i64"
+
+[[aliases]]
+name = "U64"
+expr = "u64"
+
+[[aliases]]
+name = "BYTE"
+expr = "u8"
+
+[[aliases]]
+name = "WORD"
+expr = "u16"
+
+[[aliases]]
+name = "DWORD"
+expr = "u32"
+
+[[aliases]]
+name = "UINT"
+expr = "u32"
+
+[[aliases]]
+name = "ULONG"
+expr = "u32"
+
+[[aliases]]
+name = "UINT32"
+expr = "u32"
+
+[[aliases]]
+name = "UINT64"
+expr = "u64"
+
+[[aliases]]
+name = "LONG"
+expr = "i32"
+
+[[aliases]]
+name = "HRESULT"
+expr = "i32"
+
+[[aliases]]
+name = "FLOAT"
+expr = "f32"
+
+[[aliases]]
+name = "DOUBLE"
+expr = "f64"
+
+[[aliases]]
+name = "WCHAR"
+expr = "u16"
+
+[[aliases]]
+name = "LONG_PTR"
+expr = "isize"
+
+[[aliases]]
+name = "ULONG_PTR"
+expr = "usize"
+
+[[aliases]]
+name = "SIZE_T"
+expr = "usize"
+
+[[aliases]]
+name = "WPARAM"
+expr = "usize"
+
+[[aliases]]
+name = "LPARAM"
+expr = "isize"
+
+[[aliases]]
+name = "LRESULT"
+expr = "isize"
+
+[[aliases]]
+name = "ATOM"
+expr = "u16"
+
+[[aliases]]
+name = "REFERENCE_TIME"
+expr = "i64"
+
+[[aliases]]
+name = "HANDLE"
+expr = "*mut c_void"
+
+[[aliases]]
+name = "HMODULE"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HINSTANCE"
+expr = "HMODULE"
+
+[[aliases]]
+name = "HGLOBAL"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HWND"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HMENU"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HICON"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HCURSOR"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HBRUSH"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HMONITOR"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HDC"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HGDIOBJ"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HBITMAP"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HDROP"
+expr = "HANDLE"
+
+[[aliases]]
+name = "HIMC"
+expr = "HANDLE"
+
+[[aliases]]
+name = "LPVOID"
+expr = "*mut c_void"
+
+[[aliases]]
+name = "FARPROC"
+expr = "LPVOID"
+
+[[aliases]]
+name = "LPCVOID"
+expr = "*const c_void"
+
+[[aliases]]
+name = "LPCSTR"
+expr = "*const i8"
+
+[[aliases]]
+name = "PSTR"
+expr = "*mut i8"
+
+[[aliases]]
+name = "PCSTR"
+expr = "*const i8"
+
+[[aliases]]
+name = "LPWSTR"
+expr = "*mut WCHAR"
+
+[[aliases]]
+name = "LPCWSTR"
+expr = "*const WCHAR"
+
+[[aliases]]
+name = "PWSTR"
+expr = "*mut WCHAR"
+
+[[aliases]]
+name = "PCWSTR"
+expr = "*const WCHAR"
+
+[[aliases]]
+name = "PHMODULE"
+expr = "*mut HMODULE"
+
+[[aliases]]
+name = "PHANDLE"
+expr = "*mut HANDLE"
+
+[[aliases]]
+name = "PDWORD"
+expr = "*mut DWORD"
+
+[[aliases]]
+name = "PUINT"
+expr = "*mut UINT"
+
+[[aliases]]
+name = "PGUID"
+expr = "*mut GUID"
+
+[[aliases]]
+name = "REFCLSID"
+expr = "*const GUID"
+
+[[aliases]]
+name = "PIXAUDIO2"
+expr = "*mut IXAudio2"
+
+[[aliases]]
+name = "PPROPVARIANT"
+expr = "*mut PROPVARIANT"
+
+[[aliases]]
+name = "PPVOID"
+expr = "*mut *mut c_void"
+
+[[aliases]]
+name = "LPUNKNOWN"
+expr = "*mut c_void"
+
+[[aliases]]
+name = "REFGUID"
+expr = "*const GUID"
+
+[[aliases]]
+name = "REFIID"
+expr = "*const GUID"
+
+[[aliases]]
+name = "LPCGUID"
+expr = "*const GUID"
+
+[[aliases]]
+name = "RAW_WNDPROC"
+expr = 'Option<unsafe extern "system" fn(arcana_winapi.raw.types.HWND, arcana_winapi.raw.types.UINT, arcana_winapi.raw.types.WPARAM, arcana_winapi.raw.types.LPARAM) -> arcana_winapi.raw.types.LRESULT>'
+
+[[aliases]]
+name = "PCWNDCLASSW"
+expr = "*const WNDCLASSW"
+
+[[aliases]]
+name = "PWNDCLASSW"
+expr = "*mut WNDCLASSW"
+
+[[aliases]]
+name = "LPMSG"
+expr = "*mut MSG"
+
+[[aliases]]
+name = "PCMSG"
+expr = "*const MSG"
+
+[[aliases]]
+name = "PCREATESTRUCTW"
+expr = "*const CREATESTRUCTW"
+
+[[aliases]]
+name = "LPRECT"
+expr = "*mut RECT"
+
+[[aliases]]
+name = "PCRECT"
+expr = "*const RECT"
+
+[[aliases]]
+name = "LPMINMAXINFO"
+expr = "*mut MINMAXINFO"
+
+[[aliases]]
+name = "PCBITMAPINFO"
+expr = "*const BITMAPINFO"
+
+[[aliases]]
+name = "PMONITORINFO"
+expr = "*mut MONITORINFO"
+
+[[aliases]]
+name = "PMONITORINFOEXW"
+expr = "*mut MONITORINFOEXW"
+
+[[aliases]]
+name = "LPBITMAPINFO"
+expr = "*mut BITMAPINFO"
+
+[[aliases]]
+name = "LPWAVEFORMATEX"
+expr = "*mut WAVEFORMATEX"
+
+[[aliases]]
+name = "LPCWAVEFORMATEX"
+expr = "*const WAVEFORMATEX"
+
+[[aliases]]
+name = "PCD2D1_FACTORY_OPTIONS"
+expr = "*const D2D1_FACTORY_OPTIONS"
+
+[[aliases]]
+name = "LPCOMPOSITIONFORM"
+expr = "*const COMPOSITIONFORM"
+
+[[aliases]]
+name = "PCOMPOSITIONFORM"
+expr = "*mut COMPOSITIONFORM"
+
+[[aliases]]
+name = "PD2D1_FACTORY_OPTIONS"
+expr = "*mut D2D1_FACTORY_OPTIONS"
+
+[[aliases]]
+name = "PSECURITY_ATTRIBUTES"
+expr = "*mut SECURITY_ATTRIBUTES"
+
+[[aliases]]
+name = "SECURITY_ATTRIBUTES"
+expr = "c_void"
+
+[[array_aliases]]
+name = "GUID_DATA4"
+element = "U8"
+len = 8
+
+[[array_aliases]]
+name = "WCHAR32"
+element = "WCHAR"
+len = 32
+
+[[array_aliases]]
+name = "WCHAR128"
+element = "WCHAR"
+len = 128
+
+[[array_aliases]]
+name = "RGBQUAD1"
+element = "RGBQUAD"
+len = 1
+
+[[manual_records]]
+kind = "struct"
+name = "GUID"
+fields = [
+    "data1: U32",
+    "data2: U16",
+    "data3: U16",
+    "data4: GUID_DATA4",
+]
+
+[[manual_records]]
+kind = "union"
+name = "PROPVARIANT_VALUE"
+fields = [
+    "llVal: I64",
+    "ulVal: U64",
+    "pwszVal: LPWSTR",
+    "punkVal: LPVOID",
+]
+
+[[manual_records]]
+kind = "struct"
+name = "PROPVARIANT"
+fields = [
+    "vt: WORD",
+    "wReserved1: WORD",
+    "wReserved2: WORD",
+    "wReserved3: WORD",
+    "value: PROPVARIANT_VALUE",
+]
+
+[[projected]]
+kind = "enum"
+name = "DWRITE_FACTORY_TYPE"
+
+[[projected]]
+kind = "enum"
+name = "D2D1_FACTORY_TYPE"
+
+[[projected]]
+kind = "enum"
+name = "EDataFlow"
+
+[[projected]]
+kind = "enum"
+name = "ERole"
+
+[[projected]]
+kind = "enum"
+name = "AUDCLNT_SHAREMODE"
+
+[[projected]]
+kind = "enum"
+name = "AUDIO_STREAM_CATEGORY"
+
+[[projected]]
+kind = "enum"
+name = "D3D12_COMMAND_LIST_TYPE"
+
+[[projected]]
+kind = "enum"
+name = "D3D12_COMMAND_QUEUE_FLAGS"
+
+[[projected]]
+kind = "enum"
+name = "D3D12_FENCE_FLAGS"
+
+[[projected]]
+kind = "struct"
+name = "LUID"
+
+[[projected]]
+kind = "struct"
+name = "POINT"
+
+[[projected]]
+kind = "struct"
+name = "SIZE"
+
+[[projected]]
+kind = "struct"
+name = "RECT"
+
+[[projected]]
+kind = "struct"
+name = "MINMAXINFO"
+
+[[projected]]
+kind = "struct"
+name = "COMPOSITIONFORM"
+
+[[projected]]
+kind = "struct"
+name = "MSG"
+
+[[projected]]
+kind = "struct"
+name = "WNDCLASSW"
+
+[[projected]]
+kind = "struct"
+name = "CREATESTRUCTW"
+
+[[projected]]
+kind = "struct"
+name = "MONITORINFO"
+
+[[projected]]
+kind = "struct"
+name = "MONITORINFOEXW"
+
+[[projected]]
+kind = "struct"
+name = "RGBQUAD"
+
+[[projected]]
+kind = "struct"
+name = "BITMAPINFOHEADER"
+
+[[projected]]
+kind = "struct"
+name = "BITMAPINFO"
+
+[[projected]]
+kind = "struct"
+name = "PROPERTYKEY"
+
+[[projected]]
+kind = "struct"
+name = "DXGI_RATIONAL"
+
+[[projected]]
+kind = "struct"
+name = "DXGI_SAMPLE_DESC"
+
+[[projected]]
+kind = "struct"
+name = "DXGI_ADAPTER_DESC1"
+
+[[projected]]
+kind = "struct"
+name = "DXGI_SWAP_CHAIN_DESC1"
+
+[[projected]]
+kind = "struct"
+name = "D3D12_COMMAND_QUEUE_DESC"
+
+[[projected]]
+kind = "struct"
+name = "D2D1_FACTORY_OPTIONS"
+
+[[projected]]
+kind = "struct"
+name = "WAVEFORMATEX"
+
+[[projected]]
+kind = "struct"
+name = "WAVEFORMATEXTENSIBLE"
+
+[[projected]]
+kind = "struct"
+name = "AUDIOCLIENT_PROPERTIES"
+source_name = "AudioClientProperties"
+
+[[nested_records]]
+kind = "union"
+name = "WAVEFORMATEXTENSIBLE_SAMPLES"
+parent = "WAVEFORMATEXTENSIBLE"
+source_name = "_Samples_e__Union"
+
+[[interfaces]]
+name = "IUnknown"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDXGIAdapter1"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDXGIFactory4"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDXGISwapChain1"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "ID3D12Device"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "ID3D12CommandQueue"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "ID3D12CommandAllocator"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "ID3D12GraphicsCommandList"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "ID3D12Fence"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDWriteFactory"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDWriteFontCollection"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDWriteTextFormat"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IDWriteTextLayout"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "ID2D1Factory1"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IWICImagingFactory"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IMMDeviceEnumerator"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IMMDeviceCollection"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IMMDevice"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioClient"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioClient2"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioClient3"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioRenderClient"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioCaptureClient"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioClock2"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioSessionControl2"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioSessionManager2"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IAudioEndpointVolume"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IMMNotificationClient"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IXAudio2"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IXAudio2EngineCallback"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IXAudio2MasteringVoice"
+emit_vtable = false
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IXAudio2Voice"
+emit_vtable = true
+emit_pointer_alias = false
+
+[[interfaces]]
+name = "IXAudio2VoiceCallback"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IXAudio2SourceVoice"
+emit_vtable = true
+emit_pointer_alias = true
+
+[[interfaces]]
+name = "IXAudio2SubmixVoice"
+emit_vtable = false
+emit_pointer_alias = true

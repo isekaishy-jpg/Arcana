@@ -1,0 +1,514 @@
+[[entries]]
+leaf = "constants"
+name = "ERROR_CLASS_ALREADY_EXISTS"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "GWLP_USERDATA"
+type = "LONG"
+
+[[entries]]
+leaf = "constants"
+name = "WM_CLOSE"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "WM_NCCREATE"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "WM_APP"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "PM_REMOVE"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "QS_ALLINPUT"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "MWMO_INPUTAVAILABLE"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "WAIT_OBJECT_0"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "WAIT_TIMEOUT"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "WAIT_FAILED"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "INFINITE"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "WS_OVERLAPPED"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "CW_USEDEFAULT"
+type = "LONG"
+
+[[entries]]
+leaf = "constants"
+name = "MONITOR_DEFAULTTONEAREST"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "MDT_EFFECTIVE_DPI"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "DWMWA_USE_IMMERSIVE_DARK_MODE"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "COINIT_MULTITHREADED"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "COINIT_APARTMENTTHREADED"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "CLSCTX_INPROC_SERVER"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "S_OK"
+type = "HRESULT"
+
+[[entries]]
+leaf = "constants"
+name = "S_FALSE"
+type = "HRESULT"
+
+[[entries]]
+leaf = "constants"
+name = "RPC_E_CHANGED_MODE"
+type = "HRESULT"
+
+[[entries]]
+leaf = "constants"
+name = "BI_RGB"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "DIB_RGB_COLORS"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "SRCCOPY"
+type = "DWORD"
+
+[[entries]]
+leaf = "constants"
+name = "DWRITE_FACTORY_TYPE_SHARED"
+source_type = "DWRITE_FACTORY_TYPE"
+source_field = "DWRITE_FACTORY_TYPE_SHARED"
+type = "DWRITE_FACTORY_TYPE"
+
+[[entries]]
+leaf = "constants"
+name = "D2D1_FACTORY_TYPE_SINGLE_THREADED"
+source_type = "D2D1_FACTORY_TYPE"
+source_field = "D2D1_FACTORY_TYPE_SINGLE_THREADED"
+type = "D2D1_FACTORY_TYPE"
+
+[[entries]]
+leaf = "constants"
+name = "D2D1_FACTORY_TYPE_MULTI_THREADED"
+source_type = "D2D1_FACTORY_TYPE"
+source_field = "D2D1_FACTORY_TYPE_MULTI_THREADED"
+type = "D2D1_FACTORY_TYPE"
+
+[[entries]]
+leaf = "constants"
+name = "EDATAFLOW_RENDER"
+source_type = "EDataFlow"
+source_field = "eRender"
+type = "EDataFlow"
+
+[[entries]]
+leaf = "constants"
+name = "EROLE_CONSOLE"
+source_type = "ERole"
+source_field = "eConsole"
+type = "ERole"
+
+[[entries]]
+leaf = "constants"
+name = "AUDCLNT_SHAREMODE_SHARED"
+source_type = "AUDCLNT_SHAREMODE"
+source_field = "AUDCLNT_SHAREMODE_SHARED"
+type = "AUDCLNT_SHAREMODE"
+
+[[entries]]
+leaf = "constants"
+name = "DXGI_FORMAT_B8G8R8A8_UNORM"
+source_type = "DXGI_FORMAT"
+source_field = "DXGI_FORMAT_B8G8R8A8_UNORM"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "DXGI_USAGE_RENDER_TARGET_OUTPUT"
+source_type = "DXGI_USAGE"
+source_field = "DXGI_USAGE_RENDER_TARGET_OUTPUT"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "DXGI_SCALING_STRETCH"
+source_type = "DXGI_SCALING"
+source_field = "DXGI_SCALING_STRETCH"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "DXGI_SWAP_EFFECT_FLIP_DISCARD"
+source_type = "DXGI_SWAP_EFFECT"
+source_field = "DXGI_SWAP_EFFECT_FLIP_DISCARD"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "DXGI_ALPHA_MODE_IGNORE"
+source_type = "DXGI_ALPHA_MODE"
+source_field = "DXGI_ALPHA_MODE_IGNORE"
+type = "UINT"
+
+[[entries]]
+leaf = "constants"
+name = "D3D12_COMMAND_LIST_TYPE_DIRECT"
+source_type = "D3D12_COMMAND_LIST_TYPE"
+source_field = "D3D12_COMMAND_LIST_TYPE_DIRECT"
+type = "D3D12_COMMAND_LIST_TYPE"
+
+[[entries]]
+leaf = "constants"
+name = "D3D12_COMMAND_QUEUE_FLAGS_NONE"
+source_type = "D3D12_COMMAND_QUEUE_FLAGS"
+source_field = "D3D12_COMMAND_QUEUE_FLAG_NONE"
+type = "D3D12_COMMAND_QUEUE_FLAGS"
+
+[[entries]]
+leaf = "constants"
+name = "D3D12_FENCE_FLAGS_NONE"
+source_type = "D3D12_FENCE_FLAGS"
+source_field = "D3D12_FENCE_FLAG_NONE"
+type = "D3D12_FENCE_FLAGS"
+
+[[entries]]
+leaf = "constants"
+name = "D3D12_COMMAND_QUEUE_PRIORITY_NORMAL"
+source_type = "D3D12_COMMAND_QUEUE_PRIORITY"
+source_field = "D3D12_COMMAND_QUEUE_PRIORITY_NORMAL"
+type = "I32"
+
+[[entries]]
+leaf = "constants"
+name = "XAUDIO2_DEFAULT_CHANNELS"
+type = "UINT32"
+
+[[entries]]
+leaf = "constants"
+name = "XAUDIO2_DEFAULT_SAMPLERATE"
+type = "UINT32"
+
+[[entries]]
+leaf = "constants"
+name = "XAUDIO2_DEFAULT_PROCESSOR"
+type = "UINT32"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_EVENTCALLBACK"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_LOOPBACK"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_CROSSPROCESS"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_NOPERSIST"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_RATEADJUST"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_BUFFERFLAGS_SILENT"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_SESSIONFLAGS_DISPLAY_HIDE"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_SESSIONFLAGS_DISPLAY_HIDEWHENEXPIRED"
+type = "DWORD"
+
+[[entries]]
+leaf = "audioclient"
+name = "AUDCLNT_SESSIONFLAGS_EXPIREWHENUNOWNED"
+type = "DWORD"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_GAME_EFFECTS"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_GameEffects"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_OTHER"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_Other"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_MEDIA"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_Media"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_MOVIE"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_Movie"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_COMMUNICATIONS"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_Communications"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_ALERTS"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_Alerts"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_SOUND_EFFECTS"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_SoundEffects"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_GAME_MEDIA"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_GameMedia"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_GAME_CHAT"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_GameChat"
+type = "U32"
+
+[[entries]]
+leaf = "audiopolicy"
+name = "AUDIO_STREAM_CATEGORY_SPEECH"
+source_type = "AUDIO_STREAM_CATEGORY"
+source_field = "AudioCategory_Speech"
+type = "U32"
+
+[[entries]]
+leaf = "endpointvolume"
+name = "ENDPOINT_HARDWARE_SUPPORT_VOLUME"
+type = "DWORD"
+
+[[entries]]
+leaf = "endpointvolume"
+name = "ENDPOINT_HARDWARE_SUPPORT_MUTE"
+type = "DWORD"
+
+[[entries]]
+leaf = "endpointvolume"
+name = "ENDPOINT_HARDWARE_SUPPORT_METER"
+type = "DWORD"
+
+[[entries]]
+leaf = "mmdeviceapi"
+name = "DEVICE_STATE_ACTIVE"
+type = "DWORD"
+
+[[entries]]
+leaf = "mmdeviceapi"
+name = "DEVICE_STATE_DISABLED"
+type = "DWORD"
+
+[[entries]]
+leaf = "mmdeviceapi"
+name = "DEVICE_STATE_NOTPRESENT"
+type = "DWORD"
+
+[[entries]]
+leaf = "mmdeviceapi"
+name = "DEVICE_STATE_UNPLUGGED"
+type = "DWORD"
+
+[[entries]]
+leaf = "mmdeviceapi"
+name = "DEVICE_STATEMASK_ALL"
+type = "DWORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_PCM"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_EXTENSIBLE"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_IEEE_FLOAT"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_ALAW"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_MULAW"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_ADPCM"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_MPEG"
+type = "WORD"
+
+[[entries]]
+leaf = "mmreg"
+name = "WAVE_FORMAT_MPEGLAYER3"
+type = "WORD"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_QUALITY_BASIC"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_QUALITY_PC"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_QUALITY_ADVANCED"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_QUALITY_WORST"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_SPEAKER_DIRECTOUT"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_SPEAKER_MONO"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_SPEAKER_SUPER_WOOFER"
+type = "UINT"
+
+[[entries]]
+leaf = "ksmedia"
+name = "KSAUDIO_SPEAKER_TOP_MIDDLE"
+type = "UINT"

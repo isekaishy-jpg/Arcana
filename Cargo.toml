@@ -9,6 +9,7 @@ members = [
     "crates/arcana-package",
     "crates/arcana-runtime",
     "crates/arcana-syntax",
+    "crates/arcana-winapi-gen",
 ]
 default-members = [
     "crates/arcana-aot",
@@ -20,6 +21,7 @@ default-members = [
     "crates/arcana-package",
     "crates/arcana-runtime",
     "crates/arcana-syntax",
+    "crates/arcana-winapi-gen",
 ]
 resolver = "2"
 
@@ -47,3 +49,4 @@ serde_stacker = "0.1"
 sha2 = "0.10"
 fs2 = "0.4"
 toml = "0.8"
+windows-metadata = "0.60"

@@ -1,0 +1,109 @@
+[[leaves]]
+name = "callbacks"
+kind = "callbacks"
+
+[[leaves]]
+name = "constants"
+kind = "constants"
+
+[[leaves]]
+name = "gdi32"
+kind = "imports"
+
+[[leaves]]
+name = "dwmapi"
+kind = "imports"
+
+[[leaves]]
+name = "shcore"
+kind = "imports"
+
+[[leaves]]
+name = "shell32"
+kind = "imports"
+
+[[leaves]]
+name = "imm32"
+kind = "imports"
+
+[[leaves]]
+name = "kernel32"
+kind = "imports"
+
+[[leaves]]
+name = "ole32"
+kind = "imports"
+
+[[leaves]]
+name = "combase"
+kind = "imports"
+binding_library = "ole32"
+
+[[leaves]]
+name = "dxgi"
+kind = "imports"
+
+[[leaves]]
+name = "d3d12"
+kind = "imports"
+
+[[leaves]]
+name = "dwrite"
+kind = "imports"
+
+[[leaves]]
+name = "d2d1"
+kind = "imports"
+
+[[leaves]]
+name = "wic"
+kind = "imports"
+binding_library = "windowscodecs"
+
+[[leaves]]
+name = "mmdeviceapi"
+kind = "constants"
+
+[[leaves]]
+name = "audioclient"
+kind = "constants"
+
+[[leaves]]
+name = "audiopolicy"
+kind = "constants"
+
+[[leaves]]
+name = "endpointvolume"
+kind = "constants"
+
+[[leaves]]
+name = "avrt"
+kind = "imports"
+
+[[leaves]]
+name = "mmreg"
+kind = "constants"
+
+[[leaves]]
+name = "ksmedia"
+kind = "constants"
+
+[[leaves]]
+name = "propsys"
+kind = "imports"
+
+[[leaves]]
+name = "xaudio2"
+kind = "imports"
+
+[[leaves]]
+name = "x3daudio"
+kind = "raw-shim"
+
+[[leaves]]
+name = "types"
+kind = "types"
+
+[[leaves]]
+name = "user32"
+kind = "imports"

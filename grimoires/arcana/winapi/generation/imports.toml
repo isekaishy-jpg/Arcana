@@ -1,0 +1,103 @@
+[avrt]
+namespaces = ["Windows.Win32.System.Threading"]
+libraries = ["avrt"]
+symbol_prefixes = ["Av"]
+
+[combase]
+namespaces = ["Windows.Win32.System.Com"]
+libraries = ["ole32"]
+symbol_prefixes = ["CLSID", "IID", "ProgID", "StringFrom"]
+
+[d2d1]
+namespaces = ["Windows.Win32.Graphics.Direct2D"]
+libraries = ["d2d1"]
+
+[d3d12]
+namespaces = ["Windows.Win32.Graphics.Direct3D12"]
+libraries = ["d3d12"]
+
+[dwmapi]
+namespaces = ["Windows.Win32.Graphics.Dwm"]
+libraries = ["dwmapi"]
+
+[dwrite]
+namespaces = ["Windows.Win32.Graphics.DirectWrite"]
+libraries = ["dwrite"]
+
+[dxgi]
+namespaces = ["Windows.Win32.Graphics.Dxgi"]
+libraries = ["dxgi"]
+# Present in the pinned metadata, but not exported by the live system DXGI on the
+# current validation baseline.
+exclude_symbols = ["DXGIDisableVBlankVirtualization"]
+
+[gdi32]
+namespaces = ["Windows.Win32.Graphics.Gdi"]
+libraries = ["gdi32"]
+
+[imm32]
+namespaces = ["Windows.Win32.UI.Input.Ime"]
+libraries = ["imm32"]
+
+[kernel32]
+namespaces = [
+    "Windows.Win32.Foundation",
+    "Windows.Win32.System.LibraryLoader",
+    "Windows.Win32.System.Memory",
+    "Windows.Win32.System.Threading",
+]
+libraries = ["kernel32"]
+# Present in metadata but missing from the live kernel32 export set on the current
+# validation baseline, so they stay out of the generated eager-import surface.
+exclude_symbols = [
+    "GetMachineTypeAttributes",
+    "GetNumaNodeProcessorMask2",
+    "GetProcessDefaultCpuSetMasks",
+    "GetThreadSelectedCpuSetMasks",
+    "SetProcessDefaultCpuSetMasks",
+    "SetThreadSelectedCpuSetMasks",
+]
+
+[ole32]
+namespaces = ["Windows.Win32.System.Com", "Windows.Win32.System.Ole"]
+libraries = ["ole32"]
+symbol_prefixes = ["Co", "Ole"]
+# Present in metadata but not exported by the live ole32 import set on the current
+# validation baseline.
+exclude_symbols = ["CoRegisterDeviceCatalog", "CoRevokeDeviceCatalog"]
+
+[propsys]
+namespaces = ["Windows.Win32.UI.Shell.PropertiesSystem"]
+libraries = ["propsys"]
+
+[shcore]
+namespaces = ["Windows.Win32.UI.HiDpi"]
+libraries = ["api-ms-win-shcore-scaling-l1-1-1", "shcore"]
+
+[shell32]
+namespaces = ["Windows.Win32.UI.Shell"]
+libraries = ["shell32"]
+
+[wic]
+namespaces = ["Windows.Win32.Graphics.Imaging"]
+libraries = ["windowscodecs"]
+
+[user32]
+namespaces = [
+    "Windows.Win32.Graphics.Gdi",
+    "Windows.Win32.System.DataExchange",
+    "Windows.Win32.UI.HiDpi",
+    "Windows.Win32.UI.WindowsAndMessaging",
+]
+libraries = ["user32"]
+# These metadata entries lower to ordinal-only USER32 imports that are not present
+# on the current validation baseline.
+exclude_symbols = [
+    "RegisterForTooltipDismissNotification",
+    "SetAdditionalForegroundBoostProcesses",
+]
+
+[xaudio2]
+namespaces = ["Windows.Win32.Media.Audio.XAudio2"]
+libraries = ["xaudio2", "xaudio2_9", "xaudio2_8"]
+symbol_prefixes = ["XAudio2"]

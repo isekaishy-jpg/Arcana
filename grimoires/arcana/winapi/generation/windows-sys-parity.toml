@@ -1,0 +1,73 @@
+supported_leaves = [
+    "avrt",
+    "combase",
+    "dwmapi",
+    "gdi32",
+    "imm32",
+    "kernel32",
+    "ole32",
+    "propsys",
+    "shcore",
+    "shell32",
+    "user32",
+]
+
+[[skipped_leaves]]
+leaf = "d2d1"
+reason = "The pinned windows-sys 0.61.2 source tree does not publish a Windows.Win32.Graphics.Direct2D module subtree to compare against."
+
+[[skipped_leaves]]
+leaf = "d3d12"
+reason = "The pinned windows-sys 0.61.2 source tree does not publish a Windows.Win32.Graphics.Direct3D12 module subtree to compare against."
+
+[[skipped_leaves]]
+leaf = "dwrite"
+reason = "The pinned windows-sys 0.61.2 source tree does not publish a Windows.Win32.Graphics.DirectWrite module subtree to compare against."
+
+[[skipped_leaves]]
+leaf = "dxgi"
+reason = "The pinned windows-sys 0.61.2 source tree does not publish a Windows.Win32.Graphics.Dxgi module subtree to compare against."
+
+[[skipped_leaves]]
+leaf = "wic"
+reason = "The pinned windows-sys 0.61.2 source tree does not publish a Windows.Win32.Graphics.Imaging module subtree to compare against."
+
+[[skipped_leaves]]
+leaf = "xaudio2"
+reason = "The pinned windows-sys 0.61.2 source tree does not publish a Windows.Win32.Media.Audio.XAudio2 module subtree to compare against."
+
+[[divergences]]
+leaf = "ole32"
+symbol = "CoCreateFreeThreadedMarshaler"
+kind = "library-mismatch"
+reason = "Pinned Windows.Win32 metadata keeps this import under ole32 for Arcana raw projection, while windows-sys 0.61.2 sources it from combase.dll."
+
+[[divergences]]
+leaf = "ole32"
+symbol = "CoGetInterceptor"
+kind = "unexpected"
+reason = "Pinned Windows.Win32 metadata still exposes this ole32 import in the authoritative snapshot, but windows-sys 0.61.2 does not emit it in the upstream source tree."
+
+[[divergences]]
+leaf = "ole32"
+symbol = "CoGetInterceptorFromTypeInfo"
+kind = "unexpected"
+reason = "Pinned Windows.Win32 metadata still exposes this ole32 import in the authoritative snapshot, but windows-sys 0.61.2 does not emit it in the upstream source tree."
+
+[[divergences]]
+leaf = "ole32"
+symbol = "CoIncrementMTAUsage"
+kind = "library-mismatch"
+reason = "Pinned Windows.Win32 metadata keeps this import under ole32 for Arcana raw projection, while windows-sys 0.61.2 sources it from combase.dll."
+
+[[divergences]]
+leaf = "ole32"
+symbol = "CoTaskMemAlloc"
+kind = "library-mismatch"
+reason = "Pinned Windows.Win32 metadata keeps this import under ole32 for Arcana raw projection, while windows-sys 0.61.2 sources it from combase.dll."
+
+[[divergences]]
+leaf = "ole32"
+symbol = "CoTaskMemFree"
+kind = "library-mismatch"
+reason = "Pinned Windows.Win32 metadata keeps this import under ole32 for Arcana raw projection, while windows-sys 0.61.2 sources it from combase.dll."

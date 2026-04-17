@@ -1,3 +1,10 @@
+// GENERATED FILE. DO NOT EDIT BY HAND.
+// Source of truth: grimoires/arcana/winapi/generation/constants.toml
+// Projection config: grimoires/arcana/winapi/generation/projection.toml
+// Source authority: Pinned Windows SDK metadata snapshot
+// Metadata authority: Windows.Win32.winmd Microsoft.Windows.SDK.Win32Metadata 63.0.31 sha256:97D24CF1A9DC3E50782BBF1DBA0952BF6A025FA583D8B3AE6C5EF713B463C869
+// Parity target: windows-sys; pinned metadata wins on disagreement.
+
 export shackle const ERROR_CLASS_ALREADY_EXISTS: arcana_winapi.raw.types.DWORD = 1410
 export shackle const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: arcana_winapi.raw.types.DWORD = 2
 export shackle const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: arcana_winapi.raw.types.DWORD = 4
@@ -6,7 +13,7 @@ export shackle const WM_CLOSE: arcana_winapi.raw.types.UINT = 16
 export shackle const WM_NCCREATE: arcana_winapi.raw.types.UINT = 129
 export shackle const WM_APP: arcana_winapi.raw.types.UINT = 32768
 export shackle const PM_REMOVE: arcana_winapi.raw.types.UINT = 1
-export shackle const QS_ALLINPUT: arcana_winapi.raw.types.DWORD = 1023
+export shackle const QS_ALLINPUT: arcana_winapi.raw.types.DWORD = 1279
 export shackle const MWMO_INPUTAVAILABLE: arcana_winapi.raw.types.DWORD = 4
 export shackle const WAIT_OBJECT_0: arcana_winapi.raw.types.DWORD = 0
 export shackle const WAIT_TIMEOUT: arcana_winapi.raw.types.DWORD = 258

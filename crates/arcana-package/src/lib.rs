@@ -3772,7 +3772,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("dist-bundle");
         let bundle = stage_distribution_bundle(
             &graph,
             &statuses,
@@ -3893,7 +3893,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("dist-bundle");
         let bundle = stage_distribution_bundle(
             &graph,
             &statuses,
@@ -4026,7 +4026,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("dist-bundle");
         let bundle = stage_distribution_bundle(
             &graph,
             &statuses,
@@ -4180,6 +4180,248 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn winapi_raw_leaves_are_generated_and_projection_driven() {
+        let winapi_root = repo_root().join("grimoires").join("arcana").join("winapi");
+        let generation_root = winapi_root.join("generation");
+        let projection_text = fs::read_to_string(generation_root.join("projection.toml"))
+            .expect("winapi projection config should load");
+        let projection: toml::Value =
+            toml::from_str(&projection_text).expect("winapi projection config should parse");
+        let leaves = projection
+            .get("leaves")
+            .and_then(toml::Value::as_array)
+            .expect("winapi projection config should contain a leaves array");
+
+        let expected = leaves
+            .iter()
+            .map(|leaf| {
+                leaf.get("name")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_else(|| panic!("projection leaf is missing a string name: {leaf:?}"))
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !expected.is_empty(),
+            "winapi projection config should list generated raw leaves"
+        );
+
+        for leaf in leaves {
+            let name = leaf
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("projection leaf is missing a string name: {leaf:?}"));
+            let kind = leaf
+                .get("kind")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("projection leaf is missing a string kind: {leaf:?}"));
+            assert!(
+                matches!(
+                    kind,
+                    "callbacks" | "constants" | "imports" | "raw-shim" | "types"
+                ),
+                "projection leaf `{}` should use a supported generation kind",
+                name
+            );
+            let generated_path = winapi_root
+                .join("src")
+                .join("raw")
+                .join(format!("{name}.arc"));
+            let generated = fs::read_to_string(&generated_path).unwrap_or_else(|err| {
+                panic!(
+                    "failed to load generated raw leaf {}: {err}",
+                    generated_path.display()
+                )
+            });
+            assert!(
+                generated.starts_with("// GENERATED FILE. DO NOT EDIT BY HAND.\n"),
+                "{} should be fenced as a generated file",
+                generated_path.display()
+            );
+            assert!(
+                generated.contains(
+                    "// Projection config: grimoires/arcana/winapi/generation/projection.toml\n"
+                ),
+                "{} should point back at the checked-in projection config",
+                generated_path.display()
+            );
+            assert!(
+                generated.contains("// Source of truth: grimoires/arcana/winapi/generation/")
+                    && !generated.contains("generation/inputs/raw/"),
+                "{} should point back at a checked-in generation manifest instead of a handwritten raw input file",
+                generated_path.display()
+            );
+        }
+
+        let actual = fs::read_dir(winapi_root.join("src").join("raw"))
+            .expect("winapi raw dir should load")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("arc"))
+            .map(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or_else(|| panic!("non-utf8 raw leaf path {}", path.display()))
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual, expected,
+            "winapi raw dir should contain only generated leaves from the configured projection set"
+        );
+        assert!(
+            !generation_root.join("inputs").exists(),
+            "metadata-driven winapi generation should not keep a handwritten generation/inputs subtree"
+        );
+        for manifest in [
+            "metadata.toml",
+            "projection.toml",
+            "imports.toml",
+            "constants.toml",
+            "callbacks.toml",
+            "types.toml",
+            "exceptions.toml",
+            "skiplist.toml",
+            "windows-sys-parity.toml",
+        ] {
+            assert!(
+                generation_root.join(manifest).is_file(),
+                "winapi generation should keep checked-in manifest `{manifest}`"
+            );
+        }
+
+        let parity_report = fs::read_to_string(generation_root.join("parity-report.md"))
+            .expect("winapi generation should keep a checked-in parity report");
+        for leaf in &expected {
+            assert!(
+                parity_report.contains(&format!("## {leaf}\n")),
+                "winapi parity report should mention generated raw leaf `{leaf}`"
+            );
+        }
+    }
+
+    #[test]
+    fn winapi_current_family_import_leaves_use_broad_namespace_projection() {
+        let generation_root = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .join("generation");
+        let imports_text = fs::read_to_string(generation_root.join("imports.toml"))
+            .expect("winapi imports manifest should load");
+        let imports: toml::Value =
+            toml::from_str(&imports_text).expect("winapi imports manifest should parse");
+
+        for leaf in [
+            "avrt", "d2d1", "d3d12", "dwmapi", "dwrite", "dxgi", "gdi32", "imm32", "kernel32",
+            "ole32", "combase", "propsys", "shcore", "shell32", "user32", "wic", "xaudio2",
+        ] {
+            let entry = imports.get(leaf).unwrap_or_else(|| {
+                panic!("winapi imports manifest should define current-family leaf `{leaf}`")
+            });
+            let namespaces = entry
+                .get("namespaces")
+                .and_then(toml::Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "winapi imports manifest should project current-family leaf `{leaf}` through namespace-driven coverage"
+                    )
+                });
+            assert!(
+                !namespaces.is_empty(),
+                "winapi imports manifest should keep at least one namespace prefix for `{leaf}`"
+            );
+            let symbols = entry
+                .get("symbols")
+                .and_then(toml::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                symbols.is_empty(),
+                "winapi imports manifest should not keep `{leaf}` on a hand-curated explicit symbol list"
+            );
+        }
+    }
+
+    #[test]
+    fn winapi_audio_constant_leaves_keep_non_trivial_metadata_coverage() {
+        let generation_root = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .join("generation");
+        let constants_text = fs::read_to_string(generation_root.join("constants.toml"))
+            .expect("winapi constants manifest should load");
+        let constants: toml::Value =
+            toml::from_str(&constants_text).expect("winapi constants manifest should parse");
+        let entries = constants
+            .get("entries")
+            .and_then(toml::Value::as_array)
+            .expect("winapi constants manifest should define entries");
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for entry in entries {
+            let leaf = entry
+                .get("leaf")
+                .and_then(toml::Value::as_str)
+                .expect("winapi constant entry should include a leaf");
+            *counts.entry(leaf.to_string()).or_default() += 1;
+        }
+
+        for (leaf, minimum) in [
+            ("mmdeviceapi", 5usize),
+            ("audioclient", 13usize),
+            ("audiopolicy", 9usize),
+            ("endpointvolume", 3usize),
+            ("mmreg", 8usize),
+            ("ksmedia", 8usize),
+        ] {
+            let count = counts.get(leaf).copied().unwrap_or_default();
+            assert!(
+                count >= minimum,
+                "winapi constants manifest should keep broad current-family audio coverage for `{leaf}` (expected at least {minimum}, found {count})"
+            );
+        }
+    }
+
+    #[test]
+    fn winapi_audio_types_manifest_projects_extended_current_family_interfaces() {
+        let generation_root = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .join("generation");
+        let types_text = fs::read_to_string(generation_root.join("types.toml"))
+            .expect("winapi types manifest should load");
+        let types: toml::Value =
+            toml::from_str(&types_text).expect("winapi types manifest should parse");
+        let interfaces = types
+            .get("interfaces")
+            .and_then(toml::Value::as_array)
+            .expect("winapi types manifest should define interfaces");
+        let interface_names = interfaces
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(toml::Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in [
+            "IAudioClient3",
+            "IAudioCaptureClient",
+            "IAudioClock2",
+            "IAudioSessionControl2",
+            "IAudioSessionManager2",
+            "IMMNotificationClient",
+            "IXAudio2EngineCallback",
+            "IXAudio2VoiceCallback",
+            "IXAudio2SourceVoice",
+            "IXAudio2SubmixVoice",
+        ] {
+            assert!(
+                interface_names.contains(name),
+                "winapi types manifest should project extended current-family audio interface `{name}`"
+            );
+        }
     }
 
     #[test]
@@ -4404,7 +4646,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("dist-bundle");
         let bundle = stage_distribution_bundle(
             &graph,
             &statuses,
@@ -4533,7 +4775,7 @@ mod tests {
         )
         .expect("windows exe build should succeed");
 
-        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle_dir = dir.join("dist-bundle");
         stage_distribution_bundle(
             &graph,
             &statuses,
