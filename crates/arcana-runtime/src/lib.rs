@@ -8489,15 +8489,10 @@ fn parse_runtime_direct_callable_signature(line: &str) -> Option<(String, Vec<St
         .strip_prefix("export ")
         .map(str::trim_start)
         .unwrap_or(line);
-    rest = if let Some(next) = rest.strip_prefix("intrinsic fn ") {
-        next
-    } else if let Some(next) = rest.strip_prefix("async fn ") {
-        next
-    } else if let Some(next) = rest.strip_prefix("fn ") {
-        next
-    } else {
-        return None;
-    };
+    rest = rest
+        .strip_prefix("intrinsic fn ")
+        .or_else(|| rest.strip_prefix("async fn "))
+        .or_else(|| rest.strip_prefix("fn "))?;
     let open = find_runtime_signature_open_paren(rest)?;
     let name_text = rest[..open].trim();
     let name = name_text.split('[').next()?.trim();

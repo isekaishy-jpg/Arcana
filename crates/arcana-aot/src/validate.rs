@@ -895,37 +895,29 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
 
     for decl in &artifact.shackle_decls {
         match decl.kind.as_str() {
-            "type" | "struct" | "union" | "callback" => {
-                if decl.raw_layout.is_none() {
-                    return Err(format!(
-                        "backend artifact shackle {} `{}` is missing typed raw layout metadata",
-                        decl.kind, decl.name
-                    ));
-                }
+            "type" | "struct" | "union" | "callback" if decl.raw_layout.is_none() => {
+                return Err(format!(
+                    "backend artifact shackle {} `{}` is missing typed raw layout metadata",
+                    decl.kind, decl.name
+                ));
             }
-            "flags" if decl.binding.is_some() => {
-                if decl.raw_layout.is_none() {
-                    return Err(format!(
-                        "backend artifact shackle flags `{}` is missing typed raw layout metadata",
-                        decl.name
-                    ));
-                }
+            "flags" if decl.binding.is_some() && decl.raw_layout.is_none() => {
+                return Err(format!(
+                    "backend artifact shackle flags `{}` is missing typed raw layout metadata",
+                    decl.name
+                ));
             }
-            "import fn" | "import_fn" => {
-                if decl.import_target.is_none() {
-                    return Err(format!(
-                        "backend artifact shackle import fn `{}` is missing typed import metadata",
-                        decl.name
-                    ));
-                }
+            "import fn" | "import_fn" if decl.import_target.is_none() => {
+                return Err(format!(
+                    "backend artifact shackle import fn `{}` is missing typed import metadata",
+                    decl.name
+                ));
             }
-            "thunk" => {
-                if decl.thunk_target.is_none() {
-                    return Err(format!(
-                        "backend artifact shackle thunk `{}` is missing typed thunk metadata",
-                        decl.name
-                    ));
-                }
+            "thunk" if decl.thunk_target.is_none() => {
+                return Err(format!(
+                    "backend artifact shackle thunk `{}` is missing typed thunk metadata",
+                    decl.name
+                ));
             }
             _ => {}
         }

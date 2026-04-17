@@ -10682,15 +10682,16 @@ fn validate_recycle_modifier_semantics(
                 message: "`recycle -continue` is only valid inside a loop".to_string(),
             });
         }
-        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return) => {
-            if modifier.payload.is_none() && !matches!(gate_shape, Some(GateShape::Result { .. })) {
-                diagnostics.push(Diagnostic {
-                    path: module_path.to_path_buf(),
-                    line: modifier.span.line,
-                    column: modifier.span.column,
-                    message: "bare `-return` in recycle requires Result failure".to_string(),
-                });
-            }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return)
+            if modifier.payload.is_none()
+                && !matches!(gate_shape, Some(GateShape::Result { .. })) =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "bare `-return` in recycle requires Result failure".to_string(),
+            });
         }
         arcana_hir::HirHeadedModifierKind::Name(name) => match scope.active_owner_for_exit(name) {
             Ok(Some(_)) => {}
@@ -10720,15 +10721,16 @@ fn validate_bind_modifier_semantics(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match &modifier.kind {
-        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return) => {
-            if modifier.payload.is_none() && !matches!(gate_shape, Some(GateShape::Result { .. })) {
-                diagnostics.push(Diagnostic {
-                    path: module_path.to_path_buf(),
-                    line: modifier.span.line,
-                    column: modifier.span.column,
-                    message: "bare `-return` in bind requires Result failure".to_string(),
-                });
-            }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return)
+            if modifier.payload.is_none()
+                && !matches!(gate_shape, Some(GateShape::Result { .. })) =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "bare `-return` in bind requires Result failure".to_string(),
+            });
         }
         arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Default) => {
             if !matches!(line_kind, arcana_hir::HirBindLineKind::Let { .. }) {
@@ -10748,15 +10750,15 @@ fn validate_bind_modifier_semantics(
                 });
             }
         }
-        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Preserve) => {
-            if !matches!(line_kind, arcana_hir::HirBindLineKind::Assign { .. }) {
-                diagnostics.push(Diagnostic {
-                    path: module_path.to_path_buf(),
-                    line: modifier.span.line,
-                    column: modifier.span.column,
-                    message: "`bind -preserve` is only valid on `name = gate` lines".to_string(),
-                });
-            }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Preserve)
+            if !matches!(line_kind, arcana_hir::HirBindLineKind::Assign { .. }) =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`bind -preserve` is only valid on `name = gate` lines".to_string(),
+            });
         }
         arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Replace) => {
             if !matches!(line_kind, arcana_hir::HirBindLineKind::Assign { .. }) {

@@ -1,6 +1,6 @@
 # Arcana Temporary Review
 
-Status: static review in progress; resolved crate findings removed after recheck, remaining grimoire and architecture findings retained
+Status: static review in progress; resolved crate, process, and winapi event-layer findings removed after recheck, remaining grimoire and architecture findings retained
 
 Method:
 - Read-only review
@@ -32,56 +32,15 @@ Coverage Status:
 - `arcana-cabi`: partially audited
 - `arcana-syntax`: spot-audited, no concrete defect logged yet
 - `arcana-ir`: spot-audited, no concrete defect logged yet
-- `grimoires/arcana/winapi`: partially audited
-- `grimoires/arcana/process`: partially audited
+- `grimoires/arcana/winapi`: partially audited; latest event/frame cleanup rechecked and trimmed from active findings
+- `grimoires/arcana/process`: partially audited; latest process-plan findings rechecked and removed
 - `grimoires/libs/*`: no files present in current workspace
 
 Findings:
 
-Resolved crate/package/runtime/frontend findings that are actually fixed in the current tree were removed from this file after rechecking the code. Remaining active findings:
+Resolved crate/package/runtime/frontend/process and winapi event-layer findings that are actually fixed in the current tree were removed from this file after rechecking the code. Remaining active findings:
 
-1. High - `docs/specs/resources/resources/v1-scope.md:12-21`, `docs/specs/access-modes/access-modes/v1-scope.md:38-46`, `grimoires/arcana/winapi/src/desktop_handles.arc:3`, `grimoires/arcana/winapi/src/helpers/events.arc:59-63`, and `grimoires/arcana/winapi/src/helpers_desktop_impl.arc:2541-2601`
-`WakeHandle` breaks the approved resource-handle law. The type is declared `copy`, `wake_close` is exported as `edit` instead of `take`, and the implementation then removes and closes the one underlying Windows event handle. Any copied alias survives in user code and only fails later with `invalid WakeHandle` when it is used. That is not explicit or diagnosable ownership invalidation; it is hidden stale-handle fallout. The implementation also ignores the return value from `CloseHandle`, so close can leak the OS handle while still reporting success.
-
-Related info:
-- The approved resource scope freezes these handle families as typed resource handles, and the access-mode scope explicitly says consuming resource operations such as `close` must follow the normal `take` law.
-- The rest of this package mostly follows that rule: `window_close`, `stream_close`, `output_close`, and `playback_stop` are all consuming operations. `wake_close` is the odd, wrong one.
-- Making a closable handle `copy` is already suspect because alias copies defeat ordinary ownership invalidation. Pairing that with an `edit` close operation is worse, because the source contract never communicates consumption at all.
-- If `CloseHandle` fails, the backing event handle is already dropped from the package map, so the error is not just swallowed; the code also loses the only tracked reference needed for a retry or structured recovery.
-
-Possible solutions for correctness:
-- Make `WakeHandle` a `move` opaque type, not `copy`.
-- Change `wake_close` to a consuming `take` operation and propagate `CloseHandle` failure as a real error instead of ignoring it.
-- Audit any call sites or examples that may have started relying on copied wake aliases; that behavior is not compatible with the approved resource contract.
-- If the design really wants duplicable wake tokens, then the public type cannot pretend to be one owning handle over one OS event. It would need explicit clone/refcount semantics instead of hidden alias invalidation.
-
-2. Medium - `docs/specs/resources/resources/v1-scope.md:12-21`, `grimoires/arcana/winapi/src/helpers/events.arc:23-57`, and `grimoires/arcana/winapi/src/helpers_desktop_impl.arc:1403-1415,2485-2499`
-`FrameInput` cleanup is implicit, brittle, and easy to leak. Every `events.pump` allocates a frame record in `desktop_state.frames`, and the only reclamation path is `events_poll_kind_impl` removing that record when polling reaches the synthetic `kind == 0` end marker. There is no explicit close operation, no `Cleanup` implementation, and no other reclaim path if a caller stops polling early or only uses the `input_*` helper surface. That makes resource cleanup depend on one very specific consumption pattern that the public API never states.
-
-Related info:
-- The public `events.poll(...)` wrapper encourages callers to stop once it returns `Option.None`, but nothing in the surface explains that this is also the only cleanup path for the underlying `FrameInput` handle.
-- A caller can legally call `pump`, inspect `input_key_down` / `input_mouse_pos`, and then drop the frame value without ever polling to exhaustion. The backing frame state will remain parked in the package map.
-- This is a resource-lifecycle smell even if the leak is "only" in package state rather than an OS handle. The approved resource guidance says lifecycle rules must be explicit and diagnosable, and this one is hidden behind a sentinel value convention.
-
-Possible solutions for correctness:
-- Add an explicit consuming `frame_close(take frame: FrameInput)` operation or a `Cleanup` implementation so lifecycle is not tied to one polling convention.
-- If exhausting `poll_kind` is meant to be the canonical cleanup path, document that explicitly and still consider a fallback cleanup path for early-drop cases.
-- At minimum, audit whether abandoned frame records can accumulate across long-running event loops and add regression coverage for partially-consumed frames.
-
-3. Low - `llm.md:934,961-964`, `docs/arcana-v0.md:840-841`, `docs/specs/os-bindings/os-bindings/v1-scope.md:48,80`, `grimoires/arcana/winapi/src/types.arc:1-3`, `grimoires/arcana/winapi/src/foundation.arc:1-5`, `grimoires/arcana/winapi/src/fonts.arc:1-8`, and `grimoires/arcana/winapi/src/windows.arc:1-14`
-The `arcana_winapi` migration-wrapper story is internally inconsistent. `llm.md` and the archival docs still describe typed compatibility wrappers like `arcana_winapi.types.ModuleHandle` and `arcana_winapi.types.HiddenWindow`, but the checked-in wrapper modules mostly export raw `HMODULE`, `HWND`, and naked `U64` values instead. Meanwhile `types.arc` declares opaque wrapper types that the public wrapper routines do not actually use. This is source/docs drift, not a new approved contract change, but it is still bad public surface hygiene because it leaves consumers with two contradictory type stories for the same wrapper layer.
-
-Related info:
-- The approved OS-binding scope only says compatibility wrappers remain available during migration. It does not bless two inconsistent wrapper type stories in parallel.
-- The canonical handle families used by real higher-level grimoires (`desktop_handles`, `graphics_handles`, `process_handles`, `audio_handles`) are much more coherent than this compatibility wrapper lane.
-- Because `llm.md` is supposed to be the quick guide for source work, stale typed-wrapper examples here are not harmless trivia. They actively steer review or implementation work toward APIs that the current grimoire source no longer exports.
-
-Possible solutions for correctness:
-- Pick one wrapper story and make the docs and source agree.
-- If the typed wrapper lane is still intended, convert the wrapper routines to use `arcana_winapi.types.*` consistently.
-- If the raw wrapper lane is the real surviving migration shape, remove or clearly deprecate the unused `types.arc` wrapper types and fix `llm.md` / archival examples so they stop promising nonexistent typed wrappers.
-
-4. Medium - `docs/specs/resources/resources/v1-scope.md:16-26`, `grimoires/arcana/winapi/src/helpers/audio.arc:43-56`, `grimoires/arcana/winapi/src/helpers_audio_impl.arc:212-224,236-287`, and `grimoires/arcana/winapi/src/shackle.arc:119,301-307,381-391`
+1. Medium - `docs/specs/resources/resources/v1-scope.md:16-26`, `grimoires/arcana/winapi/src/helpers/audio.arc:43-56`, `grimoires/arcana/winapi/src/helpers_audio_impl.arc:212-224,236-287`, and `grimoires/arcana/winapi/src/shackle.arc:119,301-307,381-391`
 `AudioBuffer` has allocation and use but no normal teardown path. `buffer_load_wav` inserts a handle-backed buffer record into `audio_buffers`, the public API exposes read/use operations over that handle, and nothing removes the record during ordinary program execution. `AudioDevice` has `output_close`; `AudioPlayback` has `playback_stop`; `AudioBuffer` has nothing. The only actual cleanup path is whole package-state destruction when the binding unloads. That is hidden resource retention presented as if it were an ordinary owned handle family.
 
 Related info:
@@ -94,20 +53,18 @@ Possible solutions for correctness:
 - Or implement the standard cleanup contract for `AudioBuffer` so scope-exit cleanup can reclaim it.
 - If buffers are intentionally meant to be package-lifetime shared assets, stop modeling them as opaque owned handles and document the real sharing/lifetime model explicitly instead of leaving it implicit in the map implementation.
 
-5. Medium - `winapiplan.md:5-7,13-18,25-30,40-49,66-69,94-98`, `docs/specs/os-bindings/os-bindings/v1-scope.md:9-11,61-68,76-79,124-129`, `docs/rewrite-roadmap.md:49-50,73,80`, `grimoires/arcana/winapi/src/helpers/events.arc:8-63`, and `grimoires/arcana/winapi/src/helpers_desktop_impl.arc:161-196,1403-1415,2485-2602`
-`arcana_winapi` has drifted upward into a partial higher-level windowing/runner layer instead of staying a Win32 substrate. The local cleanup plan says `winapi` should be `raw + generic helpers`, with no public policy layer. The approved OS-binding scope also says `arcana_winapi.helpers.*` should be thin Win32 helper routines and that higher-level policy remains above the binding layer. The rewrite roadmap is even more explicit now: the previous higher-level grimoire experiment was removed, and any future higher-level windowing/graphics/text/audio layer must be reintroduced separately on top of the retained substrate. The actual helper/event surface does not stay there: it exports typed event framing (`EventRaw`, `pump`, `poll`), wake coordination, and frame/input handles, while `helpers_desktop_impl` owns persistent state, per-window state, per-frame state, and queued typed events. That is not a thin helper seam anymore; it is a half-built higher-level policy layer living inside the binding package.
+2. Low - `llm.md:934,961-964`, `docs/arcana-v0.md:840-841`, `docs/specs/os-bindings/os-bindings/v1-scope.md:48,80`, `grimoires/arcana/winapi/src/types.arc:1-3`, `grimoires/arcana/winapi/src/foundation.arc:1-5`, `grimoires/arcana/winapi/src/fonts.arc:1-8`, and `grimoires/arcana/winapi/src/windows.arc:1-14`
+The `arcana_winapi` migration-wrapper story is internally inconsistent. `llm.md` and the archival docs still describe typed compatibility wrappers like `arcana_winapi.types.ModuleHandle` and `arcana_winapi.types.HiddenWindow`, but the checked-in wrapper modules mostly export raw `HMODULE`, `HWND`, and naked `U64` values instead. Meanwhile `types.arc` declares opaque wrapper types that the public wrapper routines do not actually use. This is source/docs drift, not a new approved contract change, but it is still bad public surface hygiene because it leaves consumers with two contradictory type stories for the same wrapper layer.
 
 Related info:
-- This is not just "there are many helpers." The implementation is carrying exactly the sort of lifecycle state, event routing, and typed event framing that `winapiplan.md` explicitly says to move out of `winapi`.
-- The helper layer now sits in an awkward middle ground: too stateful and policy-shaped to be a clean Win32 binding substrate, but not a separately scoped higher-level grimoire either. That is the worst of both worlds.
-- This architectural drift is already showing up in the concrete handle-law/resource-lifecycle defects logged above for `WakeHandle` and `FrameInput`. Those are symptoms of a layer that started acting like a runner/runtime without fully owning the semantics.
-- The public surface is also no longer telling a clean story about what a consumer should build on. Higher-level app/windowing policy is supposed to be rebuilt separately above `winapi`, but `winapi` is already exporting a policy-shaped `events` API with typed event records and frame snapshots.
+- The approved OS-binding scope only says compatibility wrappers remain available during migration. It does not bless two inconsistent wrapper type stories in parallel.
+- The canonical handle families used by real higher-level grimoires (`desktop_handles`, `graphics_handles`, `process_handles`, `audio_handles`) are much more coherent than this compatibility wrapper lane.
+- Because `llm.md` is supposed to be the quick guide for source work, stale typed-wrapper examples here are not harmless trivia. They actively steer review or implementation work toward APIs that the current grimoire source no longer exports.
 
 Possible solutions for correctness:
-- Treat the current event/input/window-runner slice as leaked higher-layer policy and move it out of canonical `arcana_winapi` into whatever future higher-level grimoire is eventually scoped and approved.
-- Keep only genuinely substrate-level pieces in `arcana_winapi`: raw bindings, owned window/resource handles, generic wake/wait/message primitives, and thin Win32 helper adapters.
-- If some current `events` functionality is meant to stay, reduce it to raw transport primitives rather than typed app/windowing event semantics.
-- Update docs/specs after the split so `arcana_winapi` stops pretending to be both the Win32 substrate and the first half of an unscope-approved higher-level layer at the same time.
+- Pick one wrapper story and make the docs and source agree.
+- If the typed wrapper lane is still intended, convert the wrapper routines to use `arcana_winapi.types.*` consistently.
+- If the raw wrapper lane is the real surviving migration shape, remove or clearly deprecate the unused `types.arc` wrapper types and fix `llm.md` / archival examples so they stop promising nonexistent typed wrappers.
 
 **Architecture Review**
 This section is separate from the correctness findings above. These are maintainability and architecture findings: duplicated surfaces, conflicting semantic owners, hidden coupling, and code organization that will keep producing bugs even when the current tests are green.
@@ -116,7 +73,7 @@ A1. High - `grimoires/arcana/winapi/src/book.arc:1-6`, `grimoires/arcana/winapi/
 `arcana_winapi` exposes too many overlapping public lanes for the same conceptual surface. There is the raw lane, the helper lane, the canonical `*_handles` lane, and the compatibility-wrapper lane, and the wrappers are reexported both at package root and again under `helpers`. That means one concept can be reached through multiple routes with different type stories and different levels of abstraction. Even before correctness bugs enter the picture, this is a maintenance tax on every change because docs, tests, call sites, and migration stories all have to answer "which lane is the real one?" The current wrapper types in `types.arc` make this worse because they exist, are exported, and still are not the types actually used by the wrapper routines.
 
 Related info:
-- Several correctness findings above are downstream symptoms of this lane overlap rather than isolated accidents. The wrapper/doc drift in finding 3 and the event-layer drift in finding 5 are both easier to create because there is no single clearly-owned public lane.
+- Several correctness findings above are downstream symptoms of this lane overlap rather than isolated accidents. The wrapper/doc drift in finding 2 and the resource-lifetime defect in finding 1 are both easier to create because there is no single clearly-owned public lane.
 - The same concept can currently be reached through raw bindings, helper wrappers, compatibility wrappers, and canonical handle families. That encourages different callers to normalize on different lanes and makes "API drift" a routine outcome rather than an exceptional bug.
 - High-quality platform bindings usually expose one canonical safe layer plus clearly-marked low-level escape hatches. Rust's standard library and mature FFI crates do not normally present four peer public routes for the same conceptual operation without a strong boundary story.
 
@@ -130,7 +87,7 @@ Possible solutions for maintainability:
 - Stop reexporting compatibility wrappers under `helpers`; that doubles the confusion for no good reason.
 - Either make `types.arc` the real typed wrapper lane or remove/deprecate it instead of carrying dead-looking exported surface.
 
-A2. Medium - `docs/specs/std/std/v1-scope.md:22-26`, `grimoires/arcana/winapi/src/shackle.arc:110-121,372-383`, `grimoires/arcana/winapi/src/helpers/process.arc:8-18,36-53`, `grimoires/arcana/winapi/src/helpers/window.arc:26-31,108-112`, `grimoires/arcana/winapi/src/helpers/audio.arc:7-18`, and `grimoires/arcana/winapi/src/helpers/clipboard.arc:4-12`
+A2. Medium - `docs/specs/std/std/v1-scope.md:22-26`, `grimoires/arcana/winapi/src/helpers.arc:1-15`, `grimoires/arcana/winapi/src/shackle.arc:110-121,372-383`, `grimoires/arcana/winapi/src/helpers/window.arc:26-31,108-112`, `grimoires/arcana/winapi/src/helpers/audio.arc:7-18`, and `grimoires/arcana/winapi/src/helpers/clipboard.arc:4-12`
 The `arcana_winapi.helpers` package shape is doubled into raw calls plus a package-global error slot plus Arcana-side `Result` wrappers. That is three layers of API shape for one operation family. It is backend-shaped leakage turned into public source structure. Every helper module repeats the same pattern: call a raw function, inspect `take_last_error`, then rebuild a typed result. That multiplies boilerplate, spreads the same error-translation logic across modules, and makes refactors expensive because one conceptual operation is represented in multiple layers instead of one.
 
 Related info:
@@ -148,12 +105,12 @@ Possible solutions for maintainability:
 - Export one canonical `Result`-returning helper layer for Arcana source consumers.
 - Remove public raw-plus-wrapper duplication unless the raw form is explicitly needed as a separate supported surface.
 
-A3. Medium - `grimoires/arcana/winapi/src/shackle.arc:110-121,301-307,372-383` and `grimoires/arcana/winapi/src/helpers_desktop_impl.arc:161-196,1403-1415,2485-2602`
-`arcana_winapi` currently hangs too much unrelated behavior off one package-state object. The same hidden state bucket owns the helper error slot, desktop/window state, frame state, wake objects, file streams, software surfaces, and audio devices/buffers/playbacks. That is a classic god-object architecture. It creates coupling between domains that should be able to evolve independently, and it makes extraction harder because teardown and state ownership are already braided together.
+A3. Medium - `grimoires/arcana/winapi/src/shackle.arc:109-121,305-325,372-383` and `grimoires/arcana/winapi/src/helpers_desktop_impl.arc:126-134,829-899,2115-2200`
+`arcana_winapi` still hangs too much unrelated behavior off one package-state object. The same hidden state bucket owns the helper error slot, desktop/window state, wake objects, file streams, software surfaces, and audio devices/buffers/playbacks. That is still a classic god-object architecture even after the event/frame cleanup. It creates coupling between domains that should be able to evolve independently, and it makes extraction harder because teardown and state ownership are already braided together.
 
 Related info:
 - This "one state bucket" shape is a major reason new features keep getting added here. Once one package-state object already owns everything, the local path of least resistance is always "put one more map in it."
-- Cross-domain teardown and failure handling become coupled by default in this shape. A change in audio/resource cleanup or event cleanup is harder to reason about because all of it is braided through one shared owner.
+- Cross-domain teardown and failure handling become coupled by default in this shape. A change in audio/resource cleanup, wake/message handling, or stream lifetime is harder to reason about because all of it is braided through one shared owner.
 - Major-quality runtime/binding layers usually organize resource ownership by subsystem with a small root coordinator, not one ever-growing struct that owns unrelated OS and helper concerns together.
 
 Possible solutions for correctness:
@@ -275,17 +232,18 @@ Possible solutions for maintainability:
 - Keep `arcana-cli` as a thin coordinator over stable crate APIs rather than a second place where packaging workflow gets reassembled.
 
 Correctness direction:
-- For the remaining five items, the standard to aim for is not merely "does not obviously crash in happy-path tests". The standard should be one of:
+- For the remaining two correctness items, the standard to aim for is not merely "does not obviously crash in happy-path tests". The standard should be one of:
   - memory and type safety at foreign boundaries comparable to Rust expectations
   - cache and build reproducibility comparable to major build systems
   - filesystem behavior that is explicit, deterministic, and safe on Windows path semantics
 
 Notes:
 - No crate is marked as a literal every-line-complete audit yet. Coverage above reflects what has actually been inspected, not what would be convenient to claim.
-- Resolved crate/package/runtime/frontend findings that are actually fixed in the current tree were removed from this file after recheck.
-- Findings 1, 2, and 4 are implementation defects and approved-contract violations against the current approved scopes.
-- Finding 3 is source/docs drift in the grimoire layer, not a silent approved-contract change.
-- Finding 5 is architecture/contract drift against both the approved OS-binding boundary and the local `winapiplan.md` cleanup target.
+- Resolved crate/package/runtime/frontend/process and winapi event-layer findings that are actually fixed in the current tree were removed from this file after recheck.
+- Finding 1 is an implementation defect and approved-contract violation against the current approved resource scope.
+- Finding 2 is source/docs drift in the grimoire layer, not a silent approved-contract change.
 - This pass prioritized `crates/*` and runtime/package/AOT seams over examples and fixtures, per repo review policy.
 - `grimoires/arcana/winapi` and `grimoires/arcana/process` are now in the active audit set; `grimoires/libs/*` currently has no files in this workspace.
+- `grimoires/arcana/process` was rechecked after the process-plan work and no longer has an active public-surface finding in this file.
+- `grimoires/arcana/winapi` was rechecked after the `winfix.md` cleanup and the old public event/frame findings were removed from this file.
 - No code was changed.
