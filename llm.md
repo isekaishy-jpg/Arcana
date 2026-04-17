@@ -957,7 +957,7 @@ Binding products are the current package-owned foreign seam for library packages
     - `hostapi.raw.user32.WNDPROC`
 - `arcana_winapi` currently exposes:
   - `arcana_winapi.raw.*`
-  - internal backend/shackle glue may exist in the package, but it is not public API
+  - no package-visible backend/helper/wrapper layer
 - The current raw module set includes:
   - desktop/kernel families:
     - `callbacks`, `constants`, `kernel32`, `user32`, `gdi32`, `dwmapi`, `shcore`, `shell32`, `imm32`
@@ -967,9 +967,9 @@ Binding products are the current package-owned foreign seam for library packages
     - `mmdeviceapi`, `audioclient`, `audiopolicy`, `endpointvolume`, `avrt`, `mmreg`, `ksmedia`, `propsys`, `xaudio2`, `x3daudio`
   - shared layout families:
     - `types`
-- `arcana_winapi` does not currently expose a public helper surface.
-- Internal Windows glue may still exist under `grimoires/arcana/winapi/src/backend/*` and backend impl files, but those are implementation detail, not source-level API.
-- Treat `grimoires/arcana/winapi/src/backend/*` as thin declaration/opaque-handle seams only. If you see Arcana-side `Result` shaping, tuple helpers, or app/demo policy there, that is drift.
+- `arcana_winapi` does not expose a public helper, wrapper, or handle surface.
+- There is no package-visible backend module layer under `arcana_winapi` anymore.
+- If `winapi` regrows backend/helper/wrapper module namespaces or typed handle modules, that is drift. Remaining implementation support belongs under `shackle`/private support, not as Arcana package modules.
 - In HIR, exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` are projected into visible symbol surface so dependent packages can call/read them through ordinary path resolution.
 - Current binding CABI semantics are symmetric for imports and callbacks:
   - same param metadata model
@@ -1049,11 +1049,6 @@ Binding products are the current package-owned foreign seam for library packages
   - `lower_workspace_package_with_resolution_carries_shackle_decls_and_typed_callbacks`
   - `crates/arcana-runtime/src/tests.rs`
   - `execute_main_runs_arcana_winapi_binding_smoke`
-  - `execute_main_runs_arcana_winapi_windowing_helper_smoke`
-  - `execute_main_runs_arcana_winapi_graphics_dxgi_helper_smoke`
-  - `execute_main_runs_arcana_winapi_graphics_helper_smoke`
-  - `execute_main_runs_arcana_winapi_text_helper_smoke`
-  - `execute_main_runs_arcana_winapi_audio_helper_smoke`
   - `execute_main_reports_arcana_winapi_binding_errors`
   - `execute_main_runs_dependency_shackle_import_fn_and_const_surface`
 

@@ -45,7 +45,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
   - exported `shackle` items form the public raw layer of binding grimoires such as `arcana_winapi.raw.*`
   - exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` must be dependency-visible through ordinary path resolution; consumers must not need a parallel special binding lookup model
 - `opaque type`
-  - binding-owning packages may export source-declared opaque handle types for native values such as module handles, font catalogs, windows, and callback tokens
+  - binding-owning packages may export source-declared opaque handle types when an approved package contract requires them
   - consumer grimoires may reference those binding-owned opaque types in their own public APIs, but they must not redeclare or re-alias owner-local handle families for the same host resource
 
 ## Rules
@@ -75,7 +75,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 
 Its public package shape is:
 - `arcana_winapi.raw.*` for the public raw Win32-facing surface
-- internal backend/shackle glue may remain in the package, but it is not public API and must not be treated as a second semantic lane
+- any remaining implementation support lives under `shackle`/private support only; there is no package-visible helper, wrapper, handle, or `backend.*` module layer
 
 Its current v1 raw surface covers:
 - core type/layout families in `arcana_winapi.raw.types`
@@ -96,11 +96,11 @@ Its current v1 raw surface covers:
 
 ## Boundaries
 
-- Future text, desktop, graphics, or other higher-level layers may consume `arcana_winapi` for Windows-specific behavior such as font discovery or native shell work.
+- Future text, desktop, graphics, or other higher-level layers may consume `arcana_winapi.raw.*` for Windows-specific behavior.
 - `arcana_winapi` is raw-only at the public boundary. Higher-level layers may consume `arcana_winapi.raw.*`, but they must not depend on any helper, wrapper, or handle layer under `arcana_winapi`.
 - Host-core stream handles are owned by `arcana_process.fs.FileStream`, not by `arcana_winapi`.
-- Any Windows-native helper, bootstrap, or handle representation that still exists under `grimoires/arcana/winapi/src/backend/*` is internal implementation detail only.
-- Internal `winapi` backend modules should stay as thin declaration/opaque-handle seams over Win32/shackle glue, not regrow Arcana-shaped helper or policy surfaces.
+- Any unavoidable `winapi` implementation support must stay shackle-private and must not surface as package-visible backend/helper modules.
+- Package-visible `backend.*`, helper, wrapper, or handle module layers must not reappear under `arcana_winapi`.
 - Higher-level consumers must not regain direct runtime special cases once this seam exists.
 - No library package should talk to `windows-sys` directly in the library binding seam.
 - Rewrite crates must not keep a parallel `windows-sys` host lane beside this binding seam; Win32 access should flow through `arcana_winapi` and consumer packages.

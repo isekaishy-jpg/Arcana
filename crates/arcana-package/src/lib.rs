@@ -4090,6 +4090,7 @@ mod tests {
             "arcana_winapi should still publish the raw type module"
         );
         for forbidden in [
+            "arcana_winapi.backend",
             "arcana_winapi.helpers",
             "arcana_winapi.foundation",
             "arcana_winapi.fonts",
@@ -4134,39 +4135,47 @@ mod tests {
                 .exists(),
             "winapi should no longer publish a top-level process_handles module"
         );
-        let backend_dir = repo_root()
+        let winapi_src = repo_root()
             .join("grimoires")
             .join("arcana")
             .join("winapi")
-            .join("src")
-            .join("backend");
-        for thin_backend_decl in [
-            "audio.arc",
-            "clipboard.arc",
-            "com.arc",
-            "errors.arc",
-            "fonts.arc",
-            "foundation.arc",
-            "graphics.arc",
-            "message.arc",
-            "process.arc",
-            "strings.arc",
-            "text.arc",
-            "text_input.arc",
-            "window.arc",
-            "windows.arc",
+            .join("src");
+        assert!(
+            !winapi_src.join("backend.arc").exists(),
+            "winapi should not keep a top-level backend module"
+        );
+        assert!(
+            !winapi_src.join("backend").exists(),
+            "winapi should not keep a package-visible src/backend module layer"
+        );
+        for support_file in [
+            "backend_audio_impl.arc",
+            "backend_desktop_impl.arc",
+            "backend_process_impl.arc",
+            "backend_support_impl.arc",
         ] {
-            let source =
-                fs::read_to_string(backend_dir.join(thin_backend_decl)).unwrap_or_else(|err| {
-                    panic!("failed to load backend file {thin_backend_decl}: {err}")
-                });
             assert!(
-                !source.contains("import std.result")
-                    && !source.contains("use std.result.Result")
-                    && !source.contains("fn pair(")
-                    && !source.contains("fn result_")
-                    && !source.contains("return Result."),
-                "winapi backend file `{thin_backend_decl}` should stay a thin declaration seam, not regrow Arcana-side helper shaping"
+                !winapi_src.join(support_file).exists(),
+                "winapi should not keep source-level helper/support module `{support_file}`"
+            );
+        }
+        let shackle_source =
+            fs::read_to_string(winapi_src.join("shackle.arc")).expect("winapi shackle should load");
+        for stale in [
+            "foundation.",
+            "fonts.",
+            "windows.",
+            "helpers.",
+            "backend.process.",
+            "arcana_winapi.backend.",
+            "desktop_handles",
+            "graphics_handles",
+            "audio_handles",
+            "process_handles",
+        ] {
+            assert!(
+                !shackle_source.contains(stale),
+                "winapi shackle should not retain stale helper/backend vocabulary `{stale}`"
             );
         }
 
@@ -4223,38 +4232,25 @@ mod tests {
             "arcana_process should no longer depend on arcana_winapi just to define FileStream"
         );
 
-        let winapi_process_backend = fs::read_to_string(
-            repo_root()
-                .join("grimoires")
-                .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("backend")
-                .join("process.arc"),
-        )
-        .expect("winapi process backend declarations should load");
         assert!(
             !repo_root()
                 .join("grimoires")
                 .join("arcana")
                 .join("winapi")
                 .join("src")
-                .join("helpers")
-                .join("process.arc")
+                .join("backend")
                 .exists(),
-            "winapi process backend glue should not live under helpers/process.arc anymore"
+            "winapi should not keep a package-visible backend module layer"
         );
         assert!(
-            !winapi_process_backend.contains("export fn ")
-                && !winapi_process_backend.contains("result_unit")
-                && !winapi_process_backend.contains("result_str")
-                && !winapi_process_backend.contains("result_bytes")
-                && !winapi_process_backend.contains("result_stream")
-                && !winapi_process_backend.contains("result_int")
-                && !winapi_process_backend.contains("result_bool")
-                && !winapi_process_backend.contains("helpers.process.")
-                && winapi_process_backend.contains("backend.process."),
-            "winapi backend/process.arc should be internal backend declarations, not a lingering helpers.process semantic lane"
+            !repo_root()
+                .join("grimoires")
+                .join("arcana")
+                .join("winapi")
+                .join("src")
+                .join("backend_process_impl.arc")
+                .exists(),
+            "winapi should not keep an internal process helper module lane"
         );
     }
 
@@ -4299,6 +4295,7 @@ mod tests {
         files.push(repo_root().join("llm.md"));
 
         let forbidden = [
+            "arcana_winapi.backend.",
             "arcana_winapi.helpers.",
             "arcana_winapi.foundation",
             "arcana_winapi.fonts",

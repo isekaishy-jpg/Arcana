@@ -1,2 +1,2 @@
-// Structural types module required by package layout.
-// Public `arcana_winapi` surface is still raw-only via `book.arc`.
+// Structural anchor required by package layout.
+// `arcana_winapi` publishes `arcana_winapi.raw.*` only.
