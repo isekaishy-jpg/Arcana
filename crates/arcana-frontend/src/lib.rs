@@ -23321,20 +23321,14 @@ mod tests {
 
     #[test]
     fn check_path_rejects_window_use_after_close() {
-        let winapi_dep = repo_root()
-            .join("grimoires")
-            .join("arcana")
-            .join("winapi")
-            .to_string_lossy()
-            .replace('\\', "/");
         let root = make_temp_package(
             "typed_window_use_after_close",
             "app",
-            &[("arcana_winapi", winapi_dep.as_str())],
+            &[],
             &[
                 (
                     "src/shelf.arc",
-                    "import arcana_winapi.helpers.window\nimport arcana_winapi.desktop_handles\nuse arcana_winapi.desktop_handles.Window\nfn bad(take win: Window) -> Int:\n    let _ = arcana_winapi.helpers.window.window_close :: win :: call\n    let alive = arcana_winapi.helpers.window.window_alive :: win :: call\n    return 0\n",
+                    "export opaque type Window as move, boundary_unsafe\nfn window_close(take win: Window) -> Int:\n    return 0\nfn window_alive(read win: Window) -> Bool:\n    return true\nfn bad(take win: Window) -> Int:\n    let _ = window_close :: win :: call\n    let alive = window_alive :: win :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -23354,23 +23348,14 @@ mod tests {
             .join("process")
             .to_string_lossy()
             .replace('\\', "/");
-        let winapi_dep = repo_root()
-            .join("grimoires")
-            .join("arcana")
-            .join("winapi")
-            .to_string_lossy()
-            .replace('\\', "/");
         let root = make_temp_package(
             "typed_stream_use_after_close",
             "app",
-            &[
-                ("arcana_process", process_dep.as_str()),
-                ("arcana_winapi", winapi_dep.as_str()),
-            ],
+            &[("arcana_process", process_dep.as_str())],
             &[
                 (
                     "src/shelf.arc",
-                    "import arcana_process.fs\nimport arcana_winapi.process_handles\nuse arcana_winapi.process_handles.FileStream\nfn bad(take stream: FileStream) -> Int:\n    arcana_process.fs.stream_close :: stream :: call\n    let done = arcana_process.fs.stream_eof :: stream :: call\n    return 0\n",
+                    "import arcana_process.fs\nuse arcana_process.fs.FileStream\nfn bad(take stream: FileStream) -> Int:\n    arcana_process.fs.stream_close :: stream :: call\n    let done = arcana_process.fs.stream_eof :: stream :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -23508,20 +23493,14 @@ mod tests {
 
     #[test]
     fn check_path_rejects_opaque_type_constructor_use() {
-        let winapi_dep = repo_root()
-            .join("grimoires")
-            .join("arcana")
-            .join("winapi")
-            .to_string_lossy()
-            .replace('\\', "/");
         let root = make_temp_package(
             "opaque_type_constructor_use",
             "app",
-            &[("arcana_winapi", winapi_dep.as_str())],
+            &[],
             &[
                 (
                     "src/shelf.arc",
-                    "use arcana_winapi.desktop_handles.Window\nfn bad() -> Int:\n    let win = Window :: :: call\n    return 0\n",
+                    "export opaque type Window as move, boundary_unsafe\nfn bad() -> Int:\n    let win = Window :: :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -23538,20 +23517,14 @@ mod tests {
 
     #[test]
     fn check_path_rejects_boundary_unsafe_std_opaque_type() {
-        let winapi_dep = repo_root()
-            .join("grimoires")
-            .join("arcana")
-            .join("winapi")
-            .to_string_lossy()
-            .replace('\\', "/");
         let root = make_temp_package(
             "opaque_type_boundary_contract",
             "app",
-            &[("arcana_winapi", winapi_dep.as_str())],
+            &[],
             &[
                 (
                     "src/shelf.arc",
-                    "use arcana_winapi.desktop_handles.Window\n#boundary[target = \"lua\"]\nexport fn bad(read win: Window) -> Int:\n    return 0\n",
+                    "export opaque type Window as move, boundary_unsafe\n#boundary[target = \"lua\"]\nexport fn bad(read win: Window) -> Int:\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],

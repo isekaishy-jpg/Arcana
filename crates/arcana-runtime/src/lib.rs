@@ -5791,21 +5791,19 @@ fn runtime_current_package_asset_root(current_package_id: &str) -> Result<PathBu
 
 fn runtime_process_file_stream_value(handle: u64) -> RuntimeValue {
     RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
-        package_id: "arcana_winapi",
-        type_name: "arcana_winapi.process_handles.FileStream",
+        package_id: "arcana_process",
+        type_name: "arcana_process.fs.FileStream",
         handle,
     }))
 }
 
 fn expect_process_file_stream_handle(value: RuntimeValue, context: &str) -> Result<u64, String> {
     let RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) = value else {
-        return Err(format!(
-            "{context} expected arcana_winapi.process_handles.FileStream"
-        ));
+        return Err(format!("{context} expected arcana_process.fs.FileStream"));
     };
-    if binding.type_name != "arcana_winapi.process_handles.FileStream" {
+    if binding.type_name != "arcana_process.fs.FileStream" {
         return Err(format!(
-            "{context} expected arcana_winapi.process_handles.FileStream, got `{}`",
+            "{context} expected arcana_process.fs.FileStream, got `{}`",
             binding.type_name
         ));
     }
@@ -8360,30 +8358,6 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
     (
         "arcana_process.process",
         include_str!("../../../grimoires/arcana/process/src/process.arc"),
-    ),
-    (
-        "arcana_winapi.backend.message",
-        include_str!("../../../grimoires/arcana/winapi/src/backend/message.arc"),
-    ),
-    (
-        "arcana_winapi.helpers.window",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/window.arc"),
-    ),
-    (
-        "arcana_winapi.helpers.message",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/message.arc"),
-    ),
-    (
-        "arcana_winapi.helpers.clipboard",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/clipboard.arc"),
-    ),
-    (
-        "arcana_winapi.helpers.text_input",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/text_input.arc"),
-    ),
-    (
-        "arcana_winapi.helpers.audio",
-        include_str!("../../../grimoires/arcana/winapi/src/helpers/audio.arc"),
     ),
     (
         "std.collections.array",

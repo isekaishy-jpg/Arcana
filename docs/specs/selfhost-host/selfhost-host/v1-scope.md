@@ -16,7 +16,7 @@ Scope notes:
 - `arcana_process.fs` binary APIs: `read_bytes`, `write_bytes`
 - `arcana_process.fs` stream APIs: `stream_open_read`, `stream_open_write`, `stream_read`, `stream_write`, `stream_eof`, `stream_close`
   - stream APIs use an explicit typed `FileStream` handle, not raw `Int` stream ids
-  - canonical handle path: `arcana_winapi.process_handles.FileStream`
+  - canonical handle path: `arcana_process.fs.FileStream`
   - `stream_close` is a consuming `take` operation and returns `Result[Unit, Str]`
 - `arcana_process.process`: `exec_status`, `exec_capture`
 - core binary/text payloads:

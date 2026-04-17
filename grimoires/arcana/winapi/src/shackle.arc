@@ -114,11 +114,11 @@ shackle flags WinapiInternals:
         pub(crate) next_surface_handle: u64,
         pub(crate) software_surfaces: std::collections::BTreeMap<u64, SoftwareSurfaceState>,
         pub(crate) next_audio_device_handle: u64,
-        pub(crate) audio_devices: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioDeviceState>,
+        pub(crate) audio_devices: std::collections::BTreeMap<u64, crate::backend_audio_impl::WinapiAudioDeviceState>,
         pub(crate) next_audio_buffer_handle: u64,
-        pub(crate) audio_buffers: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioBufferState>,
+        pub(crate) audio_buffers: std::collections::BTreeMap<u64, crate::backend_audio_impl::WinapiAudioBufferState>,
         pub(crate) next_audio_playback_handle: u64,
-        pub(crate) audio_playbacks: std::collections::BTreeMap<u64, crate::helpers_audio_impl::WinapiAudioPlaybackState>,
+        pub(crate) audio_playbacks: std::collections::BTreeMap<u64, crate::backend_audio_impl::WinapiAudioPlaybackState>,
     }
 
     pub(crate) fn window_class_name() -> WideText {
@@ -165,7 +165,7 @@ shackle flags WinapiInternals:
     pub(crate) fn register_hidden_window_class() -> ResultUnit {
         HIDDEN_WINDOW_CLASS
             .get_or_init(|| {
-                let module = current_module_handle_for_address(hidden_window_proc as usize as LPCVOID)?;
+                let module = current_module_handle_for_address(hidden_window_proc as *const () as LPCVOID)?;
                 let class_name = window_class_name();
                 let class = WNDCLASSW {
                     style: 0,
@@ -302,7 +302,7 @@ shackle flags WinapiInternals:
         let ptr = handle as usize as *mut WinapiPackageState;
         if !ptr.is_null() {
             unsafe {
-                crate::helpers_desktop_impl::destroy_desktop_state_handle((*ptr).desktop_state_handle);
+                crate::backend_desktop_impl::destroy_desktop_state_handle((*ptr).desktop_state_handle);
                 drop(Box::from_raw(ptr));
             }
         }
@@ -370,7 +370,7 @@ shackle import fn DefWindowProcW(window: HWND, message: UINT, wparam: WPARAM, lp
 shackle fn package_state_init() = __binding.package_state_init:
     let state = Box::new(WinapiPackageState {
         last_error_text: String::new(),
-        desktop_state_handle: crate::helpers_desktop_impl::new_desktop_state_handle(),
+        desktop_state_handle: crate::backend_desktop_impl::new_desktop_state_handle(),
         next_file_stream_handle: 1,
         file_streams: std::collections::BTreeMap::new(),
         next_surface_handle: 1,
@@ -451,7 +451,7 @@ shackle thunk hidden_window_proc(hwnd: HWND, message: UINT, wparam: WPARAM, lpar
 
 shackle fn foundation_current_module_impl() -> arcana_winapi.raw.types.HMODULE = foundation.current_module:
     Ok(binding_output_layout(
-        current_module_handle_for_address(hidden_window_proc as usize as LPCVOID)?
+        current_module_handle_for_address(hidden_window_proc as *const () as LPCVOID)?
     ))
 
 shackle fn foundation_module_is_null_impl(read module: arcana_winapi.raw.types.HMODULE) -> Bool = foundation.module_is_null:
@@ -494,7 +494,7 @@ shackle fn fonts_catalog_destroy_impl(take catalog: U64) = fonts.catalog_destroy
 
 shackle fn windows_create_hidden_window_impl() -> arcana_winapi.raw.types.HWND = windows.create_hidden_window:
     register_hidden_window_class()?;
-    let module = current_module_handle_for_address(hidden_window_proc as usize as LPCVOID)?;
+    let module = current_module_handle_for_address(hidden_window_proc as *const () as LPCVOID)?;
     let class_name = window_class_name();
     let hwnd = unsafe {
         CreateWindowExW(

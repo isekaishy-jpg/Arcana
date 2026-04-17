@@ -3951,10 +3951,10 @@ mod tests {
         write_file(
             &dir.join("src").join("shelf.arc"),
             concat!(
-                "use arcana_winapi.foundation as foundation\n",
+                "import arcana_winapi.raw.kernel32\n",
                 "fn main() -> Int:\n",
-                "    let module = foundation.current_module :: :: call\n",
-                "    if foundation.module_is_null :: module :: call:\n",
+                "    let pid = arcana_winapi.raw.kernel32.GetCurrentProcessId :: :: call\n",
+                "    if pid <= 0:\n",
                 "        return 1\n",
                 "    return 0\n",
             ),
@@ -4053,7 +4053,7 @@ mod tests {
     }
 
     #[test]
-    fn load_workspace_hir_winapi_surface_tracks_generic_handle_modules_only() {
+    fn load_workspace_hir_winapi_surface_is_raw_only_public_contract() {
         let dir = temp_dir("load_workspace_winapi_surface");
         let winapi_path = path_text(&repo_root().join("grimoires").join("arcana").join("winapi"));
         write_file(
@@ -4086,132 +4086,89 @@ mod tests {
                 .summary
                 .modules
                 .iter()
-                .any(|module| module.module_id == "arcana_winapi.graphics_handles"),
-            "arcana_winapi should publish a dedicated graphics handle module"
+                .any(|module| module.module_id == "arcana_winapi.raw.types"),
+            "arcana_winapi should still publish the raw type module"
         );
+        for forbidden in [
+            "arcana_winapi.helpers",
+            "arcana_winapi.foundation",
+            "arcana_winapi.fonts",
+            "arcana_winapi.windows",
+            "arcana_winapi.desktop_handles",
+            "arcana_winapi.graphics_handles",
+            "arcana_winapi.audio_handles",
+            "arcana_winapi.process_handles",
+        ] {
+            assert!(
+                !winapi
+                    .summary
+                    .modules
+                    .iter()
+                    .any(|module| module.module_id == forbidden
+                        || module.module_id.starts_with(&format!("{forbidden}."))),
+                "arcana_winapi should not publish stale module namespace `{forbidden}`"
+            );
+        }
 
-        let desktop_handles = fs::read_to_string(
+        let book_source = fs::read_to_string(
             repo_root()
                 .join("grimoires")
                 .join("arcana")
                 .join("winapi")
                 .join("src")
-                .join("desktop_handles.arc"),
+                .join("book.arc"),
         )
-        .expect("desktop_handles source should load");
+        .expect("winapi book source should load");
         assert!(
-            !desktop_handles.contains("Session"),
-            "desktop handle source should not publish Session anymore"
-        );
-        assert!(
-            !desktop_handles.contains("lang window_handle")
-                && !desktop_handles.contains("lang app_frame_handle")
-                && !desktop_handles.contains("lang wake_handle"),
-            "desktop handle source should not publish alias-only lang handle shims"
+            book_source.trim() == "reexport arcana_winapi.raw",
+            "winapi book source should only publicly reexport the raw module"
         );
 
-        let audio_handles = fs::read_to_string(
-            repo_root()
+        assert!(
+            !repo_root()
                 .join("grimoires")
                 .join("arcana")
                 .join("winapi")
                 .join("src")
-                .join("audio_handles.arc"),
-        )
-        .expect("audio_handles source should load");
-        assert!(
-            !audio_handles.contains("lang audio_device_handle")
-                && !audio_handles.contains("lang audio_buffer_handle")
-                && !audio_handles.contains("lang audio_playback_handle"),
-            "audio handle source should not publish alias-only lang handle shims"
+                .join("process_handles.arc")
+                .exists(),
+            "winapi should no longer publish a top-level process_handles module"
         );
-
-        let process_handles = fs::read_to_string(
-            repo_root()
-                .join("grimoires")
-                .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("process_handles.arc"),
-        )
-        .expect("process_handles source should load");
-        assert!(
-            !process_handles.contains("lang file_stream_handle"),
-            "process handle source should not publish alias-only lang handle shims"
-        );
-
-        let message_source = fs::read_to_string(
-            repo_root()
-                .join("grimoires")
-                .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("helpers")
-                .join("message.arc"),
-        )
-        .expect("message helper source should load");
-        assert!(
-            message_source.contains("arcana_winapi.backend.message.")
-                && !message_source.contains("FrameInput")
-                && !message_source.contains("helpers.events.")
-                && !message_source.contains("helpers.input."),
-            "message helper source should only expose the internal backend.message wake/message primitives"
-        );
-
-        let message_backend = fs::read_to_string(
-            repo_root()
-                .join("grimoires")
-                .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("backend")
-                .join("message.arc"),
-        )
-        .expect("message backend declarations should load");
-        assert!(
-            !message_backend.contains("export fn ")
-                && !message_backend.contains("result_unit")
-                && !message_backend.contains("helpers.message.")
-                && message_backend.contains("backend.message."),
-            "winapi backend/message.arc should be internal backend declarations, not a lingering helper or policy lane"
-        );
-
-        let graphics_source = fs::read_to_string(
-            repo_root()
-                .join("grimoires")
-                .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("helpers")
-                .join("graphics.arc"),
-        )
-        .expect("graphics helper source should load");
-        assert!(
-            graphics_source.contains("use arcana_winapi.graphics_handles.GdiWindowSurface"),
-            "graphics helper source should use the canonical graphics handle module"
-        );
-        assert!(
-            !graphics_source.contains("gdi_window_surface_open_handle")
-                && !graphics_source.contains("software_surface_"),
-            "graphics helper source should only expose the generic GDI window-surface owner lane"
-        );
-
-        let window_source = fs::read_to_string(
-            repo_root()
-                .join("grimoires")
-                .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("helpers")
-                .join("window.arc"),
-        )
-        .expect("window helper source should load");
-        assert!(
-            window_source.contains(
-                "export native fn window_native_handle(read win: Window) -> arcana_winapi.raw.types.HWND"
-            ),
-            "window helper source should expose the raw HWND type, not Int"
-        );
+        let backend_dir = repo_root()
+            .join("grimoires")
+            .join("arcana")
+            .join("winapi")
+            .join("src")
+            .join("backend");
+        for thin_backend_decl in [
+            "audio.arc",
+            "clipboard.arc",
+            "com.arc",
+            "errors.arc",
+            "fonts.arc",
+            "foundation.arc",
+            "graphics.arc",
+            "message.arc",
+            "process.arc",
+            "strings.arc",
+            "text.arc",
+            "text_input.arc",
+            "window.arc",
+            "windows.arc",
+        ] {
+            let source =
+                fs::read_to_string(backend_dir.join(thin_backend_decl)).unwrap_or_else(|err| {
+                    panic!("failed to load backend file {thin_backend_decl}: {err}")
+                });
+            assert!(
+                !source.contains("import std.result")
+                    && !source.contains("use std.result.Result")
+                    && !source.contains("fn pair(")
+                    && !source.contains("fn result_")
+                    && !source.contains("return Result."),
+                "winapi backend file `{thin_backend_decl}` should stay a thin declaration seam, not regrow Arcana-side helper shaping"
+            );
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -4245,20 +4202,27 @@ mod tests {
             !io_source.contains("std.kernel.io"),
             "arcana_process.io should not forward through std.kernel.io"
         );
+        let fs_source =
+            fs::read_to_string(process_src.join("fs.arc")).expect("process fs source should load");
+        assert!(
+            fs_source.contains("export opaque type FileStream as move, boundary_unsafe")
+                && !fs_source.contains("arcana_winapi.process_handles.FileStream"),
+            "arcana_process.fs should own FileStream directly and not import the old winapi path"
+        );
 
-        let winapi_helpers = fs::read_to_string(
+        let process_manifest = fs::read_to_string(
             repo_root()
                 .join("grimoires")
                 .join("arcana")
-                .join("winapi")
-                .join("src")
-                .join("helpers.arc"),
+                .join("process")
+                .join("book.toml"),
         )
-        .expect("winapi helpers source should load");
+        .expect("process manifest should load");
         assert!(
-            !winapi_helpers.contains("reexport arcana_winapi.helpers.process"),
-            "arcana_winapi.helpers should not publicly reexport helpers.process"
+            !process_manifest.contains("arcana_winapi"),
+            "arcana_process should no longer depend on arcana_winapi just to define FileStream"
         );
+
         let winapi_process_backend = fs::read_to_string(
             repo_root()
                 .join("grimoires")
@@ -4295,67 +4259,81 @@ mod tests {
     }
 
     #[test]
-    fn winapi_public_helper_surface_excludes_event_policy_lane() {
-        let winapi_src = repo_root()
-            .join("grimoires")
-            .join("arcana")
-            .join("winapi")
-            .join("src");
-
-        let helpers_source = fs::read_to_string(winapi_src.join("helpers.arc"))
-            .expect("winapi helpers source should load");
-        assert!(
-            helpers_source.contains("reexport arcana_winapi.helpers.message"),
-            "winapi helpers source should publicly reexport the generic message helper lane"
-        );
-        assert!(
-            !helpers_source.contains("reexport arcana_winapi.helpers.events")
-                && !helpers_source.contains("reexport arcana_winapi.helpers.input")
-                && !helpers_source.contains("reexport arcana_winapi.helpers.windowing"),
-            "winapi helpers source should not publicly reexport the old event/input/windowing policy helpers"
-        );
-
-        let desktop_handles = fs::read_to_string(winapi_src.join("desktop_handles.arc"))
-            .expect("winapi desktop handle source should load");
-        assert!(
-            !desktop_handles.contains("FrameInput"),
-            "winapi desktop handles should not publicly expose FrameInput anymore"
-        );
-        assert!(
-            desktop_handles.contains("export opaque type WakeHandle as move, boundary_unsafe"),
-            "WakeHandle should remain public only as a move-owned wake primitive"
-        );
-
-        for removed in [
-            winapi_src.join("helpers").join("events.arc"),
-            winapi_src.join("helpers").join("input.arc"),
-            winapi_src.join("helpers").join("windowing.arc"),
-        ] {
-            assert!(
-                !removed.exists(),
-                "{} should not remain as a public helper surface",
-                removed.display()
-            );
+    fn winapi_repo_consumers_only_use_raw_surface() {
+        fn visit(dir: &Path, acc: &mut Vec<PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if matches!(
+                        path.file_name().and_then(|name| name.to_str()),
+                        Some("target") | Some("dist") | Some(".git")
+                    ) {
+                        continue;
+                    }
+                    visit(&path, acc);
+                    continue;
+                }
+                if matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("arc") | Some("rs") | Some("md") | Some("toml")
+                ) {
+                    acc.push(path);
+                }
+            }
         }
 
-        let message_helper = fs::read_to_string(winapi_src.join("helpers").join("message.arc"))
-            .expect("winapi message helper source should load");
-        assert!(
-            message_helper.contains("arcana_winapi.backend.message.")
-                && !message_helper.contains("helpers.events.")
-                && !message_helper.contains("FrameInput"),
-            "winapi helpers.message should be a thin wrapper over internal backend.message primitives only"
-        );
+        let mut files = Vec::new();
+        for root in [
+            "crates",
+            "docs",
+            "grimoires",
+            "std",
+            "conformance",
+            "examples",
+        ] {
+            visit(&repo_root().join(root), &mut files);
+        }
+        files.push(repo_root().join("llm.md"));
 
-        let message_backend = fs::read_to_string(winapi_src.join("backend").join("message.arc"))
-            .expect("winapi backend message declarations should load");
-        assert!(
-            !message_backend.contains("export fn ")
-                && !message_backend.contains("result_unit")
-                && !message_backend.contains("helpers.message.")
-                && message_backend.contains("backend.message."),
-            "winapi backend/message.arc should exist as an internal declaration module"
-        );
+        let forbidden = [
+            "arcana_winapi.helpers.",
+            "arcana_winapi.foundation",
+            "arcana_winapi.fonts",
+            "arcana_winapi.windows",
+            "arcana_winapi.types.",
+            "arcana_winapi.desktop_handles.",
+            "arcana_winapi.graphics_handles.",
+            "arcana_winapi.audio_handles.",
+            "arcana_winapi.process_handles.",
+        ];
+        let self_test_suffix = Path::new("crates")
+            .join("arcana-package")
+            .join("src")
+            .join("lib.rs");
+
+        for path in files {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            if path
+                .strip_prefix(repo_root().join("grimoires").join("arcana").join("winapi"))
+                .is_ok()
+            {
+                continue;
+            }
+            if path.ends_with(&self_test_suffix) {
+                continue;
+            }
+            for needle in forbidden {
+                assert!(
+                    !text.contains(needle),
+                    "{} should not depend on removed public winapi surface `{needle}`",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[cfg(windows)]

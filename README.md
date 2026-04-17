@@ -23,7 +23,7 @@ What is not done yet:
 - named remote registries and Git dependencies
 - stable public backend artifact contracts
 - first-party `arcana test`, `arcana format`, and `arcana review`
-- any rebuilt higher-level app/media grimoires above the current substrate
+- any rebuilt higher-level non-std layers above the current substrate
 
 The language surface is frozen until selfhost except for contract-preserving fixes and the already-approved owner/object exception.
 

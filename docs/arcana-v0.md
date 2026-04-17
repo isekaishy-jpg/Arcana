@@ -837,8 +837,8 @@ Arcana now distinguishes two native-facing declaration families:
 
 Binding examples:
 
-- `export native fn current_module() -> arcana_winapi.types.ModuleHandle = foundation.current_module`
-- `native callback window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int = arcana_winapi.callbacks.handle_window_proc`
+- `export shackle fn current_process_id() -> Int = host.raw.kernel32.GetCurrentProcessId`
+- `native callback window_proc: arcana_winapi.raw.callbacks.WNDPROC = app.callbacks.handle_window_proc`
 
 Rules:
 
@@ -1053,7 +1053,7 @@ Policy:
   - without the flag: `process execution is disabled; rerun with --allow-process`
 - `arcana_process.fs` includes binary file APIs: `read_bytes(path) -> Bytes` and `write_bytes(path, bytes)`.
 - `arcana_process.fs` includes streaming APIs with a typed `FileStream` handle:
-  - canonical handle path: `arcana_winapi.process_handles.FileStream`
+  - canonical handle path: `arcana_process.fs.FileStream`
   - `stream_open_read(path) -> Result[FileStream, Str]`
   - `stream_open_write(path, append) -> Result[FileStream, Str]`
   - `stream_read(edit stream, max_bytes) -> Result[Bytes, Str]`

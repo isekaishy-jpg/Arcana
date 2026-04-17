@@ -71,8 +71,7 @@
   - host/core packages for text, fs, path, process, args/env,
   - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
   - ECS/behavior runtime substrate remains first-party and is not treated as showcase-only logic,
-  - then future Arcana-owned app/media grimoires for a desktop app-shell boundary, event/input utility, and audio facade prove the package surface is usable,
-  - that post-M8 grimoire step is now active and starts with `grimoires/libs/arcana-desktop` as a real session-backed desktop app-shell package rather than a dead scaffold, including blocking wait, monitor/theme helpers, richer event/device routing, clipboard, and an optional ECS adapter layer over the shared substrate while keeping authoritative window/event/wake control in the grimoire itself,
+  - any future higher-level non-std desktop, event/input, or audio facade layer must be scoped explicitly on top of the retained substrate rather than inferred from deleted package names,
   - owned compiler/tooling corpus and explicit conformance fixtures provide validation pressure without preserving Meadow-era package decomposition,
   - and those packages are real Rust-side runtime commitments of the rewrite, not temporary compatibility shims to be deferred until after selfhost.
 - Artifact strategy is explicit:
@@ -91,7 +90,7 @@
   6. internal IR and first runnable backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
   7. close the approved rewrite-owned `std` runtime surface so `std` is broadly runnable rather than only the initial host/app substrate slice,
   8. native AOT artifact emission for the owned `hello`-class, host-core tool, window demo, and audio smoke paths on real hosts, with native `exe` / `dll` outputs rather than only internal backend artifacts,
-  9. complete the required Arcana-owned app/media grimoires on top of the new toolchain rather than stopping at scaffold status; this is now in progress starting with `grimoires/libs/arcana-desktop`,
+  9. reintroduce only the higher-level non-std packages that are still justified after the substrate cleanup, with explicit scope approval before code lands,
   10. build and native-run at least one real owned showcase app through those completed grimoires so showcase proof is not just direct substrate smoke,
   11. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain,
   12. add the smaller advisory `arcana review` layer only after showcase/tooling corpus exists to justify it,
@@ -118,7 +117,7 @@
 - First-party packages:
   - compile tests for core host packages,
   - compile tests for window/input/canvas/time/audio packages,
-  - package-level tests proving the required future Arcana-owned app/media grimoire roles build against the new package/runtime boundary.
+  - package-level tests proving the retained first-party package roles build against the new package/runtime boundary.
 - Backend/selfhost:
   - first runnable backend milestone must run `hello`, one owned host-core tool proof, and one owned window proof,
   - std-runtime-closure milestone must cover the approved rewrite-owned `std` surface needed by owned grimoires rather than only the initial Milestone 6 subset,

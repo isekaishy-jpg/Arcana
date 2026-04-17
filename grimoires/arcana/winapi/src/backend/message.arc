@@ -1,4 +1,4 @@
-use arcana_winapi.desktop_handles.WakeHandle
+use arcana_winapi.backend.desktop_handles.WakeHandle
 
 // Internal backend declarations for the generic Win32 wake/message glue.
 // This module is intentionally not reexported from `arcana_winapi`.

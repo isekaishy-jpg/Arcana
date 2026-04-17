@@ -406,7 +406,7 @@ shackle fn process_fs_write_bytes_impl(read path: Str, read bytes: Bytes) -> Boo
         }
     }
 
-shackle fn process_fs_stream_open_read_impl(read path: Str) -> arcana_winapi.process_handles.FileStream = backend.process.fs_stream_open_read:
+shackle fn process_fs_stream_open_read_impl(read path: Str) -> U64 = backend.process.fs_stream_open_read:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         let file = std::fs::File::open(&resolved)
@@ -421,7 +421,7 @@ shackle fn process_fs_stream_open_read_impl(read path: Str) -> arcana_winapi.pro
         }
     }
 
-shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) -> arcana_winapi.process_handles.FileStream = backend.process.fs_stream_open_write:
+shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) -> U64 = backend.process.fs_stream_open_write:
     crate::shackle::clear_helper_error(instance);
     let result = resolve_fs_path(&path).and_then(|resolved| {
         if let Some(parent) = resolved.parent() {
@@ -447,7 +447,7 @@ shackle fn process_fs_stream_open_write_impl(read path: Str, read append: Bool) 
         }
     }
 
-shackle fn process_fs_stream_read_impl(edit stream: arcana_winapi.process_handles.FileStream, read max_bytes: Int) -> Bytes = backend.process.fs_stream_read:
+shackle fn process_fs_stream_read_impl(edit stream: U64, read max_bytes: Int) -> Bytes = backend.process.fs_stream_read:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         if max_bytes < 0 {
@@ -471,7 +471,7 @@ shackle fn process_fs_stream_read_impl(edit stream: arcana_winapi.process_handle
         }
     }
 
-shackle fn process_fs_stream_write_impl(edit stream: arcana_winapi.process_handles.FileStream, read bytes: Bytes) -> Int = backend.process.fs_stream_write:
+shackle fn process_fs_stream_write_impl(edit stream: U64, read bytes: Bytes) -> Int = backend.process.fs_stream_write:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         let stream = file_stream_mut(instance, stream)?;
@@ -490,7 +490,7 @@ shackle fn process_fs_stream_write_impl(edit stream: arcana_winapi.process_handl
         }
     }
 
-shackle fn process_fs_stream_eof_impl(read stream: arcana_winapi.process_handles.FileStream) -> Bool = backend.process.fs_stream_eof:
+shackle fn process_fs_stream_eof_impl(read stream: U64) -> Bool = backend.process.fs_stream_eof:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         let stream = file_stream_mut(instance, stream)?;
@@ -512,7 +512,7 @@ shackle fn process_fs_stream_eof_impl(read stream: arcana_winapi.process_handles
         }
     }
 
-shackle fn process_fs_stream_close_impl(take stream: arcana_winapi.process_handles.FileStream) -> Bool = backend.process.fs_stream_close:
+shackle fn process_fs_stream_close_impl(take stream: U64) -> Bool = backend.process.fs_stream_close:
     crate::shackle::clear_helper_error(instance);
     let result = (|| {
         let state = crate::shackle::package_state_data_mut(instance)?;

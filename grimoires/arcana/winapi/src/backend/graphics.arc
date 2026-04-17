@@ -1,4 +1,4 @@
-use arcana_winapi.graphics_handles.GdiWindowSurface
+use arcana_winapi.backend.graphics_handles.GdiWindowSurface
 
 export native fn gdi_memory_surface_stride(read width: Int, read height: Int) -> Int = helpers.graphics.gdi_memory_surface_stride
 export native fn gdi_hidden_window_present() -> Bool = helpers.graphics.gdi_hidden_window_present

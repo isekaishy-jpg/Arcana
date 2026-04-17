@@ -4,5 +4,4 @@ name = "arcana_process"
 kind = "lib"
 
 [deps]
-arcana_winapi = { path = "../winapi" }
 std = { path = "../../../std" }

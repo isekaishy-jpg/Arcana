@@ -10784,9 +10784,9 @@ mod tests {
     fn parse_module_handles_native_binding_declarations() {
         let parsed = parse_module(concat!(
             "export opaque type HiddenWindow as move, boundary_unsafe\n",
-            "export native fn create_hidden_window() -> arcana_winapi.types.HiddenWindow = windows.create_hidden_window\n",
-            "native callback window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int = arcana_winapi.callbacks.handle_window_proc\n",
-            "fn handle_window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int:\n",
+            "export native fn create_hidden_window() -> HiddenWindow = host.create_hidden_window\n",
+            "native callback window_proc(read window: HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int = app.callbacks.handle_window_proc\n",
+            "fn handle_window_proc(read window: HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int:\n",
             "    return wparam\n",
         ))
         .expect("native binding declarations should parse");
@@ -10805,14 +10805,14 @@ mod tests {
         assert_eq!(parsed.symbols[1].name, "create_hidden_window");
         assert_eq!(
             parsed.symbols[1].native_impl.as_deref(),
-            Some("windows.create_hidden_window")
+            Some("host.create_hidden_window")
         );
         assert_eq!(parsed.native_callbacks.len(), 1);
         assert_eq!(parsed.native_callbacks[0].name, "window_proc");
         assert_eq!(
             parsed.native_callbacks[0].target,
             vec![
-                "arcana_winapi".to_string(),
+                "app".to_string(),
                 "callbacks".to_string(),
                 "handle_window_proc".to_string()
             ]

@@ -575,7 +575,7 @@ shackle flags WinapiDesktopInternals:
                 std::mem::size_of::<crate::raw::types::BOOL>() as u32,
             )
         };
-        if crate::helpers_impl::hresult_succeeded_native(hr) {
+        if crate::backend_support_impl::hresult_succeeded_native(hr) {
             if dark != 0 {
                 return 2;
             }
@@ -984,7 +984,7 @@ shackle flags WinapiDesktopInternals:
         DESKTOP_WINDOW_CLASS
             .get_or_init(|| {
                 let module = crate::shackle::current_module_handle_for_address(
-                    desktop_window_proc as usize as crate::shackle::LPCVOID,
+                    desktop_window_proc as *const () as crate::shackle::LPCVOID,
                 )?;
                 let class_name = desktop_window_class_name();
                 let class = crate::raw::types::WNDCLASSW {
@@ -1069,7 +1069,7 @@ shackle flags WinapiDesktopInternals:
                     &mut dpi_y,
                 )
             };
-            let scale_factor_milli = if crate::helpers_impl::hresult_succeeded_native(status) {
+            let scale_factor_milli = if crate::backend_support_impl::hresult_succeeded_native(status) {
                 i64::from(dpi_x.max(dpi_y)) * 1000 / 96
             } else {
                 1000
@@ -1380,7 +1380,7 @@ shackle flags WinapiDesktopInternals:
         }
     }
 
-shackle fn window_open_impl(read title: Str, read width: Int, read height: Int) -> arcana_winapi.desktop_handles.Window = helpers.window.window_open:
+shackle fn window_open_impl(read title: Str, read width: Int, read height: Int) -> arcana_winapi.backend.desktop_handles.Window = helpers.window.window_open:
     crate::shackle::clear_helper_error(instance);
     if let Err(err) = register_desktop_window_class() {
         crate::shackle::set_helper_error(instance, err);
@@ -1400,7 +1400,7 @@ shackle fn window_open_impl(read title: Str, read width: Int, read height: Int) 
     let class_name = desktop_window_class_name();
     let title_wide = wide_nul(&title);
     let module = crate::shackle::current_module_handle_for_address(
-        desktop_window_proc as usize as crate::shackle::LPCVOID,
+        desktop_window_proc as *const () as crate::shackle::LPCVOID,
     )?;
     let hwnd = unsafe {
         crate::raw::user32::CreateWindowExW(
@@ -1488,106 +1488,106 @@ shackle fn window_open_impl(read title: Str, read width: Int, read height: Int) 
 shackle fn window_take_last_error_impl() -> Str = helpers.window.take_last_error:
     Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
 
-shackle fn window_alive_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_alive:
+shackle fn window_alive_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_alive:
     let Ok(window) = window_ref(instance, win) else {
         return Ok(binding_bool(false));
     };
     Ok(binding_bool(!window.closed && !window.hwnd.is_null() && unsafe { IsWindow(window.hwnd) != 0 }))
 
-shackle fn window_native_handle_impl(read win: arcana_winapi.desktop_handles.Window) -> arcana_winapi.raw.types.HWND = helpers.window.window_native_handle:
+shackle fn window_native_handle_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> arcana_winapi.raw.types.HWND = helpers.window.window_native_handle:
     Ok(binding_output_layout(window_ref(instance, win)?.hwnd))
 
-shackle fn window_width_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_width:
+shackle fn window_width_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_width:
     Ok(binding_int(window_ref(instance, win)?.width))
 
-shackle fn window_height_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_height:
+shackle fn window_height_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_height:
     Ok(binding_int(window_ref(instance, win)?.height))
 
-shackle fn window_resized_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_resized:
+shackle fn window_resized_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_resized:
     Ok(binding_bool(window_ref(instance, win)?.resized))
 
-shackle fn window_fullscreen_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_fullscreen:
+shackle fn window_fullscreen_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_fullscreen:
     Ok(binding_bool(window_ref(instance, win)?.fullscreen))
 
-shackle fn window_minimized_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_minimized:
+shackle fn window_minimized_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_minimized:
     Ok(binding_bool(window_ref(instance, win)?.minimized))
 
-shackle fn window_maximized_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_maximized:
+shackle fn window_maximized_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_maximized:
     Ok(binding_bool(window_ref(instance, win)?.maximized))
 
-shackle fn window_focused_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_focused:
+shackle fn window_focused_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_focused:
     Ok(binding_bool(window_ref(instance, win)?.focused))
 
-shackle fn window_id_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_id:
+shackle fn window_id_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_id:
     Ok(binding_int(window_id_value(win)?))
 
-shackle fn window_x_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_x:
+shackle fn window_x_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_x:
     Ok(binding_int(window_ref(instance, win)?.position.0))
 
-shackle fn window_y_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_y:
+shackle fn window_y_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_y:
     Ok(binding_int(window_ref(instance, win)?.position.1))
 
-shackle fn window_title_impl(read win: arcana_winapi.desktop_handles.Window) -> Str = helpers.window.window_title:
+shackle fn window_title_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Str = helpers.window.window_title:
     Ok(binding_owned_str(window_ref(instance, win)?.title.clone()))
 
-shackle fn window_visible_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_visible:
+shackle fn window_visible_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_visible:
     Ok(binding_bool(window_ref(instance, win)?.visible))
 
-shackle fn window_decorated_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_decorated:
+shackle fn window_decorated_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_decorated:
     Ok(binding_bool(window_ref(instance, win)?.decorated))
 
-shackle fn window_resizable_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_resizable:
+shackle fn window_resizable_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_resizable:
     Ok(binding_bool(window_ref(instance, win)?.resizable))
 
-shackle fn window_topmost_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_topmost:
+shackle fn window_topmost_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_topmost:
     Ok(binding_bool(window_ref(instance, win)?.topmost))
 
-shackle fn window_cursor_visible_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_cursor_visible:
+shackle fn window_cursor_visible_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_cursor_visible:
     Ok(binding_bool(window_ref(instance, win)?.cursor_visible))
 
-shackle fn window_min_width_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_min_width:
+shackle fn window_min_width_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_min_width:
     Ok(binding_int(window_ref(instance, win)?.min_size.0))
 
-shackle fn window_min_height_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_min_height:
+shackle fn window_min_height_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_min_height:
     Ok(binding_int(window_ref(instance, win)?.min_size.1))
 
-shackle fn window_max_width_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_max_width:
+shackle fn window_max_width_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_max_width:
     Ok(binding_int(window_ref(instance, win)?.max_size.0))
 
-shackle fn window_max_height_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_max_height:
+shackle fn window_max_height_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_max_height:
     Ok(binding_int(window_ref(instance, win)?.max_size.1))
 
-shackle fn window_scale_factor_milli_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_scale_factor_milli:
+shackle fn window_scale_factor_milli_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_scale_factor_milli:
     let window = window_ref(instance, win)?;
     let dpi = unsafe { crate::raw::user32::GetDpiForWindow(window.hwnd) };
     Ok(binding_int(if dpi == 0 { 1000 } else { i64::from(dpi) * 1000 / 96 }))
 
-shackle fn window_theme_code_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_theme_code:
+shackle fn window_theme_code_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_theme_code:
     let window = window_ref(instance, win)?;
     Ok(binding_int(window_theme_code(window.hwnd, window.theme_override_code)))
 
-shackle fn window_transparent_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_transparent:
+shackle fn window_transparent_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_transparent:
     Ok(binding_bool(window_ref(instance, win)?.transparent))
 
-shackle fn window_theme_override_code_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_theme_override_code:
+shackle fn window_theme_override_code_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_theme_override_code:
     Ok(binding_int(window_ref(instance, win)?.theme_override_code))
 
-shackle fn window_cursor_icon_code_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_cursor_icon_code:
+shackle fn window_cursor_icon_code_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_cursor_icon_code:
     Ok(binding_int(window_ref(instance, win)?.cursor_icon_code))
 
-shackle fn window_cursor_grab_mode_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_cursor_grab_mode:
+shackle fn window_cursor_grab_mode_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_cursor_grab_mode:
     Ok(binding_int(window_ref(instance, win)?.cursor_grab_mode))
 
-shackle fn window_cursor_x_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_cursor_x:
+shackle fn window_cursor_x_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_cursor_x:
     Ok(binding_int(window_ref(instance, win)?.cursor_position.0))
 
-shackle fn window_cursor_y_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_cursor_y:
+shackle fn window_cursor_y_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_cursor_y:
     Ok(binding_int(window_ref(instance, win)?.cursor_position.1))
 
-shackle fn window_text_input_enabled_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_text_input_enabled:
+shackle fn window_text_input_enabled_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_text_input_enabled:
     Ok(binding_bool(window_ref(instance, win)?.text_input_enabled))
 
-shackle fn window_current_monitor_index_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.window.window_current_monitor_index:
+shackle fn window_current_monitor_index_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.window.window_current_monitor_index:
     Ok(binding_int(current_monitor_index_for_window(instance, win)?))
 
 shackle fn window_primary_monitor_index_impl() -> Int = helpers.window.window_primary_monitor_index:
@@ -1671,7 +1671,7 @@ shackle fn window_monitor_is_primary_impl(index: Int) -> Bool = helpers.window.w
         .ok_or_else(|| format!("invalid monitor index `{index}`"))?
         .primary))
 
-shackle fn window_set_title_impl(edit win: arcana_winapi.desktop_handles.Window, read title: Str) = helpers.window.window_set_title:
+shackle fn window_set_title_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read title: Str) = helpers.window.window_set_title:
     let hwnd = window_ref(instance, win)?.hwnd;
     let title_wide = wide_nul(&title);
     if unsafe { SetWindowTextW(hwnd, title_wide.as_ptr()) } == 0 {
@@ -1680,7 +1680,7 @@ shackle fn window_set_title_impl(edit win: arcana_winapi.desktop_handles.Window,
     window_mut(instance, win)?.title = title;
     Ok(binding_unit())
 
-shackle fn window_set_position_impl(edit win: arcana_winapi.desktop_handles.Window, read x: Int, read y: Int) = helpers.window.window_set_position:
+shackle fn window_set_position_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read x: Int, read y: Int) = helpers.window.window_set_position:
     let hwnd = window_ref(instance, win)?.hwnd;
     if unsafe {
         SetWindowPos(
@@ -1698,7 +1698,7 @@ shackle fn window_set_position_impl(edit win: arcana_winapi.desktop_handles.Wind
     window_mut(instance, win)?.position = (x, y);
     Ok(binding_unit())
 
-shackle fn window_set_size_impl(edit win: arcana_winapi.desktop_handles.Window, read width: Int, read height: Int) = helpers.window.window_set_size:
+shackle fn window_set_size_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read width: Int, read height: Int) = helpers.window.window_set_size:
     let (hwnd, position, min_size, max_size) = {
         let window = window_ref(instance, win)?;
         (window.hwnd, window.position, window.min_size, window.max_size)
@@ -1717,7 +1717,7 @@ shackle fn window_set_size_impl(edit win: arcana_winapi.desktop_handles.Window, 
     window.resized = true;
     Ok(binding_unit())
 
-shackle fn window_set_visible_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_visible:
+shackle fn window_set_visible_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_visible:
     let hwnd = window_ref(instance, win)?.hwnd;
     unsafe {
         let _ = ShowWindow(
@@ -1728,7 +1728,7 @@ shackle fn window_set_visible_impl(edit win: arcana_winapi.desktop_handles.Windo
     window_mut(instance, win)?.visible = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_decorated_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_decorated:
+shackle fn window_set_decorated_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_decorated:
     let (hwnd, fullscreen, resizable, topmost, transparent) = {
         let window = window_ref(instance, win)?;
         (
@@ -1750,7 +1750,7 @@ shackle fn window_set_decorated_impl(edit win: arcana_winapi.desktop_handles.Win
     window_mut(instance, win)?.decorated = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_resizable_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_resizable:
+shackle fn window_set_resizable_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_resizable:
     let (hwnd, fullscreen, decorated, topmost, transparent) = {
         let window = window_ref(instance, win)?;
         (
@@ -1772,7 +1772,7 @@ shackle fn window_set_resizable_impl(edit win: arcana_winapi.desktop_handles.Win
     window_mut(instance, win)?.resizable = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_min_size_impl(edit win: arcana_winapi.desktop_handles.Window, read width: Int, read height: Int) = helpers.window.window_set_min_size:
+shackle fn window_set_min_size_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read width: Int, read height: Int) = helpers.window.window_set_min_size:
     let min_size = (width.max(0), height.max(0));
     let (hwnd, position, max_size, fullscreen, current_size) = {
         let window = window_ref(instance, win)?;
@@ -1799,7 +1799,7 @@ shackle fn window_set_min_size_impl(edit win: arcana_winapi.desktop_handles.Wind
     window.resized = true;
     Ok(binding_unit())
 
-shackle fn window_set_max_size_impl(edit win: arcana_winapi.desktop_handles.Window, read width: Int, read height: Int) = helpers.window.window_set_max_size:
+shackle fn window_set_max_size_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read width: Int, read height: Int) = helpers.window.window_set_max_size:
     let max_size = (width.max(0), height.max(0));
     let (hwnd, position, min_size, fullscreen, current_size) = {
         let window = window_ref(instance, win)?;
@@ -1826,7 +1826,7 @@ shackle fn window_set_max_size_impl(edit win: arcana_winapi.desktop_handles.Wind
     window.resized = true;
     Ok(binding_unit())
 
-shackle fn window_set_fullscreen_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_fullscreen:
+shackle fn window_set_fullscreen_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_fullscreen:
     let (
         hwnd,
         fullscreen,
@@ -1952,7 +1952,7 @@ shackle fn window_set_fullscreen_impl(edit win: arcana_winapi.desktop_handles.Wi
     window.resized = true;
     Ok(binding_unit())
 
-shackle fn window_set_minimized_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_minimized:
+shackle fn window_set_minimized_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_minimized:
     let hwnd = window_ref(instance, win)?.hwnd;
     unsafe {
         let _ = ShowWindow(hwnd, if enabled { SW_MINIMIZE_NATIVE } else { SW_RESTORE_NATIVE });
@@ -1960,7 +1960,7 @@ shackle fn window_set_minimized_impl(edit win: arcana_winapi.desktop_handles.Win
     window_mut(instance, win)?.minimized = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_maximized_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_maximized:
+shackle fn window_set_maximized_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_maximized:
     let hwnd = window_ref(instance, win)?.hwnd;
     unsafe {
         let _ = ShowWindow(hwnd, if enabled { SW_MAXIMIZE_NATIVE } else { SW_RESTORE_NATIVE });
@@ -1968,7 +1968,7 @@ shackle fn window_set_maximized_impl(edit win: arcana_winapi.desktop_handles.Win
     window_mut(instance, win)?.maximized = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_topmost_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_topmost:
+shackle fn window_set_topmost_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_topmost:
     let (hwnd, fullscreen, decorated, resizable, transparent) = {
         let window = window_ref(instance, win)?;
         (
@@ -1990,13 +1990,13 @@ shackle fn window_set_topmost_impl(edit win: arcana_winapi.desktop_handles.Windo
     window_mut(instance, win)?.topmost = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_cursor_visible_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_cursor_visible:
+shackle fn window_set_cursor_visible_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_cursor_visible:
     let window = window_mut(instance, win)?;
     window.cursor_visible = enabled;
     apply_window_cursor(window)?;
     Ok(binding_unit())
 
-shackle fn window_set_transparent_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_transparent:
+shackle fn window_set_transparent_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_transparent:
     let (hwnd, fullscreen, decorated, resizable, topmost) = {
         let window = window_ref(instance, win)?;
         (
@@ -2018,7 +2018,7 @@ shackle fn window_set_transparent_impl(edit win: arcana_winapi.desktop_handles.W
     window_mut(instance, win)?.transparent = enabled;
     Ok(binding_unit())
 
-shackle fn window_set_theme_override_code_impl(edit win: arcana_winapi.desktop_handles.Window, read code: Int) = helpers.window.window_set_theme_override_code:
+shackle fn window_set_theme_override_code_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read code: Int) = helpers.window.window_set_theme_override_code:
     let hwnd = window_ref(instance, win)?.hwnd;
     let enabled = if code == 2 { 1i32 } else { 0i32 };
     let hr = unsafe {
@@ -2029,25 +2029,25 @@ shackle fn window_set_theme_override_code_impl(edit win: arcana_winapi.desktop_h
             std::mem::size_of::<crate::raw::types::BOOL>() as u32,
         )
     };
-    if crate::helpers_impl::hresult_failed_native(hr) {
+    if crate::backend_support_impl::hresult_failed_native(hr) {
         return Err(format!("failed to update native theme override (HRESULT {hr})"));
     }
     window_mut(instance, win)?.theme_override_code = code;
     Ok(binding_unit())
 
-shackle fn window_set_cursor_icon_code_impl(edit win: arcana_winapi.desktop_handles.Window, read code: Int) = helpers.window.window_set_cursor_icon_code:
+shackle fn window_set_cursor_icon_code_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read code: Int) = helpers.window.window_set_cursor_icon_code:
     let window = window_mut(instance, win)?;
     window.cursor_icon_code = code;
     apply_window_cursor(window)?;
     Ok(binding_unit())
 
-shackle fn window_set_cursor_grab_mode_impl(edit win: arcana_winapi.desktop_handles.Window, read mode: Int) = helpers.window.window_set_cursor_grab_mode:
+shackle fn window_set_cursor_grab_mode_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read mode: Int) = helpers.window.window_set_cursor_grab_mode:
     let window = window_mut(instance, win)?;
     window.cursor_grab_mode = mode;
     apply_cursor_grab(window)?;
     Ok(binding_unit())
 
-shackle fn window_set_cursor_position_impl(edit win: arcana_winapi.desktop_handles.Window, read x: Int, read y: Int) = helpers.window.window_set_cursor_position:
+shackle fn window_set_cursor_position_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read x: Int, read y: Int) = helpers.window.window_set_cursor_position:
     let hwnd = window_ref(instance, win)?.hwnd;
     if x >= 0 && y >= 0 {
         let point = client_to_screen_point(
@@ -2062,20 +2062,20 @@ shackle fn window_set_cursor_position_impl(edit win: arcana_winapi.desktop_handl
     window_mut(instance, win)?.cursor_position = (x, y);
     Ok(binding_unit())
 
-shackle fn window_text_input_set_enabled_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_text_input_enabled:
+shackle fn window_text_input_set_enabled_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_set_text_input_enabled:
     let window = window_mut(instance, win)?;
     window.text_input_enabled = enabled;
     apply_text_input(window)?;
     Ok(binding_unit())
 
-shackle fn window_request_redraw_impl(edit win: arcana_winapi.desktop_handles.Window) = helpers.window.window_request_redraw:
+shackle fn window_request_redraw_impl(edit win: arcana_winapi.backend.desktop_handles.Window) = helpers.window.window_request_redraw:
     let hwnd = window_ref(instance, win)?.hwnd;
     unsafe {
         let _ = InvalidateRect(hwnd, std::ptr::null(), 0);
     }
     Ok(binding_unit())
 
-shackle fn window_request_attention_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.window.window_request_attention:
+shackle fn window_request_attention_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.window.window_request_attention:
     let hwnd = window_ref(instance, win)?.hwnd;
     let mut info = FLASHWINFO {
         cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
@@ -2089,7 +2089,7 @@ shackle fn window_request_attention_impl(edit win: arcana_winapi.desktop_handles
     }
     Ok(binding_unit())
 
-shackle fn window_close_impl(take win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.window.window_close:
+shackle fn window_close_impl(take win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.window.window_close:
     crate::shackle::clear_helper_error(instance);
     let hwnd = match window_ref(instance, win) {
         Ok(window) => window.hwnd,
@@ -2112,7 +2112,7 @@ shackle fn window_close_impl(take win: arcana_winapi.desktop_handles.Window) -> 
     desktop_state_mut(instance)?.windows.remove(&win);
     Ok(binding_bool(true))
 
-shackle fn message_wake_create_impl() -> arcana_winapi.desktop_handles.WakeHandle = backend.message.wake_create:
+shackle fn message_wake_create_impl() -> arcana_winapi.backend.desktop_handles.WakeHandle = backend.message.wake_create:
     crate::shackle::clear_helper_error(instance);
     let event = unsafe {
         crate::raw::kernel32::CreateEventW(
@@ -2147,7 +2147,7 @@ shackle fn message_wake_create_impl() -> arcana_winapi.desktop_handles.WakeHandl
     state.wakes.insert(handle, WinapiWakeState { event, pending: 0 });
     Ok(binding_opaque(handle))
 
-shackle fn message_wake_close_impl(take handle: arcana_winapi.desktop_handles.WakeHandle) -> Bool = backend.message.wake_close:
+shackle fn message_wake_close_impl(take handle: arcana_winapi.backend.desktop_handles.WakeHandle) -> Bool = backend.message.wake_close:
     crate::shackle::clear_helper_error(instance);
     let event = match wake_ref(instance, handle) {
         Ok(wake) => wake.event,
@@ -2169,7 +2169,7 @@ shackle fn message_wake_close_impl(take handle: arcana_winapi.desktop_handles.Wa
     let _ = desktop_state_mut(instance)?.wakes.remove(&handle);
     Ok(binding_bool(true))
 
-shackle fn message_wake_signal_impl(read handle: arcana_winapi.desktop_handles.WakeHandle) = backend.message.wake_signal:
+shackle fn message_wake_signal_impl(read handle: arcana_winapi.backend.desktop_handles.WakeHandle) = backend.message.wake_signal:
     let wake_state = wake_ref(instance, handle)?;
     let event = wake_state.event;
     wake_mut(instance, handle)?.pending += 1;
@@ -2181,7 +2181,7 @@ shackle fn message_wake_signal_impl(read handle: arcana_winapi.desktop_handles.W
     }
     Ok(binding_unit())
 
-shackle fn message_wake_take_pending_impl(edit handle: arcana_winapi.desktop_handles.WakeHandle) -> Int = backend.message.wake_take_pending:
+shackle fn message_wake_take_pending_impl(edit handle: arcana_winapi.backend.desktop_handles.WakeHandle) -> Int = backend.message.wake_take_pending:
     let wake = wake_mut(instance, handle)?;
     let pending = wake.pending;
     wake.pending = 0;
@@ -2196,48 +2196,48 @@ shackle fn message_wake_take_pending_impl(edit handle: arcana_winapi.desktop_han
             .map_err(|_| format!("wake pending count `{pending}` does not fit in Int"))?
     ))
 
-shackle fn message_wait_wake_or_messages_impl(read handle: arcana_winapi.desktop_handles.WakeHandle, read timeout_ms: Int) -> Bool = backend.message.wait_wake_or_messages:
+shackle fn message_wait_wake_or_messages_impl(read handle: arcana_winapi.backend.desktop_handles.WakeHandle, read timeout_ms: Int) -> Bool = backend.message.wait_wake_or_messages:
     Ok(binding_bool(wait_for_wake_or_messages(instance, handle, timeout_ms)?))
 
-shackle fn text_input_enabled_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.text_input.window_text_input_enabled:
+shackle fn text_input_enabled_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.text_input.window_text_input_enabled:
     Ok(binding_bool(window_ref(instance, win)?.text_input_enabled))
 
-shackle fn text_input_set_enabled_impl(edit win: arcana_winapi.desktop_handles.Window, read enabled: Bool) = helpers.text_input.window_set_text_input_enabled:
+shackle fn text_input_set_enabled_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read enabled: Bool) = helpers.text_input.window_set_text_input_enabled:
     let window = window_mut(instance, win)?;
     window.text_input_enabled = enabled;
     apply_text_input(window)?;
     Ok(binding_unit())
 
-shackle fn text_input_composition_area_active_impl(read win: arcana_winapi.desktop_handles.Window) -> Bool = helpers.text_input.composition_area_active:
+shackle fn text_input_composition_area_active_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Bool = helpers.text_input.composition_area_active:
     Ok(binding_bool(window_ref(instance, win)?.composition_area_active))
 
-shackle fn text_input_composition_area_x_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.text_input.composition_area_x:
+shackle fn text_input_composition_area_x_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.text_input.composition_area_x:
     Ok(binding_int(window_ref(instance, win)?.composition_area_position.0))
 
-shackle fn text_input_composition_area_y_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.text_input.composition_area_y:
+shackle fn text_input_composition_area_y_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.text_input.composition_area_y:
     Ok(binding_int(window_ref(instance, win)?.composition_area_position.1))
 
-shackle fn text_input_composition_area_width_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.text_input.composition_area_width:
+shackle fn text_input_composition_area_width_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.text_input.composition_area_width:
     Ok(binding_int(window_ref(instance, win)?.composition_area_size.0))
 
-shackle fn text_input_composition_area_height_impl(read win: arcana_winapi.desktop_handles.Window) -> Int = helpers.text_input.composition_area_height:
+shackle fn text_input_composition_area_height_impl(read win: arcana_winapi.backend.desktop_handles.Window) -> Int = helpers.text_input.composition_area_height:
     Ok(binding_int(window_ref(instance, win)?.composition_area_size.1))
 
-shackle fn text_input_set_composition_area_position_raw_impl(edit win: arcana_winapi.desktop_handles.Window, read x: Int, read y: Int) = helpers.text_input.set_composition_area_position:
+shackle fn text_input_set_composition_area_position_raw_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read x: Int, read y: Int) = helpers.text_input.set_composition_area_position:
     let window = window_mut(instance, win)?;
     window.composition_area_active = true;
     window.composition_area_position = (x, y);
     apply_composition_area(window)?;
     Ok(binding_unit())
 
-shackle fn text_input_set_composition_area_size_raw_impl(edit win: arcana_winapi.desktop_handles.Window, read width: Int, read height: Int) = helpers.text_input.set_composition_area_size:
+shackle fn text_input_set_composition_area_size_raw_impl(edit win: arcana_winapi.backend.desktop_handles.Window, read width: Int, read height: Int) = helpers.text_input.set_composition_area_size:
     let window = window_mut(instance, win)?;
     window.composition_area_active = true;
     window.composition_area_size = (width.max(0), height.max(0));
     apply_composition_area(window)?;
     Ok(binding_unit())
 
-shackle fn text_input_clear_composition_area_impl(edit win: arcana_winapi.desktop_handles.Window) = helpers.text_input.clear_composition_area:
+shackle fn text_input_clear_composition_area_impl(edit win: arcana_winapi.backend.desktop_handles.Window) = helpers.text_input.clear_composition_area:
     let window = window_mut(instance, win)?;
     window.composition_area_active = false;
     window.composition_area_position = (0, 0);

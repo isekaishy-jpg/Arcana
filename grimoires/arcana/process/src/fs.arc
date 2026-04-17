@@ -1,7 +1,8 @@
 import std.cleanup
 import std.result
-use arcana_winapi.process_handles.FileStream
 use std.result.Result
+
+export opaque type FileStream as move, boundary_unsafe
 
 // `arcana_process.fs` is runtime-owned host-core surface.
 export fn exists(path: Str) -> Bool:
@@ -73,7 +74,7 @@ export fn file_size(path: Str) -> Result[Int, Str]:
 export fn modified_unix_ms(path: Str) -> Result[Int, Str]:
     return arcana_process.fs.modified_unix_ms :: path :: call
 
-impl std.cleanup.Cleanup[arcana_winapi.process_handles.FileStream] for arcana_winapi.process_handles.FileStream:
-    fn cleanup(take self: arcana_winapi.process_handles.FileStream) -> Result[Unit, Str]:
+impl std.cleanup.Cleanup[arcana_process.fs.FileStream] for arcana_process.fs.FileStream:
+    fn cleanup(take self: arcana_process.fs.FileStream) -> Result[Unit, Str]:
         return arcana_process.fs.stream_close :: self :: call
 

@@ -74,10 +74,8 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 `arcana_winapi` is the first public OS-binding grimoire.
 
 Its public package shape is:
-- `arcana_winapi.raw.*` for public raw Win32-facing surface
-- `arcana_winapi.helpers.*` for thin Win32 helper routines consumers should build on
-- `arcana_winapi.desktop_handles`, `arcana_winapi.graphics_handles`, `arcana_winapi.process_handles`, and `arcana_winapi.audio_handles` for canonical binding-owned opaque handle declarations that higher-level grimoires must reference directly when they need those types
-- compatibility wrappers like `arcana_winapi.foundation`, `arcana_winapi.fonts`, and `arcana_winapi.windows` remain available during the migration
+- `arcana_winapi.raw.*` for the public raw Win32-facing surface
+- internal backend/shackle glue may remain in the package, but it is not public API and must not be treated as a second semantic lane
 
 Its current v1 raw surface covers:
 - core type/layout families in `arcana_winapi.raw.types`
@@ -92,32 +90,6 @@ Its current v1 raw surface covers:
   - window-proc callback declaration through `arcana_winapi.raw.callbacks.WNDPROC`
   - representative audio callback declarations such as `XAUDIO2_ENGINE_ON_CRITICAL_ERROR` and `XAUDIO2_VOICE_ON_BUFFER_END`
   - raw COM-style interface/vtable layouts for the supported graphics/text/audio families
-
-Its current helper surface covers:
-- strings/errors/com
-  - UTF-16 helpers
-  - HRESULT helpers
-  - COM init/uninit, GUID text, property-key helpers
-- windowing
-  - hidden window creation/destruction
-  - generic wake/message primitives
-  - DPI/monitor queries
-  - dark-mode attribute roundtrip
-  - client/frame rect queries
-  - clipboard, file-drop, and IME helper routines
-- helper surfaces here stay thin Win32 substrate helpers; typed event/input framing and other higher-level windowing policy do not belong in `arcana_winapi.helpers.*`
-- graphics/text
-  - GDI window-surface ownership and software-present path
-  - DXGI adapter enumeration
-  - DXGI hidden-window swapchain bootstrap
-  - D3D12 WARP bootstrap including queue/allocator/list/fence setup
-  - Direct2D and WIC factory bootstrap
-  - DirectWrite system font count and text-layout bootstrap
-- audio
-  - MMDevice enumeration/default render bootstrap
-  - WASAPI default render bootstrap
-  - WASAPI render-client bootstrap
-  - endpoint volume bootstrap
   - session policy bootstrap
   - AVRT registration helper
   - XAudio2 and X3DAudio bootstrap helpers
@@ -125,8 +97,10 @@ Its current helper surface covers:
 ## Boundaries
 
 - Future text, desktop, graphics, or other higher-level layers may consume `arcana_winapi` for Windows-specific behavior such as font discovery or native shell work.
-- `arcana_process`, `arcana_audio`, and any future higher-level layers may traffic in those binding-owned handles through their routines and records, but type references must still resolve to the `arcana_winapi.*_handles` declarations.
-- Future graphics/audio layers such as `arcana_hal` or reintroduced higher-level packages may consume the raw/helper surface without reviving handwritten Rust bridge layers.
+- `arcana_winapi` is raw-only at the public boundary. Higher-level layers may consume `arcana_winapi.raw.*`, but they must not depend on any helper, wrapper, or handle layer under `arcana_winapi`.
+- Host-core stream handles are owned by `arcana_process.fs.FileStream`, not by `arcana_winapi`.
+- Any Windows-native helper, bootstrap, or handle representation that still exists under `grimoires/arcana/winapi/src/backend/*` is internal implementation detail only.
+- Internal `winapi` backend modules should stay as thin declaration/opaque-handle seams over Win32/shackle glue, not regrow Arcana-shaped helper or policy surfaces.
 - Higher-level consumers must not regain direct runtime special cases once this seam exists.
 - No library package should talk to `windows-sys` directly in the library binding seam.
 - Rewrite crates must not keep a parallel `windows-sys` host lane beside this binding seam; Win32 access should flow through `arcana_winapi` and consumer packages.

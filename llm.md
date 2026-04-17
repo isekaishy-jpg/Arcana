@@ -931,7 +931,7 @@ Binding products are the current package-owned foreign seam for library packages
 ### Current surface shape
 
 - Package-owned binding surface:
-  - `native fn current_module() -> arcana_winapi.types.ModuleHandle = foundation.current_module`
+  - `export shackle fn current_process_id() -> Int = host.raw.kernel32.GetCurrentProcessId`
   - inline callback form:
     - `native callback report(read code: Int) -> Int = app.callbacks.handle_report`
   - typed callback form:
@@ -957,11 +957,7 @@ Binding products are the current package-owned foreign seam for library packages
     - `hostapi.raw.user32.WNDPROC`
 - `arcana_winapi` currently exposes:
   - `arcana_winapi.raw.*`
-  - `arcana_winapi.helpers.*`
-  - compatibility wrappers:
-    - `arcana_winapi.foundation`
-    - `arcana_winapi.fonts`
-    - `arcana_winapi.windows`
+  - internal backend/shackle glue may exist in the package, but it is not public API
 - The current raw module set includes:
   - desktop/kernel families:
     - `callbacks`, `constants`, `kernel32`, `user32`, `gdi32`, `dwmapi`, `shcore`, `shell32`, `imm32`
@@ -971,10 +967,9 @@ Binding products are the current package-owned foreign seam for library packages
     - `mmdeviceapi`, `audioclient`, `audiopolicy`, `endpointvolume`, `avrt`, `mmreg`, `ksmedia`, `propsys`, `xaudio2`, `x3daudio`
   - shared layout families:
     - `types`
-- The current helper surface covers:
-  - `strings`, `errors`, `com`, `windowing`, `graphics`, `text`, `audio`
-  - windowing helpers include hidden window lifecycle, message pump, DPI/monitor, dark mode, clipboard, file-drop, and IME
-  - graphics/text/audio helpers include GDI present, DXGI hidden-window swapchain bootstrap, D3D12 bootstrap, DirectWrite/Direct2D/WIC bootstrap, MMDevice/WASAPI/render-client/endpoint-volume/session-policy bootstrap, AVRT registration, and XAudio2/X3DAudio bootstrap
+- `arcana_winapi` does not currently expose a public helper surface.
+- Internal Windows glue may still exist under `grimoires/arcana/winapi/src/backend/*` and backend impl files, but those are implementation detail, not source-level API.
+- Treat `grimoires/arcana/winapi/src/backend/*` as thin declaration/opaque-handle seams only. If you see Arcana-side `Result` shaping, tuple helpers, or app/demo policy there, that is drift.
 - In HIR, exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` are projected into visible symbol surface so dependent packages can call/read them through ordinary path resolution.
 - Current binding CABI semantics are symmetric for imports and callbacks:
   - same param metadata model

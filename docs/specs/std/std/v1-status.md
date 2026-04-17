@@ -150,7 +150,7 @@ promotion_condition: rewrite-owned runtime supports approved ECS/behavior surfac
 
 id: STD-TYPES-CORE
 classification: bootstrap-required
-why: shared low-level geometry/color/time/frame wrappers for app/media substrate and toolchain-facing helpers
+why: shared low-level geometry/color/time/frame wrappers for retained substrate and toolchain-facing helpers
 consumers: `std.time` and future Arcana-owned layers above the substrate
 current_source: mixed
 still_needs_rebuild: keep types low-level and substrate-oriented

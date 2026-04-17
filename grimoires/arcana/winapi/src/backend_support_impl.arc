@@ -128,7 +128,7 @@ shackle flags WinapiHelperInternals:
     pub(crate) unsafe fn create_hidden_window_handle(instance: *mut crate::BindingInstance) -> Result<crate::raw::types::HWND, String> {
         crate::shackle::register_hidden_window_class()?;
         let module = crate::shackle::current_module_handle_for_address(
-            crate::shackle::hidden_window_proc as usize as crate::shackle::LPCVOID
+            crate::shackle::hidden_window_proc as *const () as crate::shackle::LPCVOID
         )?;
         let class_name = crate::shackle::window_class_name();
         let hwnd = crate::raw::user32::CreateWindowExW(
@@ -781,7 +781,7 @@ shackle fn graphics_gdi_hidden_window_present_impl() -> Bool = helpers.graphics.
     let _ = unsafe { destroy_hidden_window_handle(hwnd) };
     Ok(binding_bool(presented.unwrap_or(false)))
 
-shackle fn graphics_gdi_window_surface_open_impl(read hwnd: arcana_winapi.raw.types.HWND) -> arcana_winapi.graphics_handles.GdiWindowSurface = helpers.graphics.gdi_window_surface_open:
+shackle fn graphics_gdi_window_surface_open_impl(read hwnd: arcana_winapi.raw.types.HWND) -> arcana_winapi.backend.graphics_handles.GdiWindowSurface = helpers.graphics.gdi_window_surface_open:
     crate::shackle::clear_helper_error(instance);
     if hwnd.is_null() {
         crate::shackle::set_helper_error(instance, "gdi window surface HWND must not be null".to_string());
@@ -795,7 +795,7 @@ shackle fn graphics_gdi_window_surface_open_impl(read hwnd: arcana_winapi.raw.ty
         .insert(handle, new_software_surface_state(hwnd));
     Ok(binding_opaque(handle))
 
-shackle fn graphics_gdi_window_surface_configure_impl(edit surface: arcana_winapi.graphics_handles.GdiWindowSurface, read width: Int, read height: Int) -> Bool = helpers.graphics.gdi_window_surface_configure:
+shackle fn graphics_gdi_window_surface_configure_impl(edit surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface, read width: Int, read height: Int) -> Bool = helpers.graphics.gdi_window_surface_configure:
     crate::shackle::clear_helper_error(instance);
     match configure_software_surface_buffers(instance, surface, width, height) {
         Ok(()) => Ok(binding_bool(true)),
@@ -805,7 +805,7 @@ shackle fn graphics_gdi_window_surface_configure_impl(edit surface: arcana_winap
         }
     }
 
-shackle fn graphics_gdi_window_surface_destroy_impl(take surface: arcana_winapi.graphics_handles.GdiWindowSurface) -> Bool = helpers.graphics.gdi_window_surface_destroy:
+shackle fn graphics_gdi_window_surface_destroy_impl(take surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface) -> Bool = helpers.graphics.gdi_window_surface_destroy:
     crate::shackle::clear_helper_error(instance);
     match crate::shackle::package_state_data_mut(instance)?.software_surfaces.remove(&surface) {
         Some(_) => Ok(binding_bool(true)),
@@ -818,7 +818,7 @@ shackle fn graphics_gdi_window_surface_destroy_impl(take surface: arcana_winapi.
 shackle fn graphics_gdi_window_surface_take_last_error_impl() -> Str = helpers.graphics.gdi_window_surface_take_last_error:
     Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
 
-shackle fn graphics_gdi_window_surface_buffer_count_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface) -> Int = helpers.graphics.gdi_window_surface_buffer_count:
+shackle fn graphics_gdi_window_surface_buffer_count_impl(read surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface) -> Int = helpers.graphics.gdi_window_surface_buffer_count:
     crate::shackle::clear_helper_error(instance);
     match crate::shackle::software_surface_ref(instance, surface) {
         Ok(value) => match i64::try_from(value.buffers.len()) {
@@ -834,7 +834,7 @@ shackle fn graphics_gdi_window_surface_buffer_count_impl(read surface: arcana_wi
         }
     }
 
-shackle fn graphics_gdi_window_surface_pixel_len_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int) -> Int = helpers.graphics.gdi_window_surface_pixel_len:
+shackle fn graphics_gdi_window_surface_pixel_len_impl(read surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface, read slot: Int) -> Int = helpers.graphics.gdi_window_surface_pixel_len:
     crate::shackle::clear_helper_error(instance);
     match gdi_surface_pixels_len(instance, surface, slot) {
         Ok(value) => Ok(binding_int(value)),
@@ -844,7 +844,7 @@ shackle fn graphics_gdi_window_surface_pixel_len_impl(read surface: arcana_winap
         }
     }
 
-shackle fn graphics_gdi_window_surface_pixel_at_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int, read index: Int) -> Int = helpers.graphics.gdi_window_surface_pixel_at:
+shackle fn graphics_gdi_window_surface_pixel_at_impl(read surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface, read slot: Int, read index: Int) -> Int = helpers.graphics.gdi_window_surface_pixel_at:
     crate::shackle::clear_helper_error(instance);
     match gdi_surface_pixel_at(instance, surface, slot, index) {
         Ok(value) => Ok(binding_int(value)),
@@ -854,7 +854,7 @@ shackle fn graphics_gdi_window_surface_pixel_at_impl(read surface: arcana_winapi
         }
     }
 
-shackle fn graphics_gdi_window_surface_pixel_set_impl(edit surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int, read packed: Int) = helpers.graphics.gdi_window_surface_pixel_set:
+shackle fn graphics_gdi_window_surface_pixel_set_impl(edit surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface, read slot: Int, read packed: Int) = helpers.graphics.gdi_window_surface_pixel_set:
     crate::shackle::clear_helper_error(instance);
     let packed = packed as u64;
     let index = i64::try_from((packed >> 32) & 0xFFFF_FFFF)
@@ -864,7 +864,7 @@ shackle fn graphics_gdi_window_surface_pixel_set_impl(edit surface: arcana_winap
     gdi_surface_pixel_set(instance, surface, slot, index, value)?;
     Ok(binding_unit())
 
-shackle fn graphics_gdi_window_surface_present_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int) -> Bool = helpers.graphics.gdi_window_surface_present:
+shackle fn graphics_gdi_window_surface_present_impl(read surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface, read slot: Int) -> Bool = helpers.graphics.gdi_window_surface_present:
     crate::shackle::clear_helper_error(instance);
     let presented = (|| -> Result<(), String> {
         let surface_state = crate::shackle::software_surface_ref(instance, surface)?;
@@ -879,7 +879,7 @@ shackle fn graphics_gdi_window_surface_present_impl(read surface: arcana_winapi.
         }
     }
 
-shackle fn graphics_gdi_window_surface_present_bounded_impl(read surface: arcana_winapi.graphics_handles.GdiWindowSurface, read slot: Int, read rect: arcana_winapi.raw.types.RECT) -> Bool = helpers.graphics.gdi_window_surface_present_bounded:
+shackle fn graphics_gdi_window_surface_present_bounded_impl(read surface: arcana_winapi.backend.graphics_handles.GdiWindowSurface, read slot: Int, read rect: arcana_winapi.raw.types.RECT) -> Bool = helpers.graphics.gdi_window_surface_present_bounded:
     crate::shackle::clear_helper_error(instance);
     let presented = (|| -> Result<(), String> {
         let surface_state = crate::shackle::software_surface_ref(instance, surface)?;

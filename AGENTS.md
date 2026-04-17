@@ -9,13 +9,13 @@ Use this order when judging current Arcana behavior:
 3. `PLAN.md` and `docs/rewrite-roadmap.md`
 4. `crates/*`
 5. `llm.md`
-6. active first-party source packages: `std/`, `grimoires/arcana/*`, `grimoires/libs/*`
+6. active first-party source packages: `std/`, `grimoires/arcana/*`
 
 ## Current Repo Reality
 
 - `std/` is first-party rewrite surface.
 - `grimoires/arcana/*` is the core/tooling grimoire layer.
-- `grimoires/libs/*` is the app/media grimoire layer.
+- no active `grimoires/libs/*` layer is present in the current workspace.
 - `docs/reference/*`, `examples/`, and `conformance/` are supporting material, not primary architecture authority by themselves.
 
 ## Use `llm.md`

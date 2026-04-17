@@ -1,3 +1,2 @@
-export opaque type ModuleHandle as copy, boundary_unsafe
-export opaque type SystemFontCatalog as move, boundary_unsafe
-export opaque type HiddenWindow as move, boundary_unsafe
+// Structural types module required by package layout.
+// Public `arcana_winapi` surface is still raw-only via `book.arc`.

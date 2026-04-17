@@ -1,5 +1,3 @@
-use arcana_winapi.process_handles.FileStream
-
 // Internal backend declarations for the Win32 process/path/fs glue.
 // This module is intentionally not reexported from `arcana_winapi`.
 native fn take_last_error() -> Str = backend.process.take_last_error
@@ -26,12 +24,12 @@ native fn fs_read_text(path: Str) -> Str = backend.process.fs_read_text
 native fn fs_read_bytes(path: Str) -> Bytes = backend.process.fs_read_bytes
 native fn fs_write_text(path: Str, text: Str) -> Bool = backend.process.fs_write_text
 native fn fs_write_bytes(path: Str, read bytes: Bytes) -> Bool = backend.process.fs_write_bytes
-native fn fs_stream_open_read(path: Str) -> FileStream = backend.process.fs_stream_open_read
-native fn fs_stream_open_write(path: Str, append: Bool) -> FileStream = backend.process.fs_stream_open_write
-native fn fs_stream_read(edit stream: FileStream, max_bytes: Int) -> Bytes = backend.process.fs_stream_read
-native fn fs_stream_write(edit stream: FileStream, read bytes: Bytes) -> Int = backend.process.fs_stream_write
-native fn fs_stream_eof(read stream: FileStream) -> Bool = backend.process.fs_stream_eof
-native fn fs_stream_close(take stream: FileStream) -> Bool = backend.process.fs_stream_close
+native fn fs_stream_open_read(path: Str) -> U64 = backend.process.fs_stream_open_read
+native fn fs_stream_open_write(path: Str, append: Bool) -> U64 = backend.process.fs_stream_open_write
+native fn fs_stream_read(edit stream: U64, max_bytes: Int) -> Bytes = backend.process.fs_stream_read
+native fn fs_stream_write(edit stream: U64, read bytes: Bytes) -> Int = backend.process.fs_stream_write
+native fn fs_stream_eof(read stream: U64) -> Bool = backend.process.fs_stream_eof
+native fn fs_stream_close(take stream: U64) -> Bool = backend.process.fs_stream_close
 native fn fs_list_dir(path: Str) -> Bytes = backend.process.fs_list_dir
 native fn fs_mkdir_all(path: Str) -> Bool = backend.process.fs_mkdir_all
 native fn fs_create_dir(path: Str) -> Bool = backend.process.fs_create_dir

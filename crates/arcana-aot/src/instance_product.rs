@@ -3206,53 +3206,52 @@ mod tests {
 
     fn binding_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
-            package_id: "arcana_winapi".to_string(),
-            package_name: "arcana_winapi".to_string(),
+            package_id: "hostapi".to_string(),
+            package_name: "hostapi".to_string(),
             product_name: "default".to_string(),
             role: ArcanaCabiProductRole::Binding,
             contract_id: ARCANA_CABI_BINDING_CONTRACT_ID.to_string(),
-            output_file_name: "arcwinapi.dll".to_string(),
+            output_file_name: "hostapi.dll".to_string(),
             package_image_text: None,
             binding_imports: vec![NativeBindingImport {
-                name: "foundation.module_path".to_string(),
-                symbol_name: "arcana_binding_import_arcana_winapi_foundation_module_path"
-                    .to_string(),
+                name: "fs.stream_name".to_string(),
+                symbol_name: "arcana_binding_import_hostapi_fs_stream_name".to_string(),
                 return_type: ArcanaCabiBindingType::Str,
                 params: vec![ArcanaCabiBindingParam::binding(
-                    "module",
+                    "stream",
                     ArcanaCabiParamSourceMode::Read,
-                    ArcanaCabiBindingType::Named("arcana_winapi.types.ModuleHandle".to_string()),
+                    ArcanaCabiBindingType::Named("hostapi.fs.FileStream".to_string()),
                 )],
             }],
             binding_callbacks: vec![NativeBindingCallback {
-                name: "window_proc".to_string(),
+                name: "stream_callback".to_string(),
                 return_type: ArcanaCabiBindingType::Int,
                 params: vec![ArcanaCabiBindingParam::binding(
-                    "window",
+                    "stream",
                     ArcanaCabiParamSourceMode::Edit,
-                    ArcanaCabiBindingType::Named("arcana_winapi.types.HiddenWindow".to_string()),
+                    ArcanaCabiBindingType::Named("hostapi.fs.FileStream".to_string()),
                 )],
             }],
             binding_layouts: Vec::new(),
             binding_shackle_decls: vec![AotShackleDeclArtifact {
-                package_id: "arcana_winapi".to_string(),
-                module_id: "arcana_winapi.foundation".to_string(),
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi.fs".to_string(),
                 exported: false,
                 kind: "fn".to_string(),
-                name: "foundation_module_path_impl".to_string(),
+                name: "fs_stream_name_impl".to_string(),
                 params: vec![arcana_ir::IrRoutineParam {
                     binding_id: 0,
                     mode: Some("read".to_string()),
-                    name: "module".to_string(),
-                    ty: arcana_ir::parse_routine_type_text("arcana_winapi.types.ModuleHandle")
+                    name: "stream".to_string(),
+                    ty: arcana_ir::parse_routine_type_text("hostapi.fs.FileStream")
                         .expect("type should parse"),
                 }],
                 return_type: Some(
                     arcana_ir::parse_routine_type_text("Str").expect("type should parse"),
                 ),
                 callback_type: None,
-                binding: Some("foundation.module_path".to_string()),
-                body_entries: vec!["Ok(binding_owned_str(\"module\".to_string()))".to_string()],
+                binding: Some("fs.stream_name".to_string()),
+                body_entries: vec!["Ok(binding_owned_str(\"stream\".to_string()))".to_string()],
                 raw_layout: None,
                 import_target: None,
                 thunk_target: None,
@@ -3268,8 +3267,8 @@ mod tests {
         body_entries: &[&str],
     ) -> AotShackleDeclArtifact {
         AotShackleDeclArtifact {
-            package_id: "arcana_winapi".to_string(),
-            module_id: "arcana_winapi.helpers_impl".to_string(),
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.impl".to_string(),
             exported: false,
             kind: "fn".to_string(),
             name: name.to_string(),
@@ -3337,7 +3336,7 @@ mod tests {
         assert!(lib_rs.contains("RegisteredCallback"));
         assert!(lib_rs.contains("run_binding_import"));
         assert!(lib_rs.contains("binding_import_impl_0"));
-        assert!(lib_rs.contains("arcana_binding_import_arcana_winapi_foundation_module_path"));
+        assert!(lib_rs.contains("arcana_binding_import_hostapi_fs_stream_name"));
         assert!(lib_rs.contains("binding_callback_name_is_declared"));
         assert!(lib_rs.contains("struct BindingInputValue"));
         assert!(lib_rs.contains("fn binding_input_layout<T: Copy>(value: T) -> BindingInputValue"));
@@ -3360,16 +3359,16 @@ mod tests {
     fn generated_binding_instance_product_treats_layoutless_named_types_as_opaque_handles() {
         let mut spec = binding_spec();
         spec.binding_shackle_decls.push(AotShackleDeclArtifact {
-            package_id: "arcana_winapi".to_string(),
-            module_id: "arcana_winapi.foundation".to_string(),
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.fs".to_string(),
             exported: false,
             kind: "fn".to_string(),
-            name: "helper_uses_module_handle".to_string(),
+            name: "helper_uses_file_stream".to_string(),
             params: vec![arcana_ir::IrRoutineParam {
                 binding_id: 0,
                 mode: Some("read".to_string()),
-                name: "module".to_string(),
-                ty: arcana_ir::parse_routine_type_text("arcana_winapi.types.ModuleHandle")
+                name: "stream".to_string(),
+                ty: arcana_ir::parse_routine_type_text("hostapi.fs.FileStream")
                     .expect("type should parse"),
             }],
             return_type: Some(
@@ -3387,24 +3386,24 @@ mod tests {
 
         assert!(lib_rs.contains("fn binding_opaque(value: u64)"));
         assert!(lib_rs.contains("fn read_opaque_arg(value: &ArcanaCabiBindingValueV1"));
-        assert!(lib_rs.contains("let module = read_opaque_arg(&args[0], \"module\")?;"));
-        assert!(lib_rs.contains("fn helper_uses_module_handle(module: u64)"));
+        assert!(lib_rs.contains("let stream = read_opaque_arg(&args[0], \"stream\")?;"));
+        assert!(lib_rs.contains("fn helper_uses_file_stream(stream: u64)"));
     }
 
     #[test]
-    fn generated_binding_instance_product_treats_handle_modules_as_opaque_handles() {
+    fn generated_binding_instance_product_treats_process_owned_handles_as_opaque_handles() {
         let mut spec = binding_spec();
         spec.binding_shackle_decls.push(AotShackleDeclArtifact {
-            package_id: "arcana_winapi".to_string(),
-            module_id: "arcana_winapi.foundation".to_string(),
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.fs".to_string(),
             exported: false,
             kind: "fn".to_string(),
-            name: "helper_uses_window_handle".to_string(),
+            name: "helper_uses_stream_handle".to_string(),
             params: vec![arcana_ir::IrRoutineParam {
                 binding_id: 0,
                 mode: Some("read".to_string()),
-                name: "window".to_string(),
-                ty: arcana_ir::parse_routine_type_text("arcana_winapi.desktop_handles.Window")
+                name: "stream".to_string(),
+                ty: arcana_ir::parse_routine_type_text("hostapi.fs.FileStream")
                     .expect("type should parse"),
             }],
             return_type: Some(
@@ -3420,42 +3419,41 @@ mod tests {
         });
         let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
 
-        assert!(lib_rs.contains("fn helper_uses_window_handle(window: u64)"));
-        assert!(!lib_rs.contains("crate::desktop_handles::Window"));
+        assert!(lib_rs.contains("fn helper_uses_stream_handle(stream: u64)"));
+        assert!(!lib_rs.contains("crate::fs::FileStream"));
     }
 
     #[test]
     fn generated_binding_instance_product_defaults_handle_edit_write_backs() {
         let mut spec = binding_spec();
         spec.binding_imports = vec![NativeBindingImport {
-            name: "helpers.window.window_request_redraw".to_string(),
-            symbol_name: "arcana_binding_import_arcana_winapi_helpers_window_window_request_redraw"
-                .to_string(),
+            name: "fs.stream_touch".to_string(),
+            symbol_name: "arcana_binding_import_hostapi_fs_stream_touch".to_string(),
             return_type: ArcanaCabiBindingType::Unit,
             params: vec![ArcanaCabiBindingParam::binding(
-                "window",
+                "stream",
                 ArcanaCabiParamSourceMode::Edit,
-                ArcanaCabiBindingType::Named("arcana_winapi.desktop_handles.Window".to_string()),
+                ArcanaCabiBindingType::Named("hostapi.fs.FileStream".to_string()),
             )],
         }];
         spec.binding_shackle_decls = vec![AotShackleDeclArtifact {
-            package_id: "arcana_winapi".to_string(),
-            module_id: "arcana_winapi.helpers.window".to_string(),
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.fs".to_string(),
             exported: false,
             kind: "fn".to_string(),
-            name: "window_request_redraw_impl".to_string(),
+            name: "stream_touch_impl".to_string(),
             params: vec![arcana_ir::IrRoutineParam {
                 binding_id: 0,
                 mode: Some("edit".to_string()),
-                name: "window".to_string(),
-                ty: arcana_ir::parse_routine_type_text("arcana_winapi.desktop_handles.Window")
+                name: "stream".to_string(),
+                ty: arcana_ir::parse_routine_type_text("hostapi.fs.FileStream")
                     .expect("type should parse"),
             }],
             return_type: Some(
                 arcana_ir::parse_routine_type_text("Unit").expect("type should parse"),
             ),
             callback_type: None,
-            binding: Some("helpers.window.window_request_redraw".to_string()),
+            binding: Some("fs.stream_touch".to_string()),
             body_entries: vec!["Ok(binding_unit())".to_string()],
             raw_layout: None,
             import_target: None,
@@ -3465,9 +3463,9 @@ mod tests {
 
         let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
 
-        assert!(lib_rs.contains("let window = read_opaque_arg(&args[0], \"window\")?;"));
-        assert!(lib_rs.contains("let window_write_back = &mut out_write_backs[0];"));
-        assert!(lib_rs.contains("*window_write_back = binding_opaque(window as u64);"));
+        assert!(lib_rs.contains("let stream = read_opaque_arg(&args[0], \"stream\")?;"));
+        assert!(lib_rs.contains("let stream_write_back = &mut out_write_backs[0];"));
+        assert!(lib_rs.contains("*stream_write_back = binding_opaque(stream as u64);"));
     }
 
     #[test]
@@ -3524,15 +3522,15 @@ mod tests {
     fn generated_binding_instance_product_rewrites_package_qualified_shackle_type_aliases() {
         let mut spec = binding_spec();
         spec.binding_shackle_decls.push(AotShackleDeclArtifact {
-            package_id: "arcana_winapi".to_string(),
-            module_id: "arcana_winapi.raw.types".to_string(),
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.raw.types".to_string(),
             exported: true,
             kind: "type".to_string(),
             name: "PHMODULE".to_string(),
             params: Vec::new(),
             return_type: None,
             callback_type: None,
-            binding: Some("*mut arcana_winapi.raw.types.HMODULE".to_string()),
+            binding: Some("*mut hostapi.raw.types.HMODULE".to_string()),
             body_entries: Vec::new(),
             raw_layout: None,
             import_target: None,
@@ -3551,8 +3549,8 @@ mod tests {
         let mut decls = spec.binding_shackle_decls.clone();
         decls.extend([
             AotShackleDeclArtifact {
-                package_id: "arcana_winapi".to_string(),
-                module_id: "arcana_winapi.raw.types".to_string(),
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi.raw.types".to_string(),
                 exported: true,
                 kind: "type".to_string(),
                 name: "DWRITE_FACTORY_TYPE".to_string(),
@@ -3562,7 +3560,7 @@ mod tests {
                 binding: Some("U32".to_string()),
                 body_entries: vec!["Shared = 0".to_string(), "Isolated = 1".to_string()],
                 raw_layout: Some(ArcanaCabiBindingLayout {
-                    layout_id: "arcana_winapi.raw.types.DWRITE_FACTORY_TYPE".to_string(),
+                    layout_id: "hostapi.raw.types.DWRITE_FACTORY_TYPE".to_string(),
                     size: 4,
                     align: 4,
                     kind: ArcanaCabiBindingLayoutKind::Enum {
@@ -3584,20 +3582,18 @@ mod tests {
                 surface_text: String::new(),
             },
             AotShackleDeclArtifact {
-                package_id: "arcana_winapi".to_string(),
-                module_id: "arcana_winapi.raw.constants".to_string(),
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi.raw.constants".to_string(),
                 exported: true,
                 kind: "const".to_string(),
                 name: "DWRITE_FACTORY_TYPE_SHARED".to_string(),
                 params: Vec::new(),
                 return_type: Some(
-                    arcana_ir::parse_routine_type_text(
-                        "arcana_winapi.raw.types.DWRITE_FACTORY_TYPE",
-                    )
-                    .expect("type should parse"),
+                    arcana_ir::parse_routine_type_text("hostapi.raw.types.DWRITE_FACTORY_TYPE")
+                        .expect("type should parse"),
                 ),
                 callback_type: None,
-                binding: Some("arcana_winapi.raw.types.DWRITE_FACTORY_TYPE.Shared".to_string()),
+                binding: Some("hostapi.raw.types.DWRITE_FACTORY_TYPE.Shared".to_string()),
                 body_entries: Vec::new(),
                 raw_layout: None,
                 import_target: None,
@@ -3624,7 +3620,7 @@ mod tests {
     fn generated_binding_instance_product_emits_typed_raw_layout_tables() {
         let mut spec = binding_spec();
         spec.binding_layouts = vec![ArcanaCabiBindingLayout {
-            layout_id: "arcana_winapi.raw.Rect".to_string(),
+            layout_id: "hostapi.raw.Rect".to_string(),
             size: 12,
             align: 4,
             kind: ArcanaCabiBindingLayoutKind::Struct {
@@ -3656,7 +3652,7 @@ mod tests {
             )
         );
         assert!(lib_rs.contains("static BINDING_LAYOUT_0_DETAIL_JSON"));
-        assert!(lib_rs.contains("arcana_winapi.raw.Rect"));
+        assert!(lib_rs.contains("hostapi.raw.Rect"));
         assert!(
             lib_rs.contains("detail_json: BINDING_LAYOUT_0_DETAIL_JSON.as_ptr() as *const c_char")
         );
@@ -3670,22 +3666,22 @@ mod tests {
         spec.binding_imports = vec![
             NativeBindingImport {
                 name: "raw.kernel32.GetCurrentProcessId".to_string(),
-                symbol_name: "arcana_binding_import_arcana_winapi_raw_kernel32_getcurrentprocessid"
+                symbol_name: "arcana_binding_import_hostapi_raw_kernel32_getcurrentprocessid"
                     .to_string(),
                 return_type: ArcanaCabiBindingType::Int,
                 params: Vec::new(),
             },
             NativeBindingImport {
                 name: "raw.constants.MAGIC".to_string(),
-                symbol_name: "arcana_binding_import_arcana_winapi_raw_constants_magic".to_string(),
+                symbol_name: "arcana_binding_import_hostapi_raw_constants_magic".to_string(),
                 return_type: ArcanaCabiBindingType::Int,
                 params: Vec::new(),
             },
         ];
         spec.binding_shackle_decls = vec![
             AotShackleDeclArtifact {
-                package_id: "arcana_winapi".to_string(),
-                module_id: "arcana_winapi.raw.kernel32".to_string(),
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi.raw.kernel32".to_string(),
                 exported: true,
                 kind: "import_fn".to_string(),
                 name: "GetCurrentProcessId".to_string(),
@@ -3694,7 +3690,7 @@ mod tests {
                     arcana_ir::parse_routine_type_text("Int").expect("type should parse"),
                 ),
                 callback_type: None,
-                binding: Some("kernel32.GetCurrentProcessId".to_string()),
+                binding: Some("raw.kernel32.GetCurrentProcessId".to_string()),
                 body_entries: Vec::new(),
                 raw_layout: None,
                 import_target: Some(crate::artifact::AotShackleImportTargetArtifact {
@@ -3706,8 +3702,8 @@ mod tests {
                 surface_text: String::new(),
             },
             AotShackleDeclArtifact {
-                package_id: "arcana_winapi".to_string(),
-                module_id: "arcana_winapi.raw.constants".to_string(),
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi.raw.constants".to_string(),
                 exported: true,
                 kind: "const".to_string(),
                 name: "MAGIC".to_string(),

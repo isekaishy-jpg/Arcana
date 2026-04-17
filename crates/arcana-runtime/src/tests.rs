@@ -1199,7 +1199,7 @@ fn runtime_dynamic_bare_method_fallback_matches_binding_handle_receiver() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::from([(
             "file_stream_handle".to_string(),
-            vec!["arcana_winapi.process_handles.FileStream".to_string()],
+            vec!["arcana_process.fs.FileStream".to_string()],
         )]),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
@@ -1220,11 +1220,10 @@ fn runtime_dynamic_bare_method_fallback_matches_binding_handle_receiver() {
                 binding_id: 0,
                 mode: Some("read".to_string()),
                 name: "self".to_string(),
-                ty: parse_routine_type_text("arcana_winapi.process_handles.FileStream")
-                    .expect("type"),
+                ty: parse_routine_type_text("arcana_process.fs.FileStream").expect("type"),
             }],
             return_type: test_return_type(
-                "fn path(read self: arcana_winapi.process_handles.FileStream) -> Str:",
+                "fn path(read self: arcana_process.fs.FileStream) -> Str:",
             ),
             intrinsic_impl: None,
             native_impl: None,
@@ -1245,8 +1244,8 @@ fn runtime_dynamic_bare_method_fallback_matches_binding_handle_receiver() {
         &[RuntimeCallArg {
             name: None,
             value: RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
-                package_id: "arcana_winapi",
-                type_name: "arcana_winapi.process_handles.FileStream",
+                package_id: "arcana_process",
+                type_name: "arcana_process.fs.FileStream",
                 handle: 1,
             })),
             source_expr: ParsedExpr::Path(vec!["stream".to_string()]),
@@ -2226,7 +2225,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::from([(
             "file_stream_handle".to_string(),
-            vec!["arcana_winapi.process_handles.FileStream".to_string()],
+            vec!["arcana_process.fs.FileStream".to_string()],
         )]),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
@@ -2275,11 +2274,10 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                     binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "stream".to_string(),
-                    ty: parse_routine_type_text("arcana_winapi.process_handles.FileStream")
-                        .expect("type"),
+                    ty: parse_routine_type_text("arcana_process.fs.FileStream").expect("type"),
                 }],
                 return_type: test_return_type(
-                    "fn stream_path(read stream: arcana_winapi.process_handles.FileStream) -> Int:",
+                    "fn stream_path(read stream: arcana_process.fs.FileStream) -> Int:",
                 ),
                 intrinsic_impl: None,
                 native_impl: None,
@@ -2303,11 +2301,10 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                     binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "stream".to_string(),
-                    ty: parse_routine_type_text("arcana_winapi.process_handles.FileStream")
-                        .expect("type"),
+                    ty: parse_routine_type_text("arcana_process.fs.FileStream").expect("type"),
                 }],
                 return_type: test_return_type(
-                    "fn stream_name(read stream: arcana_winapi.process_handles.FileStream) -> Int:",
+                    "fn stream_name(read stream: arcana_process.fs.FileStream) -> Int:",
                 ),
                 intrinsic_impl: None,
                 native_impl: None,
@@ -2400,11 +2397,10 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
                 binding_id: 0,
                 mode: Some("read".to_string()),
                 name: "stream".to_string(),
-                ty: parse_routine_type_text("arcana_winapi.process_handles.FileStream")
-                    .expect("type"),
+                ty: parse_routine_type_text("arcana_process.fs.FileStream").expect("type"),
             }],
             return_type: test_return_type(
-                "fn stream_path(read stream: arcana_winapi.process_handles.FileStream) -> Int:",
+                "fn stream_path(read stream: arcana_process.fs.FileStream) -> Int:",
             ),
             intrinsic_impl: None,
             native_impl: None,
@@ -8596,9 +8592,8 @@ fn execute_main_runs_linked_std_fs_stream_routines() {
         concat!(
             "import std.text\n",
             "import arcana_process.fs\n",
-            "import arcana_winapi.process_handles\n",
             "use std.result.Result\n",
-            "use arcana_winapi.process_handles.FileStream\n",
+            "use arcana_process.fs.FileStream\n",
             "fn write_and_close(take stream: FileStream, read bytes: Bytes) -> Int:\n",
             "    let mut stream = stream\n",
             "    let wrote = match (arcana_process.fs.stream_write :: stream, bytes :: call):\n",

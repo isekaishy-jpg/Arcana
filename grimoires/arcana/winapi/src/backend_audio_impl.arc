@@ -177,7 +177,7 @@ shackle flags WinapiAudioInternals:
 shackle fn audio_take_last_error_impl() -> Str = helpers.audio.take_last_error:
     Ok(binding_owned_str(crate::shackle::take_helper_error(instance)))
 
-shackle fn audio_default_output_impl() -> arcana_winapi.audio_handles.AudioDevice = helpers.audio.default_output:
+shackle fn audio_default_output_impl() -> arcana_winapi.backend.audio_handles.AudioDevice = helpers.audio.default_output:
     crate::shackle::clear_helper_error(instance);
     let state = crate::shackle::package_state_data_mut(instance)?;
     let handle = state.next_audio_device_handle;
@@ -192,7 +192,7 @@ shackle fn audio_default_output_impl() -> arcana_winapi.audio_handles.AudioDevic
     );
     Ok(binding_opaque(handle))
 
-shackle fn audio_output_close_impl(take device: arcana_winapi.audio_handles.AudioDevice) -> Bool = helpers.audio.output_close:
+shackle fn audio_output_close_impl(take device: arcana_winapi.backend.audio_handles.AudioDevice) -> Bool = helpers.audio.output_close:
     crate::shackle::clear_helper_error(instance);
     let state = crate::shackle::package_state_data_mut(instance)?;
     if !state.audio_devices.contains_key(&device) {
@@ -203,13 +203,13 @@ shackle fn audio_output_close_impl(take device: arcana_winapi.audio_handles.Audi
     state.audio_devices.remove(&device);
     Ok(binding_bool(true))
 
-shackle fn audio_output_sample_rate_hz_impl(read device: arcana_winapi.audio_handles.AudioDevice) -> Int = helpers.audio.output_sample_rate_hz:
+shackle fn audio_output_sample_rate_hz_impl(read device: arcana_winapi.backend.audio_handles.AudioDevice) -> Int = helpers.audio.output_sample_rate_hz:
     Ok(binding_int(audio_device_ref(instance, device)?.sample_rate_hz))
 
-shackle fn audio_output_channels_impl(read device: arcana_winapi.audio_handles.AudioDevice) -> Int = helpers.audio.output_channels:
+shackle fn audio_output_channels_impl(read device: arcana_winapi.backend.audio_handles.AudioDevice) -> Int = helpers.audio.output_channels:
     Ok(binding_int(audio_device_ref(instance, device)?.channels))
 
-shackle fn audio_buffer_load_wav_impl(read path: Str) -> arcana_winapi.audio_handles.AudioBuffer = helpers.audio.buffer_load_wav:
+shackle fn audio_buffer_load_wav_impl(read path: Str) -> arcana_winapi.backend.audio_handles.AudioBuffer = helpers.audio.buffer_load_wav:
     crate::shackle::clear_helper_error(instance);
     let buffer = match parse_wav_info(&path) {
         Ok(buffer) => buffer,
@@ -224,16 +224,16 @@ shackle fn audio_buffer_load_wav_impl(read path: Str) -> arcana_winapi.audio_han
     state.audio_buffers.insert(handle, buffer);
     Ok(binding_opaque(handle))
 
-shackle fn audio_buffer_frames_impl(read buffer: arcana_winapi.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_frames:
+shackle fn audio_buffer_frames_impl(read buffer: arcana_winapi.backend.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_frames:
     Ok(binding_int(audio_buffer_ref(instance, buffer)?.frames))
 
-shackle fn audio_buffer_channels_impl(read buffer: arcana_winapi.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_channels:
+shackle fn audio_buffer_channels_impl(read buffer: arcana_winapi.backend.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_channels:
     Ok(binding_int(audio_buffer_ref(instance, buffer)?.channels))
 
-shackle fn audio_buffer_sample_rate_hz_impl(read buffer: arcana_winapi.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_sample_rate_hz:
+shackle fn audio_buffer_sample_rate_hz_impl(read buffer: arcana_winapi.backend.audio_handles.AudioBuffer) -> Int = helpers.audio.buffer_sample_rate_hz:
     Ok(binding_int(audio_buffer_ref(instance, buffer)?.sample_rate_hz))
 
-shackle fn audio_play_buffer_impl(edit device: arcana_winapi.audio_handles.AudioDevice, read buffer: arcana_winapi.audio_handles.AudioBuffer) -> arcana_winapi.audio_handles.AudioPlayback = helpers.audio.play_buffer:
+shackle fn audio_play_buffer_impl(edit device: arcana_winapi.backend.audio_handles.AudioDevice, read buffer: arcana_winapi.backend.audio_handles.AudioBuffer) -> arcana_winapi.backend.audio_handles.AudioPlayback = helpers.audio.play_buffer:
     crate::shackle::clear_helper_error(instance);
     let device_state = match audio_device_ref(instance, device) {
         Ok(value) => value.clone(),
@@ -275,11 +275,11 @@ shackle fn audio_play_buffer_impl(edit device: arcana_winapi.audio_handles.Audio
     );
     Ok(binding_opaque(handle))
 
-shackle fn audio_output_set_gain_milli_impl(edit device: arcana_winapi.audio_handles.AudioDevice, read milli: Int) = helpers.audio.output_set_gain_milli:
+shackle fn audio_output_set_gain_milli_impl(edit device: arcana_winapi.backend.audio_handles.AudioDevice, read milli: Int) = helpers.audio.output_set_gain_milli:
     audio_device_mut(instance, device)?.gain_milli = milli;
     Ok(binding_unit())
 
-shackle fn audio_playback_stop_impl(take playback: arcana_winapi.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_stop:
+shackle fn audio_playback_stop_impl(take playback: arcana_winapi.backend.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_stop:
     crate::shackle::clear_helper_error(instance);
     let state = crate::shackle::package_state_data_mut(instance)?;
     if state.audio_playbacks.remove(&playback).is_none() {
@@ -288,35 +288,35 @@ shackle fn audio_playback_stop_impl(take playback: arcana_winapi.audio_handles.A
     }
     Ok(binding_bool(true))
 
-shackle fn audio_playback_pause_impl(edit playback: arcana_winapi.audio_handles.AudioPlayback) = helpers.audio.playback_pause:
+shackle fn audio_playback_pause_impl(edit playback: arcana_winapi.backend.audio_handles.AudioPlayback) = helpers.audio.playback_pause:
     audio_playback_mut(instance, playback)?.paused = true;
     Ok(binding_unit())
 
-shackle fn audio_playback_resume_impl(edit playback: arcana_winapi.audio_handles.AudioPlayback) = helpers.audio.playback_resume:
+shackle fn audio_playback_resume_impl(edit playback: arcana_winapi.backend.audio_handles.AudioPlayback) = helpers.audio.playback_resume:
     audio_playback_mut(instance, playback)?.paused = false;
     Ok(binding_unit())
 
-shackle fn audio_playback_playing_impl(read playback: arcana_winapi.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_playing:
+shackle fn audio_playback_playing_impl(read playback: arcana_winapi.backend.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_playing:
     let playback = audio_playback_ref(instance, playback)?;
     Ok(binding_bool(!playback.paused && !playback.finished))
 
-shackle fn audio_playback_paused_impl(read playback: arcana_winapi.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_paused:
+shackle fn audio_playback_paused_impl(read playback: arcana_winapi.backend.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_paused:
     Ok(binding_bool(audio_playback_ref(instance, playback)?.paused))
 
-shackle fn audio_playback_finished_impl(read playback: arcana_winapi.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_finished:
+shackle fn audio_playback_finished_impl(read playback: arcana_winapi.backend.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_finished:
     Ok(binding_bool(audio_playback_ref(instance, playback)?.finished))
 
-shackle fn audio_playback_set_gain_milli_impl(edit playback: arcana_winapi.audio_handles.AudioPlayback, read milli: Int) = helpers.audio.playback_set_gain_milli:
+shackle fn audio_playback_set_gain_milli_impl(edit playback: arcana_winapi.backend.audio_handles.AudioPlayback, read milli: Int) = helpers.audio.playback_set_gain_milli:
     audio_playback_mut(instance, playback)?.gain_milli = milli;
     Ok(binding_unit())
 
-shackle fn audio_playback_set_looping_impl(edit playback: arcana_winapi.audio_handles.AudioPlayback, read looping: Bool) = helpers.audio.playback_set_looping:
+shackle fn audio_playback_set_looping_impl(edit playback: arcana_winapi.backend.audio_handles.AudioPlayback, read looping: Bool) = helpers.audio.playback_set_looping:
     audio_playback_mut(instance, playback)?.looping = looping;
     Ok(binding_unit())
 
-shackle fn audio_playback_looping_impl(read playback: arcana_winapi.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_looping:
+shackle fn audio_playback_looping_impl(read playback: arcana_winapi.backend.audio_handles.AudioPlayback) -> Bool = helpers.audio.playback_looping:
     Ok(binding_bool(audio_playback_ref(instance, playback)?.looping))
 
-shackle fn audio_playback_position_frames_impl(read playback: arcana_winapi.audio_handles.AudioPlayback) -> Int = helpers.audio.playback_position_frames:
+shackle fn audio_playback_position_frames_impl(read playback: arcana_winapi.backend.audio_handles.AudioPlayback) -> Int = helpers.audio.playback_position_frames:
     Ok(binding_int(audio_playback_ref(instance, playback)?.position_frames))
 
