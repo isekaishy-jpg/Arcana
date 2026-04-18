@@ -4297,9 +4297,10 @@ mod tests {
 
         let parity_report = fs::read_to_string(generation_root.join("parity-report.md"))
             .expect("winapi generation should keep a checked-in parity report");
+        let normalized_parity_report = parity_report.replace("\r\n", "\n");
         for leaf in &expected {
             assert!(
-                parity_report.contains(&format!("## {leaf}\n")),
+                normalized_parity_report.contains(&format!("## {leaf}\n")),
                 "winapi parity report should mention generated raw leaf `{leaf}`"
             );
         }
