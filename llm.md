@@ -300,26 +300,32 @@ forward :=> stage.seed with (seed) => stage.inc <= stage.dec <= stage.emit
 
 ### What it is
 
-Tuples are pair-only in current v1 and use `HirTypeKind::Tuple`. Tuple destructuring support is exact-shape only.
+Tuples are 2- and 3-element only in current v1 and use `HirTypeKind::Tuple`. Tuple destructuring support is exact-shape only.
 
 ### Current surface shape
 
-- Tuple type syntax: `(A, B)`
-- Tuple literal syntax: `(a, b)`
-- Tuple field access: `.0` and `.1`
-- Exact recursive pair destructuring is supported in:
+- Tuple type syntax:
+  - `(A, B)`
+  - `(A, B, C)`
+- Tuple literal syntax:
+  - `(a, b)`
+  - `(a, b, c)`
+- Tuple field access: `.0`, `.1`, and `.2`
+- Exact recursive tuple destructuring is supported in:
   - `let (left, right) = pair`
+  - `let (first, second, third) = triple`
   - `for (left, right) in values:`
-- Nested pairs are valid.
+  - `for (first, second, third) in values:`
+- Nested tuples are valid.
 
 ### Hard limits / rejections
 
-- Tuple types must have exactly 2 elements.
-- Tuple field selectors beyond `.1` are rejected.
+- Tuple types must have exactly 2 or 3 elements.
+- Tuple field selectors beyond `.2` are rejected.
 - Tuple destructuring is not supported in parameter lists.
 - Tuple `match` patterns are not supported.
 - Tuple field assignment is not supported.
-- 3+ tuples are out of scope.
+- 4+ tuples are out of scope.
 
 ### Rust lookup
 
@@ -366,7 +372,11 @@ Arcana now has a broader first-class value surface than the older `record + Int/
   - `struct`
   - `union`
   - `array Name[Elem, Len]:`
-- `struct` and `array` are callable construction targets.
+- `record` keeps constructor sugar only:
+  - `RecordType :: named_fields :: call`
+- record/struct constructor sugar may omit `Option[T]` fields, and `Type :: :: call` is valid when no required fields remain.
+- `struct` is constructor-callable and may also be value-callable through explicit callable contracts.
+- `array` is constructor-callable.
 - `union` is a real declaration kind, but it is not callable.
 - Region heads now include:
   - `record yield` / `record deliver` / `record place`
@@ -376,6 +386,24 @@ Arcana now has a broader first-class value surface than the older `record + Int/
   - `construct yield` / `construct deliver` / `construct place`
 - `record` remains distinct from `struct`; do not treat them as aliases in analysis or rewrites.
 - `array` is nominal fixed-length value storage, not the same thing as builtin `Array[T]`.
+- Callable struct contracts are:
+  - `CallableRead0[Out]`
+  - `CallableEdit0[Out]`
+  - `CallableTake0[Out]`
+  - `CallableRead[Args, Out]`
+  - `CallableEdit[Args, Out]`
+  - `CallableTake[Args, Out]`
+- Matching lang items are:
+  - `call_contract_read0`
+  - `call_contract_edit0`
+  - `call_contract_take0`
+  - `call_contract_read`
+  - `call_contract_edit`
+  - `call_contract_take`
+- Packed callable struct args follow:
+  - `f :: a :: call` => `Args = A`
+  - `f :: a, b :: call` => `Args = (A, B)`
+  - `f :: a, b, c :: call` => `Args = (A, B, C)`
 - Numeric builtin surface now includes:
   - `Int`, `Bool`
   - `I8/U8`
@@ -394,8 +422,12 @@ Arcana now has a broader first-class value surface than the older `record + Int/
 
 - `union` construction, reads, and writes require an active `#unsafe["trace.id"]` foreword in scope.
 - `union` is not callable in the current surface.
-- `struct` and `array` are callable; `record` construction still follows the existing record/construct region surface.
+- `record` values are not callable; record `:: call` remains constructor sugar only.
+- `struct` value dispatch is `:: call` only and is struct-only in this phase.
+- `array` is constructor-callable only, not value-callable.
 - `array yield` is expression-form only in expression position, just like `construct yield` and `record/struct/union yield`.
+- callable struct receivers are `read`, `edit`, or `take`; `hold self` callable contracts are rejected in this phase.
+- packed callable args are always `take args`.
 - Bitfields are currently allowed only on `struct`.
 - Bitfield bases must be fixed-width integer types.
 - Floats do not support `%`, shifts, or bitwise operators.
@@ -1112,4 +1144,4 @@ fn main() -> Int:
 ## Known Problems
 
 - `split` still rejects unsafe cross-thread `edit` capture. In `crates/arcana-runtime/src/lib.rs`, `validate_spawned_call_capabilities` keeps thread-boundary `edit` capture conservative until a broader transferable-place law exists.
-- Tuple surface is still intentionally narrow beyond the new `let`/`for` destructuring support. Pair-only tuples, `.0`/`.1` access, and the lack of parameter destructuring, tuple `match` patterns, tuple field assignment, and 3+ tuples are still current v1 boundaries.
+- Tuple surface is still intentionally narrow beyond the new `let`/`for` destructuring support. 2/3-tuples, `.0`/`.1`/`.2` access, and the lack of parameter destructuring, tuple `match` patterns, tuple field assignment, and 4+ tuples are still current v1 boundaries.

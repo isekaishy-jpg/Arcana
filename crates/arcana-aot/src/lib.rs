@@ -1491,6 +1491,7 @@ mod tests {
                             "is_ok".to_string(),
                         ]),
                         resolved_routine: Some("std.result#impl-0-method-0".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },

@@ -1,2 +1,3 @@
 fn main() -> Int:
-    return pair.2
+    let pair = (1, 2)
+    return pair.3

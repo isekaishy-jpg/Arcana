@@ -8,7 +8,7 @@ Implementation note:
 - Parser/frontend/HIR/IR/runtime support is now landed for the current rewrite.
 - `conformance/selfhost_language_matrix.toml` now includes `headed_regions_v1`.
 - The implementation keeps headed regions first-class through executable IR/runtime instead of desugaring them away.
-- Native/AOT support is backend-stable in v1: `Memory`, bool-only `recycle`, and `bind require` participate in the current direct subset, while general `construct`, general `record`, payload-bearing headed-region lines, and named owner exits fall back to runtime dispatch inside native bundles.
+- Native/AOT support is backend-stable in v1: `Memory`, bool-only `recycle`, and `bind require` participate in the current direct subset, while general `construct`, `record`, `struct`, `union`, `array`, payload-bearing headed-region lines, and named owner exits fall back to runtime dispatch inside native bundles.
 
 ## Core Contract
 
@@ -19,6 +19,9 @@ Implementation note:
   - `recycle`
   - `construct`
   - `record`
+  - `struct`
+  - `union`
+  - `array`
   - `bind`
   - `Memory`
 - User-defined heads are not part of v1.
@@ -57,7 +60,7 @@ Placement rules:
 
 - Headed regions are inner indented blocks only.
 - `Memory` is also legal at module scope as a memory-spec declaration.
-- `construct yield` and `record yield` are the expression-form headed regions in v1.
+- `construct yield`, `record yield`, `struct yield`, `union yield`, and `array yield` are the expression-form headed regions in v1.
 - They are not top-level attachments.
 - This scope does not define any generic `-name` footer family.
 - Cleanup footers remain governed by `docs/specs/page-rollups/page-rollups/v1-scope.md`.
@@ -107,7 +110,7 @@ construct <completion_clause> -<default_modifier>
 - Default/per-line modifier class:
   - failed contribution or sanctioned acquisition behavior
 - Participating lines are named contributions:
-  - `field = expr` for records
+  - `field = expr` for structs
   - `payload = expr` for single-payload enum variants
 
 ### `record`
@@ -150,6 +153,96 @@ record <completion_clause> from <base_expr> -<default_modifier>
 - Target restriction:
   - `record` targets must resolve to records only
   - enum payload construction remains under `construct`
+
+### `struct`
+
+- `struct` is a struct-specific structural region.
+- Ride:
+  - each participating top-level line contributes explicit field values to a struct result, optionally refining from a base value of the exact same nominal struct type
+- Shape:
+
+```arcana
+struct <completion_clause> -<default_modifier>
+    <struct_field_line>
+    <struct_field_line> -<override_modifier>
+```
+
+Compatible base form:
+
+```arcana
+struct <completion_clause> from <base_expr> -<default_modifier>
+    <struct_field_line>
+    <struct_field_line> -<override_modifier>
+```
+
+- Success:
+  - the struct ride is satisfied
+  - the struct result is completed by the declared completion clause
+- Current completion-clause family includes:
+  - `yield <struct_path>`
+  - `deliver <struct_path> -> <name>`
+  - `place <struct_path> -> <target>`
+- Participating lines are struct field contributions only:
+  - `field = expr`
+- Base-copy contract in v1:
+  - explicit field lines override base-provided values
+  - omitted fields copy only from a `from <base_expr>` value of the exact same nominal struct type
+  - no cross-type field lifting, recursive merge, or implicit conversions
+- Target restriction:
+  - `struct` targets must resolve to structs only
+
+### `union`
+
+- `union` is a union-specific structural region.
+- Ride:
+  - each participating top-level line contributes the explicit active field value for a union result
+- Shape:
+
+```arcana
+union <completion_clause> -<default_modifier>
+    <union_field_line>
+    <union_field_line> -<override_modifier>
+```
+
+- Success:
+  - the union ride is satisfied
+  - the union result is completed by the declared completion clause
+- Current completion-clause family includes:
+  - `yield <union_path>`
+  - `deliver <union_path> -> <name>`
+  - `place <union_path> -> <target>`
+- Participating lines are union field contributions only:
+  - `field = expr`
+- Base-copy contract in v1:
+  - `union ... from <base_expr>` is not part of the approved contract
+- Target restriction:
+  - `union` targets must resolve to unions only
+  - active `union` use remains gated by the existing unsafe contract
+
+### `array`
+
+- `array` is an array-specific structural region.
+- Ride:
+  - each participating top-level line contributes explicit indexed element values to a nominal fixed-length array result, optionally refining from a same-array base
+- Shape:
+
+```arcana
+array <completion_clause> -<default_modifier>
+    [<index>] = <expr>
+    [<index>] = <expr> -<override_modifier>
+```
+
+- Success:
+  - the array ride is satisfied
+  - the array result is completed by the declared completion clause
+- Current completion-clause family includes:
+  - `yield <array_path>`
+  - `deliver <array_path> -> <name>`
+  - `place <array_path> -> <target>`
+- Participating lines are array element contributions only:
+  - `[index] = expr`
+- Target restriction:
+  - `array` targets must resolve to nominal fixed-length arrays only
 
 ### `bind`
 

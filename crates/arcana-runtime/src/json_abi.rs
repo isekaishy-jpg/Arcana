@@ -340,10 +340,10 @@ fn runtime_value_from_abi(value: super::RuntimeAbiValue) -> RuntimeValue {
                 .map(|byte| RuntimeValue::Int(i64::from(byte)))
                 .collect(),
         ),
-        super::RuntimeAbiValue::Pair(left, right) => RuntimeValue::Pair(
-            Box::new(runtime_value_from_abi(*left)),
-            Box::new(runtime_value_from_abi(*right)),
-        ),
+        super::RuntimeAbiValue::Pair(left, right) => RuntimeValue::Tuple(vec![
+            runtime_value_from_abi(*left),
+            runtime_value_from_abi(*right),
+        ]),
         super::RuntimeAbiValue::Unit => RuntimeValue::Unit,
     }
 }
@@ -455,6 +455,20 @@ fn json_value_to_runtime_value(value: &serde_json::Value) -> Result<RuntimeValue
                     Box::new(json_value_to_runtime_value(&values[1])?),
                 ));
             }
+            if let Some(values) = entries.get("$tuple") {
+                let values = values
+                    .as_array()
+                    .ok_or_else(|| "`$tuple` must contain a JSON array".to_string())?;
+                if !(2..=3).contains(&values.len()) {
+                    return Err("`$tuple` must contain exactly two or three elements".to_string());
+                }
+                return Ok(RuntimeValue::Tuple(
+                    values
+                        .iter()
+                        .map(json_value_to_runtime_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                ));
+            }
             if let Some(values) = entries.get("$map") {
                 let values = values
                     .as_array()
@@ -511,6 +525,40 @@ fn json_value_to_runtime_value(value: &serde_json::Value) -> Result<RuntimeValue
                     mapped.insert(key.clone(), json_value_to_runtime_value(value)?);
                 }
                 return Ok(RuntimeValue::Record {
+                    name: name.to_string(),
+                    fields: mapped,
+                });
+            }
+            if let Some(name) = entries.get("$struct") {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| "`$struct` must be a string".to_string())?;
+                let fields = entries
+                    .get("fields")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or_else(|| "struct values must include a `fields` object".to_string())?;
+                let mut mapped = BTreeMap::new();
+                for (key, value) in fields {
+                    mapped.insert(key.clone(), json_value_to_runtime_value(value)?);
+                }
+                return Ok(RuntimeValue::Struct {
+                    name: name.to_string(),
+                    fields: mapped,
+                });
+            }
+            if let Some(name) = entries.get("$union") {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| "`$union` must be a string".to_string())?;
+                let fields = entries
+                    .get("fields")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or_else(|| "union values must include a `fields` object".to_string())?;
+                let mut mapped = BTreeMap::new();
+                for (key, value) in fields {
+                    mapped.insert(key.clone(), json_value_to_runtime_value(value)?);
+                }
+                return Ok(RuntimeValue::Union {
                     name: name.to_string(),
                     fields: mapped,
                 });
@@ -592,6 +640,12 @@ fn runtime_value_to_json_value(value: RuntimeValue) -> Result<serde_json::Value,
                 .map(runtime_value_to_json_value)
                 .collect::<Result<Vec<_>, _>>()?
         })),
+        RuntimeValue::Tuple(values) => Ok(serde_json::json!({
+            "$tuple": values
+                .into_iter()
+                .map(runtime_value_to_json_value)
+                .collect::<Result<Vec<_>, _>>()?
+        })),
         RuntimeValue::Pair(left, right) => Ok(serde_json::json!({
             "$pair": [
                 runtime_value_to_json_value(*left)?,
@@ -645,6 +699,32 @@ fn runtime_value_to_json_value(value: RuntimeValue) -> Result<serde_json::Value,
             }
             Ok(serde_json::json!({
                 "$record": name,
+                "fields": serde_json::Value::Object(mapped),
+            }))
+        }
+        RuntimeValue::Struct { name, fields } => {
+            let mut mapped = serde_json::Map::new();
+            for (key, value) in fields {
+                if super::runtime_is_hidden_bitfield_storage_field(&key) {
+                    continue;
+                }
+                mapped.insert(key, runtime_value_to_json_value(value)?);
+            }
+            Ok(serde_json::json!({
+                "$struct": name,
+                "fields": serde_json::Value::Object(mapped),
+            }))
+        }
+        RuntimeValue::Union { name, fields } => {
+            let mut mapped = serde_json::Map::new();
+            for (key, value) in fields {
+                if super::runtime_is_hidden_bitfield_storage_field(&key) {
+                    continue;
+                }
+                mapped.insert(key, runtime_value_to_json_value(value)?);
+            }
+            Ok(serde_json::json!({
+                "$union": name,
                 "fields": serde_json::Value::Object(mapped),
             }))
         }

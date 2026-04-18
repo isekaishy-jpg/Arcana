@@ -5,8 +5,9 @@ use super::{
     HirForewordApp, HirForewordArg, HirHeadedModifier, HirHeadedModifierKind, HirHeaderAttachment,
     HirImplAssocTypeBinding, HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern,
     HirMemorySpecDecl, HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPhraseArg,
-    HirRecordRegion, HirRecycleLineKind, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody,
-    HirType, HirUnaryOp, signature::render_symbol_signature,
+    HirRecordRegion, HirRecycleLineKind, HirStatement, HirStatementKind, HirStructRegion,
+    HirSymbol, HirSymbolBody, HirType, HirUnaryOp, HirUnionRegion,
+    signature::render_symbol_signature,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -874,6 +875,12 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
         HirStatementKind::Record(region) => {
             format!("record({})", render_record_region_fingerprint(region))
         }
+        HirStatementKind::Struct(region) => {
+            format!("struct({})", render_struct_region_fingerprint(region))
+        }
+        HirStatementKind::Union(region) => {
+            format!("union({})", render_union_region_fingerprint(region))
+        }
         HirStatementKind::Array(region) => {
             format!("array({})", render_array_region_fingerprint(region))
         }
@@ -921,10 +928,13 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
             quote_fingerprint_text(text)
         ),
         HirExpr::StrLiteral { text } => format!("str({})", quote_fingerprint_text(text)),
-        HirExpr::Pair { left, right } => format!(
-            "pair({},{})",
-            render_expr_fingerprint(left),
-            render_expr_fingerprint(right)
+        HirExpr::Tuple { items } => format!(
+            "tuple([{}])",
+            items
+                .iter()
+                .map(render_expr_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         HirExpr::Range {
             start,
@@ -954,6 +964,12 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
         }
         HirExpr::RecordRegion(region) => {
             format!("record({})", render_record_region_fingerprint(region))
+        }
+        HirExpr::StructRegion(region) => {
+            format!("struct({})", render_struct_region_fingerprint(region))
+        }
+        HirExpr::UnionRegion(region) => {
+            format!("union({})", render_union_region_fingerprint(region))
         }
         HirExpr::ArrayRegion(region) => {
             format!("array({})", render_array_region_fingerprint(region))
@@ -1150,8 +1166,99 @@ fn render_construct_region_fingerprint(region: &HirConstructRegion) -> String {
 
 fn render_record_region_fingerprint(region: &HirRecordRegion) -> String {
     format!(
-        "kind={}|completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
-        region.kind.as_str(),
+        "completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
+        region.completion.as_str(),
+        render_expr_fingerprint(&region.target),
+        region
+            .base
+            .as_ref()
+            .map(|base| render_expr_fingerprint(base))
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                HirConstructDestination::Deliver { name } => {
+                    format!("deliver({})", quote_fingerprint_text(name))
+                }
+                HirConstructDestination::Place { target } => {
+                    format!("place({})", render_assign_target_fingerprint(target))
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .default_modifier
+            .as_ref()
+            .map(render_headed_modifier_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "contrib(name={}|value={}|modifier={})",
+                    quote_fingerprint_text(&line.name),
+                    render_expr_fingerprint(&line.value),
+                    line.modifier
+                        .as_ref()
+                        .map(render_headed_modifier_fingerprint)
+                        .unwrap_or_else(|| "none".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_struct_region_fingerprint(region: &HirStructRegion) -> String {
+    format!(
+        "completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
+        region.completion.as_str(),
+        render_expr_fingerprint(&region.target),
+        region
+            .base
+            .as_ref()
+            .map(|base| render_expr_fingerprint(base))
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                HirConstructDestination::Deliver { name } => {
+                    format!("deliver({})", quote_fingerprint_text(name))
+                }
+                HirConstructDestination::Place { target } => {
+                    format!("place({})", render_assign_target_fingerprint(target))
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .default_modifier
+            .as_ref()
+            .map(render_headed_modifier_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "contrib(name={}|value={}|modifier={})",
+                    quote_fingerprint_text(&line.name),
+                    render_expr_fingerprint(&line.value),
+                    line.modifier
+                        .as_ref()
+                        .map(render_headed_modifier_fingerprint)
+                        .unwrap_or_else(|| "none".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_union_region_fingerprint(region: &HirUnionRegion) -> String {
+    format!(
+        "completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
         region.completion.as_str(),
         render_expr_fingerprint(&region.target),
         region

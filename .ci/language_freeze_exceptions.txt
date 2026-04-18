@@ -2,3 +2,6 @@
 # One normalized repo-relative path per line.
 
 docs/arcana-v0.md
+docs/specs/callables/callables/v1-status.md
+docs/specs/spec-status.md
+docs/specs/tuples/tuples/v1-scope.md

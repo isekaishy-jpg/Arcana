@@ -408,9 +408,9 @@ fn validate_tuple_type_contract_inner(
 ) -> Result<(), String> {
     match &ty.kind {
         SurfaceTypeKind::Tuple(items) => {
-            if items.len() != 2 {
+            if !(2..=3).contains(&items.len()) {
                 return Err(format!(
-                    "{}:{}: {context} tuples are not part of v1 except pairs",
+                    "{}:{}: {context} tuples must have exactly 2 or 3 elements in this phase",
                     span.line, span.column
                 ));
             }
@@ -817,11 +817,10 @@ mod tests {
     }
 
     #[test]
-    fn tuple_contract_rejects_non_pair() {
+    fn tuple_contract_accepts_triple() {
         let ty = parse_surface_type("(Int, Bool, Str)").expect("tuple");
-        let err = validate_tuple_type_contract(&ty, Span::new(1, 1), "test type")
-            .expect_err("tuple contract should fail");
-        assert!(err.contains("pairs"));
+        validate_tuple_type_contract(&ty, Span::new(1, 1), "test type")
+            .expect("tuple contract should accept triples");
     }
 
     #[test]

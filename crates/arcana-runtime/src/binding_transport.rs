@@ -2218,20 +2218,20 @@ pub(super) fn runtime_binding_encode_layout_into(
             Ok(())
         }
         ArcanaCabiBindingLayoutKind::Struct { fields } => {
-            let RuntimeValue::Record {
+            let RuntimeValue::Struct {
                 name,
                 fields: record_fields,
             } = value
             else {
                 return Err(format!(
-                    "binding layout `{}` expected struct record value, got `{}`",
+                    "binding layout `{}` expected struct value, got `{}`",
                     layout.layout_id,
                     runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
                 ));
             };
             if name != &layout.layout_id {
                 return Err(format!(
-                    "binding layout `{}` expected record `{}`, got `{name}`",
+                    "binding layout `{}` expected struct `{}`, got `{name}`",
                     layout.layout_id, layout.layout_id
                 ));
             }
@@ -2259,20 +2259,20 @@ pub(super) fn runtime_binding_encode_layout_into(
             Ok(())
         }
         ArcanaCabiBindingLayoutKind::Union { fields } => {
-            let RuntimeValue::Record {
+            let RuntimeValue::Union {
                 name,
                 fields: record_fields,
             } = value
             else {
                 return Err(format!(
-                    "binding layout `{}` expected union record value, got `{}`",
+                    "binding layout `{}` expected union value, got `{}`",
                     layout.layout_id,
                     runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
                 ));
             };
             if name != &layout.layout_id {
                 return Err(format!(
-                    "binding layout `{}` expected record `{}`, got `{name}`",
+                    "binding layout `{}` expected union `{}`, got `{name}`",
                     layout.layout_id, layout.layout_id
                 ));
             }
@@ -2377,7 +2377,7 @@ pub(super) fn runtime_binding_decode_layout_from(
                 };
                 values.insert(field.name.clone(), value);
             }
-            Ok(RuntimeValue::Record {
+            Ok(RuntimeValue::Struct {
                 name: layout.layout_id.clone(),
                 fields: values,
             })
@@ -2394,7 +2394,7 @@ pub(super) fn runtime_binding_decode_layout_from(
                 )?;
                 values.insert(field.name.clone(), value);
             }
-            Ok(RuntimeValue::Record {
+            Ok(RuntimeValue::Union {
                 name: layout.layout_id.clone(),
                 fields: values,
             })

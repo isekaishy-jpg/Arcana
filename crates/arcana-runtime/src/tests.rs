@@ -3398,6 +3398,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     })),
@@ -3417,6 +3418,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                                 qualifier_type_args: Vec::new(),
                                 resolved_callable: None,
                                 resolved_routine: None,
+                                resolved_subject_kind: None,
                                 dynamic_dispatch: None,
                                 attached: Vec::new(),
                             }),
@@ -3426,6 +3428,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                             qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
+                            resolved_subject_kind: None,
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
@@ -3464,6 +3467,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                             qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
+                            resolved_subject_kind: None,
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
@@ -6652,7 +6656,7 @@ fn execute_main_construct_regions_preserve_direct_values_and_payload_acquisition
             "import std.result\n",
             "use std.option.Option\n",
             "use std.result.Result\n",
-            "record Widget:\n",
+            "struct Widget:\n",
             "    ready: Bool\n",
             "    maybe: Option[Int]\n",
             "    outcome: Result[Int, Str]\n",
@@ -7242,18 +7246,12 @@ fn execute_main_runs_record_headed_regions_with_base_copy() {
             "    maybe: Option[Int]\n",
             "    outcome: Result[Int, Str]\n",
             "fn main() -> Int:\n",
-            "    let base = construct yield Widget -return 99\n",
-            "        ready = false\n",
-            "        maybe = Option.None[Int] :: :: call\n",
-            "        outcome = Result.Err[Int, Str] :: \"bad\" :: call\n",
+            "    let base = Widget :: ready = false, maybe = Option.None[Int] :: :: call, outcome = Result.Err[Int, Str] :: \"bad\" :: call :: call\n",
             "    let built = record yield Widget from base -return 99\n",
             "        ready = true\n",
             "    record deliver Widget from built -> mirrored -return 98\n",
             "        maybe = Option.Some[Int] :: 7 :: call\n",
-            "    let mut placed = construct yield Widget -return 97\n",
-            "        ready = false\n",
-            "        maybe = Option.None[Int] :: :: call\n",
-            "        outcome = Result.Ok[Int, Str] :: 0 :: call\n",
+            "    let mut placed = Widget :: ready = false, maybe = Option.None[Int] :: :: call, outcome = Result.Ok[Int, Str] :: 0 :: call :: call\n",
             "    record place Widget from mirrored -> placed -return 97\n",
             "        ready = mirrored.ready\n",
             "    if not placed.ready:\n",
@@ -7341,6 +7339,60 @@ fn execute_main_runs_record_headed_regions_with_cross_record_lift() {
         statuses
             .iter()
             .find(|status| status.member_name() == "runtime_record_headed_regions_cross_record")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 4);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_struct_headed_regions_with_base_copy() {
+    let dir = temp_workspace_dir("runtime_struct_headed_regions_base_copy");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_struct_headed_regions_base_copy\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "struct Widget:\n",
+            "    title: Str\n",
+            "    count: Int\n",
+            "    ready: Bool\n",
+            "fn main() -> Int:\n",
+            "    let base = Widget :: title = \"seed\", count = 4, ready = false :: call\n",
+            "    let built = struct yield Widget from base -return 77\n",
+            "        ready = true\n",
+            "    if built.title != \"seed\":\n",
+            "        return 1\n",
+            "    if built.count != 4:\n",
+            "        return 2\n",
+            "    if not built.ready:\n",
+            "        return 3\n",
+            "    return built.count\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_struct_headed_regions_base_copy")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -8757,6 +8809,55 @@ fn execute_main_runs_local_record_constructor_and_impl_method() {
 }
 
 #[test]
+fn execute_main_runs_zero_arg_record_and_struct_constructors() {
+    let dir = temp_workspace_dir("zero_arg_nominal_constructors");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_zero_arg_nominal_constructors\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "record Marker:\n",
+            "struct MaybeBox:\n",
+            "    value: Option[Int]\n",
+            "enum Option[T]:\n",
+            "    Some(T)\n",
+            "    None\n",
+            "fn main() -> Int:\n",
+            "    let marker = Marker :: :: call\n",
+            "    let maybe = MaybeBox :: :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_zero_arg_nominal_constructors")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_runs_value_surface_struct_array_and_float_routines() {
     let dir = temp_workspace_dir("value_surface_runtime");
     write_file(
@@ -8871,6 +8972,74 @@ fn execute_main_runs_struct_bitfield_layout_semantics() {
 
     assert_eq!(code, 0);
     assert_eq!(host.stdout, vec!["93".to_string(), "-1".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_callable_struct_value_dispatch() {
+    let dir = temp_workspace_dir("callable_struct_values");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_callable_struct_values\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "trait CallableRead[Args, Out]:\n",
+            "    fn call(read self: Self, take args: Args) -> Out\n",
+            "trait CallableEdit[Args, Out]:\n",
+            "    fn call(edit self: Self, take args: Args) -> Out\n",
+            "lang call_contract_read = CallableRead\n",
+            "lang call_contract_edit = CallableEdit\n",
+            "struct Sum3:\n",
+            "    seed: Int\n",
+            "struct Counter:\n",
+            "    value: Int\n",
+            "impl CallableRead[(Int, Int, Int), Int] for Sum3:\n",
+            "    fn call(read self: Sum3, take args: (Int, Int, Int)) -> Int:\n",
+            "        return self.seed + args.0 + args.1 + args.2\n",
+            "impl CallableEdit[Int, Int] for Counter:\n",
+            "    fn call(edit self: Counter, take args: Int) -> Int:\n",
+            "        self.value += args\n",
+            "        return self.value\n",
+            "fn main() -> Int:\n",
+            "    let sum3 = Sum3 :: seed = 1 :: call\n",
+            "    let total = sum3 :: 2, 3, 4 :: call[(Int, Int, Int), Int]\n",
+            "    let mut counter = Counter :: value = 5 :: call\n",
+            "    let next = counter :: 7 :: call[Int, Int]\n",
+            "    if total != 10:\n",
+            "        return 1\n",
+            "    if next != 12:\n",
+            "        return 2\n",
+            "    if counter.value != 12:\n",
+            "        return 3\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_callable_struct_values")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -9367,6 +9536,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -9383,6 +9553,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -9791,6 +9962,7 @@ fn execute_main_rejects_use_after_take_move() {
                             qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
+                            resolved_subject_kind: None,
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
@@ -9808,6 +9980,7 @@ fn execute_main_rejects_use_after_take_move() {
                             qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
+                            resolved_subject_kind: None,
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
@@ -9903,6 +10076,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -9925,6 +10099,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -10023,6 +10198,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
                         qualifier_type_args: vec!["Int".to_string()],
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -10045,6 +10221,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
                         qualifier_type_args: vec!["Int".to_string()],
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },

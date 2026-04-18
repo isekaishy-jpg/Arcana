@@ -19,9 +19,8 @@ pub enum ExecExpr {
     Bool(bool),
     Str(String),
     Path(Vec<String>),
-    Pair {
-        left: Box<ExecExpr>,
-        right: Box<ExecExpr>,
+    Tuple {
+        items: Vec<ExecExpr>,
     },
     Collection {
         items: Vec<ExecExpr>,
@@ -32,6 +31,8 @@ pub enum ExecExpr {
     },
     ConstructRegion(Box<ExecConstructRegion>),
     RecordRegion(Box<ExecRecordRegion>),
+    StructRegion(Box<ExecStructRegion>),
+    UnionRegion(Box<ExecUnionRegion>),
     ArrayRegion(Box<ExecArrayRegion>),
     Chain {
         style: String,
@@ -90,6 +91,8 @@ pub enum ExecExpr {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_routine: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_subject_kind: Option<ExecResolvedSubjectKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_dispatch: Option<ExecDynamicDispatch>,
         attached: Vec<ExecHeaderAttachment>,
     },
@@ -126,6 +129,15 @@ pub enum ExecPhraseQualifierKind {
     Fallback,
     BareMethod,
     NamedPath,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecResolvedSubjectKind {
+    Record,
+    Struct,
+    Union,
+    Array,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,7 +280,36 @@ pub struct ExecConstructRegion {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecRecordRegion {
-    pub kind: String,
+    pub completion: String,
+    pub target: Box<ExecExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Box<ExecExpr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ExecConstructDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_modifier: Option<ExecHeadedModifier>,
+    pub lines: Vec<ExecConstructLine>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecStructRegion {
+    pub completion: String,
+    pub target: Box<ExecExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Box<ExecExpr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ExecConstructDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_modifier: Option<ExecHeadedModifier>,
+    pub lines: Vec<ExecConstructLine>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecUnionRegion {
     pub completion: String,
     pub target: Box<ExecExpr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -419,6 +460,8 @@ pub enum ExecStmt {
         lines: Vec<ExecBindLine>,
     },
     Record(ExecRecordRegion),
+    Struct(ExecStructRegion),
+    Union(ExecUnionRegion),
     Array(ExecArrayRegion),
     Construct(ExecConstructRegion),
     MemorySpec(ExecMemorySpecDecl),

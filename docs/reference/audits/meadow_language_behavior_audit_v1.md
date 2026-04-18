@@ -17,7 +17,7 @@ This audit records a completed MeadowLang-to-Arcana parity pass. It is retained 
 - Built-in forewords: target validation, payload validation, `#test`, `#only`, `#boundary[target="lua"|"sql"]`, and statement-level `#chain[...]` handling are now explicitly checked.
 - Chain contracts: `#stage[...]` and `#chain[...]` payload keys and value domains now reject Meadow-invalid shapes instead of being treated as pass-through metadata.
 - Boundary interop: Lua/SQL varietal compile-time contracts are carried, mutable-borrow and reference-return limits are enforced, and recursive boundary-safe typing now follows nested record/enum surfaces.
-- Tuples: pair-only tuple stabilization is explicit and enforced, while future tuple enrichment stays deferred rather than silently prohibited forever.
+- Tuples: 2/3-tuple stabilization is explicit and enforced, while future tuple enrichment stays deferred rather than silently prohibited forever.
 - Page rollups: adopted pre-selfhost with explicit ownership/subject rules rather than leaving them as a post-selfhost surprise.
 - ECS/behaviors: first-class behavior/system direction and `std.ecs` scheduler/component direction are carried; broad query authoring remains intentionally outside the frozen selfhost baseline.
 

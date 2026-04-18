@@ -13,6 +13,7 @@ pub(crate) enum RuntimeValue {
     ByteBuffer(Vec<u8>),
     Utf16(Vec<u16>),
     Utf16Buffer(Vec<u16>),
+    Tuple(Vec<RuntimeValue>),
     Pair(Box<RuntimeValue>, Box<RuntimeValue>),
     Array(Vec<RuntimeValue>),
     List(Vec<RuntimeValue>),
@@ -26,6 +27,14 @@ pub(crate) enum RuntimeValue {
     Ref(RuntimeReferenceValue),
     Opaque(RuntimeOpaqueValue),
     Record {
+        name: String,
+        fields: BTreeMap<String, RuntimeValue>,
+    },
+    Struct {
+        name: String,
+        fields: BTreeMap<String, RuntimeValue>,
+    },
+    Union {
         name: String,
         fields: BTreeMap<String, RuntimeValue>,
     },

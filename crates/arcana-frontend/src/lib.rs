@@ -23,14 +23,14 @@ use arcana_cabi::{
     ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
 };
 use arcana_hir::{
-    HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
-    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPath, HirPhraseArg,
-    HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind,
-    HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage,
-    HirWorkspaceSummary, canonicalize_hir_type_in_module, collect_hir_type_refs,
-    current_workspace_package_for_module, infer_receiver_expr_type,
-    lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lower_module_text,
-    match_name_resolves_to_zero_payload_variant, render_symbol_fingerprint,
+    HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirField, HirHeaderAttachment,
+    HirImplDecl, HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPath,
+    HirPhraseArg, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement,
+    HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp,
+    HirWorkspacePackage, HirWorkspaceSummary, canonicalize_hir_type_in_module,
+    collect_hir_type_refs, current_workspace_package_for_module, hir_strip_reference_type,
+    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lookup_shackle_decl_path,
+    lower_module_text, match_name_resolves_to_zero_payload_variant, render_symbol_fingerprint,
     render_symbol_signature, resolve_workspace, visible_package_root_for_module,
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
@@ -542,7 +542,7 @@ enum ExprTypeClass {
     F32,
     F64,
     Str,
-    Pair,
+    Tuple,
     Collection,
 }
 
@@ -554,7 +554,7 @@ impl ExprTypeClass {
             Self::F32 => "F32",
             Self::F64 => "F64",
             Self::Str => "Str",
-            Self::Pair => "pair",
+            Self::Tuple => "tuple",
             Self::Collection => "collection",
         }
     }
@@ -826,22 +826,35 @@ fn shackle_decl_fields(
     shackle_layout_fields(&decl_ref.decl.raw_layout.as_ref()?.kind, Span::default())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NominalRegionKind {
+    Record,
+    Struct,
+    Union,
+}
+
+impl NominalRegionKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Record => "record",
+            Self::Struct => "struct",
+            Self::Union => "union",
+        }
+    }
+}
+
 fn shackle_nominal_region_fields(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     path: &[String],
-    kind: arcana_hir::HirNominalFieldRegionKind,
+    kind: NominalRegionKind,
 ) -> Option<BTreeMap<String, HirType>> {
     let decl_ref = lookup_shackle_decl_path(workspace, resolved_module, path)?;
     match (&kind, &decl_ref.decl.raw_layout.as_ref()?.kind) {
-        (
-            arcana_hir::HirNominalFieldRegionKind::Struct,
-            ArcanaCabiBindingLayoutKind::Struct { .. },
-        )
-        | (
-            arcana_hir::HirNominalFieldRegionKind::Union,
-            ArcanaCabiBindingLayoutKind::Union { .. },
-        ) => shackle_layout_fields(&decl_ref.decl.raw_layout.as_ref()?.kind, Span::default()),
+        (NominalRegionKind::Struct, ArcanaCabiBindingLayoutKind::Struct { .. })
+        | (NominalRegionKind::Union, ArcanaCabiBindingLayoutKind::Union { .. }) => {
+            shackle_layout_fields(&decl_ref.decl.raw_layout.as_ref()?.kind, Span::default())
+        }
         _ => None,
     }
 }
@@ -1227,7 +1240,7 @@ fn infer_expr_type(expr: &HirExpr) -> Option<ExprTypeClass> {
             arcana_hir::HirFloatLiteralKind::F64 => ExprTypeClass::F64,
         }),
         HirExpr::StrLiteral { .. } => Some(ExprTypeClass::Str),
-        HirExpr::Pair { .. } => Some(ExprTypeClass::Pair),
+        HirExpr::Tuple { .. } => Some(ExprTypeClass::Tuple),
         HirExpr::CollectionLiteral { .. } => Some(ExprTypeClass::Collection),
         HirExpr::Unary { op, expr } => match op {
             HirUnaryOp::Not => Some(ExprTypeClass::Bool),
@@ -1288,7 +1301,7 @@ fn builtin_scalar_expr_type(expr_type: ExprTypeClass) -> Option<HirType> {
         ExprTypeClass::F32 => "F32",
         ExprTypeClass::F64 => "F64",
         ExprTypeClass::Str => "Str",
-        ExprTypeClass::Pair | ExprTypeClass::Collection => return None,
+        ExprTypeClass::Tuple | ExprTypeClass::Collection => return None,
     };
     Some(HirType {
         kind: HirTypeKind::Path(HirPath {
@@ -1339,7 +1352,7 @@ fn validate_expected_expr_type(
 }
 
 fn is_tuple_projection_member(member: &str) -> bool {
-    matches!(member, "0" | "1")
+    matches!(member, "0" | "1" | "2")
 }
 
 fn binary_op_token(op: HirBinaryOp) -> &'static str {
@@ -2018,7 +2031,12 @@ fn validate_package_lang_item_semantics(
             .cloned()
             .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
         for lang_item in &module.lang_items {
-            let Some(family) = opaque_lang_family(&lang_item.name) else {
+            let Some(family) = opaque_lang_family(&lang_item.name)
+                .map(|family| family.name().to_string())
+                .or_else(|| {
+                    is_callable_contract_lang_item(&lang_item.name).then(|| lang_item.name.clone())
+                })
+            else {
                 continue;
             };
             if let Some((prev_path, prev_line, prev_column)) = seen.insert(
@@ -2034,8 +2052,8 @@ fn validate_package_lang_item_semantics(
                     line: lang_item.span.line,
                     column: lang_item.span.column,
                     message: format!(
-                        "opaque family lang item `{}` is declared more than once in package `{}`; first seen at {}:{}:{}",
-                        family.name(),
+                        "lang item `{}` is declared more than once in package `{}`; first seen at {}:{}:{}",
+                        family,
                         package.summary.package_name,
                         prev_path.display(),
                         prev_line,
@@ -2207,6 +2225,16 @@ fn infer_expr_value_type(
     {
         return resolve_record_result_type(workspace, resolved_module, &path);
     }
+    if let HirExpr::StructRegion(region) = expr
+        && let Some(path) = flatten_callable_expr_path(&region.target)
+    {
+        return resolve_struct_result_type(workspace, resolved_module, &path);
+    }
+    if let HirExpr::UnionRegion(region) = expr
+        && let Some(path) = flatten_callable_expr_path(&region.target)
+    {
+        return resolve_union_result_type(workspace, resolved_module, &path);
+    }
     if let HirExpr::ArrayRegion(region) = expr
         && let Some(path) = flatten_callable_expr_path(&region.target)
         && resolve_array_target_shape(workspace, resolved_module, &path).is_some()
@@ -2265,14 +2293,16 @@ fn infer_expr_ownership(
             OwnershipClass::Copy
         }
         HirExpr::StrLiteral { .. } | HirExpr::CollectionLiteral { .. } => OwnershipClass::Move,
-        HirExpr::Pair { left, right } => {
-            let left_kind =
-                infer_expr_ownership(workspace, resolved_module, type_scope, scope, left);
-            let right_kind =
-                infer_expr_ownership(workspace, resolved_module, type_scope, scope, right);
-            if left_kind == OwnershipClass::Copy && right_kind == OwnershipClass::Copy {
+        HirExpr::Tuple { items } => {
+            let item_kinds = items
+                .iter()
+                .map(|item| {
+                    infer_expr_ownership(workspace, resolved_module, type_scope, scope, item)
+                })
+                .collect::<Vec<_>>();
+            if item_kinds.iter().all(|kind| *kind == OwnershipClass::Copy) {
                 OwnershipClass::Copy
-            } else if left_kind.is_move_only() || right_kind.is_move_only() {
+            } else if item_kinds.iter().any(|kind| kind.is_move_only()) {
                 OwnershipClass::Move
             } else {
                 OwnershipClass::Unknown
@@ -2366,6 +2396,321 @@ fn resolve_qualified_phrase_target_symbol<'a>(
                 .flatten()
         }
         _ => None,
+    }
+}
+
+fn resolved_symbol_path(symbol_ref: arcana_hir::HirResolvedSymbolRef<'_>) -> Vec<String> {
+    let mut path = symbol_ref
+        .module_id
+        .split('.')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    path.push(symbol_ref.symbol.name.clone());
+    path
+}
+
+const CALL_CONTRACT_READ0_LANG_ITEM: &str = "call_contract_read0";
+const CALL_CONTRACT_EDIT0_LANG_ITEM: &str = "call_contract_edit0";
+const CALL_CONTRACT_TAKE0_LANG_ITEM: &str = "call_contract_take0";
+const CALL_CONTRACT_READ_LANG_ITEM: &str = "call_contract_read";
+const CALL_CONTRACT_EDIT_LANG_ITEM: &str = "call_contract_edit";
+const CALL_CONTRACT_TAKE_LANG_ITEM: &str = "call_contract_take";
+
+fn is_callable_contract_lang_item(name: &str) -> bool {
+    matches!(
+        name,
+        CALL_CONTRACT_READ0_LANG_ITEM
+            | CALL_CONTRACT_EDIT0_LANG_ITEM
+            | CALL_CONTRACT_TAKE0_LANG_ITEM
+            | CALL_CONTRACT_READ_LANG_ITEM
+            | CALL_CONTRACT_EDIT_LANG_ITEM
+            | CALL_CONTRACT_TAKE_LANG_ITEM
+    )
+}
+
+fn callable_contract_lang_item_name(
+    mode: arcana_hir::HirParamMode,
+    zero_arity: bool,
+) -> &'static str {
+    match (mode, zero_arity) {
+        (arcana_hir::HirParamMode::Read, true) => CALL_CONTRACT_READ0_LANG_ITEM,
+        (arcana_hir::HirParamMode::Edit, true) => CALL_CONTRACT_EDIT0_LANG_ITEM,
+        (arcana_hir::HirParamMode::Take, true) => CALL_CONTRACT_TAKE0_LANG_ITEM,
+        (arcana_hir::HirParamMode::Read, false) => CALL_CONTRACT_READ_LANG_ITEM,
+        (arcana_hir::HirParamMode::Edit, false) => CALL_CONTRACT_EDIT_LANG_ITEM,
+        (arcana_hir::HirParamMode::Take, false) => CALL_CONTRACT_TAKE_LANG_ITEM,
+        (arcana_hir::HirParamMode::Hold, _) => "",
+    }
+}
+
+fn callable_contract_methods_use_hold_receiver(methods: &[HirSymbol]) -> bool {
+    methods.iter().any(|method| {
+        matches!(
+            method.params.first().and_then(|param| param.mode),
+            Some(arcana_hir::HirParamMode::Hold)
+        )
+    })
+}
+
+fn resolve_callable_contract_trait_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    lang_item_name: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let mut candidates = Vec::new();
+    for package in workspace.packages.values() {
+        for module in &package.summary.modules {
+            for lang_item in &module.lang_items {
+                if lang_item.name != lang_item_name {
+                    continue;
+                }
+                let Some(symbol_ref) =
+                    lookup_symbol_path(workspace, resolved_module, &lang_item.target)
+                else {
+                    continue;
+                };
+                if symbol_ref.symbol.kind != HirSymbolKind::Trait {
+                    continue;
+                }
+                candidates.push(resolved_symbol_path(symbol_ref));
+            }
+        }
+    }
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        _ => Err(format!(
+            "`{lang_item_name}` is ambiguous; candidates: {}",
+            candidates
+                .iter()
+                .map(|path| path.join("."))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn callable_contract_lang_item_for_trait_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    trait_path: &[String],
+) -> Option<&'static str> {
+    [
+        CALL_CONTRACT_READ0_LANG_ITEM,
+        CALL_CONTRACT_EDIT0_LANG_ITEM,
+        CALL_CONTRACT_TAKE0_LANG_ITEM,
+        CALL_CONTRACT_READ_LANG_ITEM,
+        CALL_CONTRACT_EDIT_LANG_ITEM,
+        CALL_CONTRACT_TAKE_LANG_ITEM,
+    ]
+    .into_iter()
+    .find(|lang_item| {
+        resolve_callable_contract_trait_path(workspace, resolved_module, lang_item)
+            .ok()
+            .flatten()
+            .is_some_and(|path| path == trait_path)
+    })
+}
+
+fn symbol_kind_for_hir_type_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<HirSymbolKind> {
+    let path = match &ty.kind {
+        HirTypeKind::Path(path) => &path.segments,
+        HirTypeKind::Apply { base, .. } => &base.segments,
+        _ => return None,
+    };
+    lookup_symbol_path(workspace, resolved_module, path).map(|resolved| resolved.symbol.kind)
+}
+
+fn callable_struct_subject_base_kind(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &ValueScope,
+    subject: &HirExpr,
+) -> Option<HirSymbolKind> {
+    let subject_ty = infer_receiver_expr_type(workspace, resolved_module, scope, subject)?;
+    let subject_ty =
+        canonicalize_local_hir_type(workspace, resolved_module, &subject_ty).unwrap_or(subject_ty);
+    let base_path = match &hir_strip_reference_type(&subject_ty).kind {
+        HirTypeKind::Path(path) => path.segments.clone(),
+        HirTypeKind::Apply { base, .. } => base.segments.clone(),
+        _ => return None,
+    };
+    lookup_symbol_path(workspace, resolved_module, &base_path).map(|resolved| resolved.symbol.kind)
+}
+
+fn infer_callable_struct_packed_args_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    args: &[arcana_hir::HirPhraseArg],
+) -> Option<HirType> {
+    if args.is_empty()
+        || args
+            .iter()
+            .any(|arg| matches!(arg, arcana_hir::HirPhraseArg::Named { .. }))
+    {
+        return None;
+    }
+    let item_types = args
+        .iter()
+        .map(|arg| match arg {
+            arcana_hir::HirPhraseArg::Positional(expr) => {
+                infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+            }
+            arcana_hir::HirPhraseArg::Named { .. } => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if item_types.len() == 1 {
+        return item_types.into_iter().next();
+    }
+    Some(HirType {
+        kind: HirTypeKind::Tuple(item_types),
+        span: Span::default(),
+    })
+}
+
+fn callable_struct_allows_edit_receiver(subject: &HirExpr, scope: &ValueScope) -> bool {
+    matches!(
+        expr_place_mutability(subject, scope),
+        Some(PlaceMutability::Mutable | PlaceMutability::Unknown)
+    )
+}
+
+#[derive(Clone)]
+struct ResolvedCallableStructCandidate<'a> {
+    receiver_mode: arcana_hir::HirParamMode,
+    _candidate: arcana_hir::HirMethodCandidate<'a>,
+}
+
+fn resolve_callable_struct_candidate<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    resolved_module: &'a HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    qualifier: &str,
+    qualifier_type_args: &[HirType],
+    args: &'a [arcana_hir::HirPhraseArg],
+) -> Result<Option<ResolvedCallableStructCandidate<'a>>, String> {
+    if qualifier != "call" {
+        return Ok(None);
+    }
+    let Some(kind) = callable_struct_subject_base_kind(workspace, resolved_module, scope, subject)
+    else {
+        return Ok(None);
+    };
+    if kind != HirSymbolKind::Struct {
+        return Ok(None);
+    }
+    if args
+        .iter()
+        .any(|arg| matches!(arg, arcana_hir::HirPhraseArg::Named { .. }))
+    {
+        return Ok(None);
+    }
+    let Some(subject_ty) = infer_receiver_expr_type(workspace, resolved_module, scope, subject)
+    else {
+        return Ok(None);
+    };
+    let packed_args_ty =
+        infer_callable_struct_packed_args_type(workspace, resolved_module, type_scope, scope, args);
+    let zero_arity = packed_args_ty.is_none();
+    if !qualifier_type_args.is_empty()
+        && qualifier_type_args.len() != if zero_arity { 1 } else { 2 }
+    {
+        return Ok(None);
+    }
+    let mut allowed_modes = vec![
+        arcana_hir::HirParamMode::Read,
+        arcana_hir::HirParamMode::Take,
+    ];
+    if callable_struct_allows_edit_receiver(subject, scope) {
+        allowed_modes.push(arcana_hir::HirParamMode::Edit);
+    }
+    let mut trait_paths = Vec::new();
+    for mode in &allowed_modes {
+        let lang_item = callable_contract_lang_item_name(*mode, zero_arity);
+        if lang_item.is_empty() {
+            continue;
+        }
+        match resolve_callable_contract_trait_path(workspace, resolved_module, lang_item)? {
+            Some(path) => trait_paths.push((*mode, path)),
+            None => continue,
+        }
+    }
+    let packed_key = packed_args_ty
+        .as_ref()
+        .map(|ty| canonical_hir_type_key(workspace, resolved_module, ty));
+    let explicit_keys = qualifier_type_args
+        .iter()
+        .map(|ty| canonical_hir_type_key(workspace, resolved_module, ty))
+        .collect::<Vec<_>>();
+    let candidates =
+        lookup_method_candidates_for_hir_type(workspace, resolved_module, &subject_ty, "call")
+            .into_iter()
+            .filter_map(|candidate| {
+                let receiver = candidate.symbol.params.first()?;
+                let receiver_mode = receiver.mode?;
+                if receiver_mode == arcana_hir::HirParamMode::Hold {
+                    return None;
+                }
+                let expected_trait_path = trait_paths
+                    .iter()
+                    .find_map(|(mode, path)| (*mode == receiver_mode).then_some(path))?;
+                if candidate.trait_path.as_ref() != Some(expected_trait_path) {
+                    return None;
+                }
+                if zero_arity {
+                    if candidate.symbol.params.len() != 1 {
+                        return None;
+                    }
+                } else {
+                    if candidate.symbol.params.len() != 2 {
+                        return None;
+                    }
+                    let packed_param = candidate.symbol.params.get(1)?;
+                    if packed_param.mode != Some(arcana_hir::HirParamMode::Take) {
+                        return None;
+                    }
+                    let packed_param_key =
+                        canonical_hir_type_key(workspace, resolved_module, &packed_param.ty);
+                    if Some(packed_param_key) != packed_key {
+                        return None;
+                    }
+                }
+                let return_type = candidate.symbol.return_type.as_ref()?;
+                let return_key = canonical_hir_type_key(workspace, resolved_module, return_type);
+                if !explicit_keys.is_empty() {
+                    if zero_arity {
+                        if explicit_keys.first()? != &return_key {
+                            return None;
+                        }
+                    } else {
+                        if explicit_keys.first()? != packed_key.as_ref()?
+                            || explicit_keys.get(1)? != &return_key
+                        {
+                            return None;
+                        }
+                    }
+                }
+                Some(ResolvedCallableStructCandidate {
+                    receiver_mode,
+                    _candidate: candidate,
+                })
+            })
+            .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [candidate] => Ok(Some(candidate.clone())),
+        _ => Err(format!(
+            "callable struct dispatch for `{}` is ambiguous across callable contracts",
+            subject_ty.render()
+        )),
     }
 }
 
@@ -2944,11 +3289,12 @@ fn validate_call_param_mode_flow(
     args: &[arcana_hir::HirPhraseArg],
     qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
+    qualifier_type_args: &[HirType],
     span: Span,
     state: &mut BorrowFlowState,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let Some(symbol) = resolve_qualified_phrase_target_symbol(
+    let resolved_symbol = resolve_qualified_phrase_target_symbol(
         workspace,
         resolved_module,
         type_scope,
@@ -2956,69 +3302,19 @@ fn validate_call_param_mode_flow(
         subject,
         qualifier_kind,
         qualifier,
-    ) else {
-        return;
-    };
+    );
 
-    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
-    {
-        match param.mode {
-            Some(arcana_hir::HirParamMode::Read) | None => {
-                if let Some(name) = expr_place_root_local(expr, scope) {
-                    if state.has_moved(name) {
-                        push_type_contract_diagnostic(
-                            module_path,
-                            span,
-                            diagnostics,
-                            format!("use of moved local `{name}`"),
-                        );
-                    } else if state.has_mut_borrow(name) {
-                        push_type_contract_diagnostic(
-                            module_path,
-                            span,
-                            diagnostics,
-                            format!(
-                                "cannot pass local `{name}` to read parameter `{}` while it is mutably borrowed",
-                                param.name
-                            ),
-                        );
-                    } else {
-                        state.note_shared_borrow(name);
-                    }
-                }
-            }
-            Some(arcana_hir::HirParamMode::Edit) => {
-                let Some(mutability) = expr_place_mutability(expr, scope) else {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!(
-                            "argument for edit parameter `{}` must be a local place expression",
-                            param.name
-                        ),
-                    );
-                    continue;
-                };
-                let Some(name) = expr_place_root_local(expr, scope) else {
-                    continue;
-                };
+    let mut validate_mode = |mode: Option<arcana_hir::HirParamMode>,
+                             param_name: &str,
+                             expr: &HirExpr| match mode {
+        Some(arcana_hir::HirParamMode::Read) | None => {
+            if let Some(name) = expr_place_root_local(expr, scope) {
                 if state.has_moved(name) {
                     push_type_contract_diagnostic(
                         module_path,
                         span,
                         diagnostics,
                         format!("use of moved local `{name}`"),
-                    );
-                } else if matches!(mutability, PlaceMutability::Immutable) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!(
-                            "cannot pass immutable local `{name}` to edit parameter `{}`",
-                            param.name
-                        ),
                     );
                 } else if state.has_mut_borrow(name) {
                     push_type_contract_diagnostic(
@@ -3026,105 +3322,186 @@ fn validate_call_param_mode_flow(
                         span,
                         diagnostics,
                         format!(
-                            "cannot pass local `{name}` to edit parameter `{}` while it is already mutably borrowed",
-                            param.name
-                        ),
-                    );
-                } else if state.has_shared_borrow(name) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!(
-                            "cannot pass local `{name}` to edit parameter `{}` while it is already borrowed",
-                            param.name
+                            "cannot pass local `{name}` to read parameter `{}` while it is mutably borrowed",
+                            param_name
                         ),
                     );
                 } else {
-                    state.note_mut_borrow(name);
-                }
-            }
-            Some(arcana_hir::HirParamMode::Take) => {
-                let Some(name) = expr_place_root_local(expr, scope) else {
-                    continue;
-                };
-                if !scope.ownership_of(name).is_move_only() {
-                    continue;
-                }
-                if state.has_moved(name) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!("use of moved local `{name}`"),
-                    );
-                } else if state.has_any_borrow(name) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!("cannot move local `{name}` while it is borrowed"),
-                    );
-                } else if scope
-                    .binding_id_of(name)
-                    .is_some_and(|binding_id| state.has_active_cleanup_binding(binding_id))
-                {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!("cleanup subject `{name}` cannot be moved after activation"),
-                    );
-                } else {
-                    state.note_moved(name);
-                }
-            }
-            Some(arcana_hir::HirParamMode::Hold) => {
-                let Some(mutability) = expr_place_mutability(expr, scope) else {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!(
-                            "argument for hold parameter `{}` must be a local place expression",
-                            param.name
-                        ),
-                    );
-                    continue;
-                };
-                let Some(name) = expr_place_root_local(expr, scope) else {
-                    continue;
-                };
-                if state.has_moved(name) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!("use of moved local `{name}`"),
-                    );
-                } else if matches!(mutability, PlaceMutability::Immutable) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!(
-                            "cannot pass immutable local `{name}` to hold parameter `{}`",
-                            param.name
-                        ),
-                    );
-                } else if state.has_any_borrow(name) {
-                    push_type_contract_diagnostic(
-                        module_path,
-                        span,
-                        diagnostics,
-                        format!(
-                            "cannot pass local `{name}` to hold parameter `{}` while it is borrowed or held",
-                            param.name
-                        ),
-                    );
+                    state.note_shared_borrow(name);
                 }
             }
         }
+        Some(arcana_hir::HirParamMode::Edit) => {
+            let Some(mutability) = expr_place_mutability(expr, scope) else {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "argument for edit parameter `{}` must be a local place expression",
+                        param_name
+                    ),
+                );
+                return;
+            };
+            let Some(name) = expr_place_root_local(expr, scope) else {
+                return;
+            };
+            if state.has_moved(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("use of moved local `{name}`"),
+                );
+            } else if matches!(mutability, PlaceMutability::Immutable) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot pass immutable local `{name}` to edit parameter `{}`",
+                        param_name
+                    ),
+                );
+            } else if state.has_mut_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot pass local `{name}` to edit parameter `{}` while it is already mutably borrowed",
+                        param_name
+                    ),
+                );
+            } else if state.has_shared_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot pass local `{name}` to edit parameter `{}` while it is already borrowed",
+                        param_name
+                    ),
+                );
+            } else {
+                state.note_mut_borrow(name);
+            }
+        }
+        Some(arcana_hir::HirParamMode::Take) => {
+            let Some(name) = expr_place_root_local(expr, scope) else {
+                return;
+            };
+            if !scope.ownership_of(name).is_move_only() {
+                return;
+            }
+            if state.has_moved(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("use of moved local `{name}`"),
+                );
+            } else if state.has_any_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("cannot move local `{name}` while it is borrowed"),
+                );
+            } else if scope
+                .binding_id_of(name)
+                .is_some_and(|binding_id| state.has_active_cleanup_binding(binding_id))
+            {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("cleanup subject `{name}` cannot be moved after activation"),
+                );
+            } else {
+                state.note_moved(name);
+            }
+        }
+        Some(arcana_hir::HirParamMode::Hold) => {
+            let Some(mutability) = expr_place_mutability(expr, scope) else {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "argument for hold parameter `{}` must be a local place expression",
+                        param_name
+                    ),
+                );
+                return;
+            };
+            let Some(name) = expr_place_root_local(expr, scope) else {
+                return;
+            };
+            if state.has_moved(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("use of moved local `{name}`"),
+                );
+            } else if matches!(mutability, PlaceMutability::Immutable) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot pass immutable local `{name}` to hold parameter `{}`",
+                        param_name
+                    ),
+                );
+            } else if state.has_any_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot pass local `{name}` to hold parameter `{}` while it is borrowed or held",
+                        param_name
+                    ),
+                );
+            }
+        }
+    };
+
+    if let Some(symbol) = resolved_symbol {
+        for (param, expr) in
+            collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
+        {
+            validate_mode(param.mode, &param.name, expr);
+        }
+        return;
+    }
+    if qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::Call || qualifier != "call" {
+        return;
+    }
+    let Ok(candidate) = resolve_callable_struct_candidate(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        subject,
+        qualifier,
+        qualifier_type_args,
+        args,
+    ) else {
+        return;
+    };
+    let Some(candidate) = candidate else {
+        return;
+    };
+    validate_mode(Some(candidate.receiver_mode), "self", subject);
+    for arg in args {
+        let arcana_hir::HirPhraseArg::Positional(expr) = arg else {
+            continue;
+        };
+        validate_mode(Some(arcana_hir::HirParamMode::Take), "args", expr);
     }
 }
 
@@ -3137,9 +3514,10 @@ fn note_qualified_phrase_moves(
     args: &[arcana_hir::HirPhraseArg],
     qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
+    qualifier_type_args: &[HirType],
     state: &mut BorrowFlowState,
 ) {
-    let Some(symbol) = resolve_qualified_phrase_target_symbol(
+    let resolved_symbol = resolve_qualified_phrase_target_symbol(
         workspace,
         resolved_module,
         type_scope,
@@ -3147,17 +3525,11 @@ fn note_qualified_phrase_moves(
         subject,
         qualifier_kind,
         qualifier,
-    ) else {
-        return;
-    };
+    );
 
-    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
-    {
-        if !matches!(param.mode, Some(arcana_hir::HirParamMode::Take)) {
-            continue;
-        }
+    let mut note_take = |expr: &HirExpr| {
         let Some(name) = expr_place_root_local(expr, scope) else {
-            continue;
+            return;
         };
         if scope.ownership_of(name).is_move_only()
             && !scope
@@ -3166,6 +3538,44 @@ fn note_qualified_phrase_moves(
         {
             state.note_moved(name);
         }
+    };
+
+    if let Some(symbol) = resolved_symbol {
+        for (param, expr) in
+            collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
+        {
+            if matches!(param.mode, Some(arcana_hir::HirParamMode::Take)) {
+                note_take(expr);
+            }
+        }
+        return;
+    }
+    if qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::Call || qualifier != "call" {
+        return;
+    }
+    let Ok(candidate) = resolve_callable_struct_candidate(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        subject,
+        qualifier,
+        qualifier_type_args,
+        args,
+    ) else {
+        return;
+    };
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if candidate.receiver_mode == arcana_hir::HirParamMode::Take {
+        note_take(subject);
+    }
+    for arg in args {
+        let arcana_hir::HirPhraseArg::Positional(expr) = arg else {
+            continue;
+        };
+        note_take(expr);
     }
 }
 
@@ -3224,31 +3634,21 @@ fn validate_expr_borrow_flow_inner(
         | HirExpr::IntLiteral { .. }
         | HirExpr::FloatLiteral { .. }
         | HirExpr::StrLiteral { .. } => {}
-        HirExpr::Pair { left, right } => {
-            validate_expr_borrow_flow_inner(
-                workspace,
-                resolved_module,
-                type_scope,
-                module_path,
-                scope,
-                left,
-                span,
-                state,
-                false,
-                diagnostics,
-            );
-            validate_expr_borrow_flow_inner(
-                workspace,
-                resolved_module,
-                type_scope,
-                module_path,
-                scope,
-                right,
-                span,
-                state,
-                false,
-                diagnostics,
-            );
+        HirExpr::Tuple { items } => {
+            for item in items {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    item,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -3356,6 +3756,154 @@ fn validate_expr_borrow_flow_inner(
             }
         }
         HirExpr::RecordRegion(region) => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                &region.target,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    base,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    payload,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &line.value,
+                    line.span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        payload,
+                        line.span,
+                        state,
+                        false,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        HirExpr::StructRegion(region) => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                &region.target,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    base,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    payload,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &line.value,
+                    line.span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        payload,
+                        line.span,
+                        state,
+                        false,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        HirExpr::UnionRegion(region) => {
             validate_expr_borrow_flow_inner(
                 workspace,
                 resolved_module,
@@ -3622,6 +4170,7 @@ fn validate_expr_borrow_flow_inner(
             args,
             qualifier_kind,
             qualifier,
+            qualifier_type_args,
             attached,
             ..
         } => {
@@ -3685,6 +4234,7 @@ fn validate_expr_borrow_flow_inner(
                 args,
                 *qualifier_kind,
                 qualifier,
+                qualifier_type_args,
                 span,
                 state,
                 diagnostics,
@@ -3991,9 +4541,14 @@ fn collect_expr_local_borrows(
             }
             collect_expr_local_borrows(expr, scope, borrows);
         }
-        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+        HirExpr::Binary { left, right, .. } => {
             collect_expr_local_borrows(left, scope, borrows);
             collect_expr_local_borrows(right, scope, borrows);
+        }
+        HirExpr::Tuple { items } => {
+            for item in items {
+                collect_expr_local_borrows(item, scope, borrows);
+            }
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -4023,6 +4578,44 @@ fn collect_expr_local_borrows(
             }
         }
         HirExpr::RecordRegion(region) => {
+            collect_expr_local_borrows(&region.target, scope, borrows);
+            if let Some(base) = &region.base {
+                collect_expr_local_borrows(base, scope, borrows);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_local_borrows(payload, scope, borrows);
+            }
+            for line in &region.lines {
+                collect_expr_local_borrows(&line.value, scope, borrows);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_local_borrows(payload, scope, borrows);
+                }
+            }
+        }
+        HirExpr::StructRegion(region) => {
+            collect_expr_local_borrows(&region.target, scope, borrows);
+            if let Some(base) = &region.base {
+                collect_expr_local_borrows(base, scope, borrows);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_local_borrows(payload, scope, borrows);
+            }
+            for line in &region.lines {
+                collect_expr_local_borrows(&line.value, scope, borrows);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_local_borrows(payload, scope, borrows);
+                }
+            }
+        }
+        HirExpr::UnionRegion(region) => {
             collect_expr_local_borrows(&region.target, scope, borrows);
             if let Some(base) = &region.base {
                 collect_expr_local_borrows(base, scope, borrows);
@@ -4190,6 +4783,7 @@ fn note_expr_moves(
             args,
             qualifier_kind,
             qualifier,
+            qualifier_type_args,
             ..
         } => {
             note_qualified_phrase_moves(
@@ -4201,6 +4795,7 @@ fn note_expr_moves(
                 args,
                 *qualifier_kind,
                 qualifier,
+                qualifier_type_args,
                 state,
             );
             note_expr_moves(
@@ -4228,9 +4823,14 @@ fn note_expr_moves(
         HirExpr::Unary { expr, .. } => {
             note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
         }
-        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+        HirExpr::Binary { left, right, .. } => {
             note_expr_moves(workspace, resolved_module, type_scope, scope, left, state);
             note_expr_moves(workspace, resolved_module, type_scope, scope, right, state);
+        }
+        HirExpr::Tuple { items } => {
+            for item in items {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, item, state);
+            }
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -4302,6 +4902,100 @@ fn note_expr_moves(
             }
         }
         HirExpr::RecordRegion(region) => {
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                &region.target,
+                state,
+            );
+            if let Some(base) = &region.base {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, base, state);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    payload,
+                    state,
+                );
+            }
+            for line in &region.lines {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    state,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    note_expr_moves(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        payload,
+                        state,
+                    );
+                }
+            }
+        }
+        HirExpr::StructRegion(region) => {
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                &region.target,
+                state,
+            );
+            if let Some(base) = &region.base {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, base, state);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    payload,
+                    state,
+                );
+            }
+            for line in &region.lines {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    state,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    note_expr_moves(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        payload,
+                        state,
+                    );
+                }
+            }
+        }
+        HirExpr::UnionRegion(region) => {
             note_expr_moves(
                 workspace,
                 resolved_module,
@@ -4511,9 +5205,14 @@ fn collect_returned_local_borrows(
             }
             collect_returned_local_borrows(expr, scope, roots);
         }
-        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+        HirExpr::Binary { left, right, .. } => {
             collect_returned_local_borrows(left, scope, roots);
             collect_returned_local_borrows(right, scope, roots);
+        }
+        HirExpr::Tuple { items } => {
+            for item in items {
+                collect_returned_local_borrows(item, scope, roots);
+            }
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -4543,6 +5242,44 @@ fn collect_returned_local_borrows(
             }
         }
         HirExpr::RecordRegion(region) => {
+            collect_returned_local_borrows(&region.target, scope, roots);
+            if let Some(base) = &region.base {
+                collect_returned_local_borrows(base, scope, roots);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_returned_local_borrows(payload, scope, roots);
+            }
+            for line in &region.lines {
+                collect_returned_local_borrows(&line.value, scope, roots);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_returned_local_borrows(payload, scope, roots);
+                }
+            }
+        }
+        HirExpr::StructRegion(region) => {
+            collect_returned_local_borrows(&region.target, scope, roots);
+            if let Some(base) = &region.base {
+                collect_returned_local_borrows(base, scope, roots);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_returned_local_borrows(payload, scope, roots);
+            }
+            for line in &region.lines {
+                collect_returned_local_borrows(&line.value, scope, roots);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_returned_local_borrows(payload, scope, roots);
+                }
+            }
+        }
+        HirExpr::UnionRegion(region) => {
             collect_returned_local_borrows(&region.target, scope, roots);
             if let Some(base) = &region.base {
                 collect_returned_local_borrows(base, scope, roots);
@@ -4790,11 +5527,93 @@ fn validate_callable_nominal_surface_semantics(
     subject: &HirExpr,
     qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
+    qualifier_type_args: &[HirType],
     args: &[arcana_hir::HirPhraseArg],
     attached: &[arcana_hir::HirHeaderAttachment],
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    fn validate_named_field_constructor_semantics(
+        label: &str,
+        fields: &[HirField],
+        workspace: &HirWorkspaceSummary,
+        resolved_module: &HirResolvedModule,
+        module_path: &Path,
+        type_scope: &TypeScope,
+        scope: &ValueScope,
+        args: &[arcana_hir::HirPhraseArg],
+        attached: &[arcana_hir::HirHeaderAttachment],
+        span: Span,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if !attached.is_empty() {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: format!("{label} does not support attached blocks in v1"),
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for arg in args {
+            let arcana_hir::HirPhraseArg::Named { name, value } = arg else {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!("{label} requires named field arguments in v1"),
+                });
+                return;
+            };
+            let Some(field) = fields.iter().find(|field| field.name == *name) else {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!("{label} has no field `{name}`"),
+                });
+                continue;
+            };
+            if !seen.insert(name.clone()) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!("{label} provided duplicate field `{name}`"),
+                });
+                continue;
+            }
+            if let Some(actual) =
+                infer_expr_value_type(workspace, resolved_module, type_scope, scope, value)
+            {
+                let actual_key = canonical_hir_type_key(workspace, resolved_module, &actual);
+                let expected_key = canonical_hir_type_key(workspace, resolved_module, &field.ty);
+                if actual_key != expected_key {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "{label} field `{name}` expects `{}`, found `{}`",
+                            field.ty.render(),
+                            actual.render()
+                        ),
+                    });
+                }
+            }
+        }
+        for field in fields {
+            if !seen.contains(&field.name) && type_option_payload(&field.ty).is_none() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!("{label} is missing required field `{}`", field.name),
+                });
+            }
+        }
+    }
+
     if validate_builtin_numeric_conversion_semantics(
         workspace,
         resolved_module,
@@ -4822,99 +5641,126 @@ fn validate_callable_nominal_surface_semantics(
         qualifier_kind,
         qualifier,
     ) else {
+        if qualifier != "call" {
+            return;
+        }
+        let Some(kind) =
+            callable_struct_subject_base_kind(workspace, resolved_module, scope, subject)
+        else {
+            return;
+        };
+        match kind {
+            HirSymbolKind::Record => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: "record values are not callable; `:: call` only uses record constructor sugar on record type paths in this phase".to_string(),
+            }),
+            HirSymbolKind::Union => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: "union values are not callable in this phase".to_string(),
+            }),
+            HirSymbolKind::Array => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: "array values are not callable in this phase".to_string(),
+            }),
+            HirSymbolKind::Object => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: "object values are not callable in this phase".to_string(),
+            }),
+            HirSymbolKind::Struct => {
+                if args.iter().any(|arg| matches!(arg, arcana_hir::HirPhraseArg::Named { .. })) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: "callable struct dispatch uses positional packed arguments only in this phase".to_string(),
+                    });
+                    return;
+                }
+                if !qualifier_type_args.is_empty() {
+                    let expected_count = if args.is_empty() { 1 } else { 2 };
+                    if qualifier_type_args.len() != expected_count {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: if args.is_empty() {
+                                "callable zero-arg struct dispatch expects `:: call[Out]`".to_string()
+                            } else {
+                                "callable struct dispatch expects `:: call[Args, Out]`".to_string()
+                            },
+                        });
+                    }
+                }
+                match resolve_callable_struct_candidate(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    subject,
+                    qualifier,
+                    qualifier_type_args,
+                    args,
+                ) {
+                    Err(message) => diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message,
+                    }),
+                    Ok(None) => diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: "struct value call requires exactly one matching callable contract impl in this phase".to_string(),
+                    }),
+                    Ok(Some(_)) => {}
+                }
+            }
+            _ => {}
+        }
         return;
     };
     match &symbol.body {
+        HirSymbolBody::Record { fields } => validate_named_field_constructor_semantics(
+            &format!("record constructor `{}`", symbol.name),
+            fields,
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            args,
+            attached,
+            span,
+            diagnostics,
+        ),
         HirSymbolBody::Union { .. } => diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: span.line,
             column: span.column,
             message: format!("union `{}` is not callable in this phase", symbol.name),
         }),
-        HirSymbolBody::Struct { fields } => {
-            if !attached.is_empty() {
-                diagnostics.push(Diagnostic {
-                    path: module_path.to_path_buf(),
-                    line: span.line,
-                    column: span.column,
-                    message: format!(
-                        "struct constructor `{}` does not support attached blocks in v1",
-                        symbol.name
-                    ),
-                });
-            }
-            let mut seen = BTreeSet::new();
-            for arg in args {
-                let arcana_hir::HirPhraseArg::Named { name, value } = arg else {
-                    diagnostics.push(Diagnostic {
-                        path: module_path.to_path_buf(),
-                        line: span.line,
-                        column: span.column,
-                        message: format!(
-                            "struct constructor `{}` requires named field arguments in v1",
-                            symbol.name
-                        ),
-                    });
-                    return;
-                };
-                let Some(field) = fields.iter().find(|field| field.name == *name) else {
-                    diagnostics.push(Diagnostic {
-                        path: module_path.to_path_buf(),
-                        line: span.line,
-                        column: span.column,
-                        message: format!(
-                            "struct constructor `{}` has no field `{name}`",
-                            symbol.name
-                        ),
-                    });
-                    continue;
-                };
-                if !seen.insert(name.clone()) {
-                    diagnostics.push(Diagnostic {
-                        path: module_path.to_path_buf(),
-                        line: span.line,
-                        column: span.column,
-                        message: format!(
-                            "struct constructor `{}` provided duplicate field `{name}`",
-                            symbol.name
-                        ),
-                    });
-                    continue;
-                }
-                if let Some(actual) =
-                    infer_expr_value_type(workspace, resolved_module, type_scope, scope, value)
-                {
-                    let actual_key = canonical_hir_type_key(workspace, resolved_module, &actual);
-                    let expected_key =
-                        canonical_hir_type_key(workspace, resolved_module, &field.ty);
-                    if actual_key != expected_key {
-                        diagnostics.push(Diagnostic {
-                            path: module_path.to_path_buf(),
-                            line: span.line,
-                            column: span.column,
-                            message: format!(
-                                "struct constructor field `{name}` expects `{}`, found `{}`",
-                                field.ty.render(),
-                                actual.render()
-                            ),
-                        });
-                    }
-                }
-            }
-            for field in fields {
-                if !seen.contains(&field.name) && type_option_payload(&field.ty).is_none() {
-                    diagnostics.push(Diagnostic {
-                        path: module_path.to_path_buf(),
-                        line: span.line,
-                        column: span.column,
-                        message: format!(
-                            "struct constructor `{}` is missing required field `{}`",
-                            symbol.name, field.name
-                        ),
-                    });
-                }
-            }
-        }
+        HirSymbolBody::Struct { fields } => validate_named_field_constructor_semantics(
+            &format!("struct constructor `{}`", symbol.name),
+            fields,
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            args,
+            attached,
+            span,
+            diagnostics,
+        ),
         HirSymbolBody::Array { element_ty, len } => {
             if !attached.is_empty() {
                 diagnostics.push(Diagnostic {
@@ -9516,7 +10362,7 @@ fn collect_deprecated_call_warnings_in_expr(
             warnings,
             diagnostics,
         ),
-        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+        HirExpr::Binary { left, right, .. } => {
             collect_deprecated_call_warnings_in_expr(
                 workspace,
                 resolved_module,
@@ -9541,6 +10387,22 @@ fn collect_deprecated_call_warnings_in_expr(
                 warnings,
                 diagnostics,
             );
+        }
+        HirExpr::Tuple { items } => {
+            for item in items {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    item,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -9653,6 +10515,90 @@ fn collect_deprecated_call_warnings_in_expr(
                     type_scope,
                     scope,
                     &expr,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::StructRegion(region) => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                &region.target,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    base,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::UnionRegion(region) => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                &region.target,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    base,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &line.value,
                     span,
                     policy,
                     warnings,
@@ -10220,6 +11166,8 @@ fn collect_deprecated_call_warnings_in_statements(
             HirStatementKind::Recycle { .. }
             | HirStatementKind::Bind { .. }
             | HirStatementKind::Record(_)
+            | HirStatementKind::Struct(_)
+            | HirStatementKind::Union(_)
             | HirStatementKind::Array(_)
             | HirStatementKind::Construct(_)
             | HirStatementKind::MemorySpec(_)
@@ -11066,7 +12014,7 @@ fn validate_construct_region_semantics(
             line: region.span.line,
             column: region.span.column,
             message: format!(
-                "construct target `{}` must resolve to a record or single-payload enum variant",
+                "construct target `{}` must resolve to a struct or single-payload enum variant",
                 target_path.join(".")
             ),
         });
@@ -11121,7 +12069,7 @@ fn validate_construct_region_semantics(
 
     let mut seen = BTreeSet::new();
     match &target_shape {
-        ConstructTargetShape::Record { fields } => {
+        ConstructTargetShape::Struct { fields } => {
             for line in &region.lines {
                 if !seen.insert(line.name.clone()) {
                     diagnostics.push(Diagnostic {
@@ -11259,91 +12207,97 @@ fn validate_construct_region_semantics(
     }
 }
 
-fn validate_record_region_semantics(
+fn validate_nominal_region_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     type_scope: &TypeScope,
     scope: &ValueScope,
     expected_return_type: Option<&HirType>,
-    region: &arcana_hir::HirRecordRegion,
+    kind: NominalRegionKind,
+    target: &HirExpr,
+    base: Option<&HirExpr>,
+    destination: Option<&arcana_hir::HirConstructDestination>,
+    default_modifier: Option<&arcana_hir::HirHeadedModifier>,
+    lines: &[arcana_hir::HirConstructLine],
+    span: Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let region_kind = region.kind.as_str();
-    if region.default_modifier.is_none() {
+    let region_kind = kind.as_str();
+    if default_modifier.is_none() {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
-            line: region.span.line,
-            column: region.span.column,
+            line: span.line,
+            column: span.column,
             message: format!("{region_kind} requires a default modifier in v1"),
         });
     }
-    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+    let Some(target_path) = flatten_callable_expr_path(target) else {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
-            line: region.span.line,
-            column: region.span.column,
+            line: span.line,
+            column: span.column,
             message: format!("{region_kind} target must be a path-like {region_kind} reference"),
         });
         return;
     };
-    let fields = if let Some(resolved) =
-        lookup_symbol_path(workspace, resolved_module, &target_path)
-    {
-        match (&region.kind, &resolved.symbol.body) {
-            (arcana_hir::HirNominalFieldRegionKind::Record, HirSymbolBody::Record { fields })
-            | (arcana_hir::HirNominalFieldRegionKind::Struct, HirSymbolBody::Struct { fields })
-            | (arcana_hir::HirNominalFieldRegionKind::Union, HirSymbolBody::Union { fields }) => {
-                fields
+    let fields =
+        if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &target_path) {
+            match (kind, &resolved.symbol.body) {
+                (NominalRegionKind::Record, HirSymbolBody::Record { fields })
+                | (NominalRegionKind::Struct, HirSymbolBody::Struct { fields })
+                | (NominalRegionKind::Union, HirSymbolBody::Union { fields }) => fields
                     .iter()
                     .map(|field| (field.name.clone(), field.ty.clone()))
-                    .collect::<BTreeMap<_, _>>()
+                    .collect::<BTreeMap<_, _>>(),
+                _ => {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "{region_kind} target `{}` must resolve to a {region_kind}",
+                            target_path.join(".")
+                        ),
+                    });
+                    return;
+                }
             }
-            _ => {
-                diagnostics.push(Diagnostic {
-                    path: module_path.to_path_buf(),
-                    line: region.span.line,
-                    column: region.span.column,
-                    message: format!(
-                        "{region_kind} target `{}` must resolve to a {region_kind}",
-                        target_path.join(".")
-                    ),
-                });
-                return;
-            }
-        }
-    } else if let Some(fields) =
-        shackle_nominal_region_fields(workspace, resolved_module, &target_path, region.kind)
-    {
-        fields
-    } else {
-        diagnostics.push(Diagnostic {
-            path: module_path.to_path_buf(),
-            line: region.span.line,
-            column: region.span.column,
-            message: format!(
-                "{region_kind} target `{}` must resolve to a {region_kind}",
-                target_path.join(".")
-            ),
-        });
-        return;
-    };
-    if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union)
-        && scope.unsafe_trace.is_none()
-    {
-        push_unsafe_required_diagnostic(
-            module_path,
-            region.span,
-            diagnostics,
-            "union construction",
-        );
+        } else if let Some(fields) =
+            shackle_nominal_region_fields(workspace, resolved_module, &target_path, kind)
+        {
+            fields
+        } else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: format!(
+                    "{region_kind} target `{}` must resolve to a {region_kind}",
+                    target_path.join(".")
+                ),
+            });
+            return;
+        };
+    if matches!(kind, NominalRegionKind::Union) && scope.unsafe_trace.is_none() {
+        push_unsafe_required_diagnostic(module_path, span, diagnostics, "union construction");
     }
-    if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination {
-        let expected_ty = resolve_record_result_type(workspace, resolved_module, &target_path);
+    let result_ty = match kind {
+        NominalRegionKind::Record => {
+            resolve_record_result_type(workspace, resolved_module, &target_path)
+        }
+        NominalRegionKind::Struct => {
+            resolve_struct_result_type(workspace, resolved_module, &target_path)
+        }
+        NominalRegionKind::Union => {
+            resolve_union_result_type(workspace, resolved_module, &target_path)
+        }
+    };
+    if let Some(arcana_hir::HirConstructDestination::Place { target }) = destination {
         let actual_ty =
             infer_assign_target_value_type(workspace, resolved_module, type_scope, scope, target)
                 .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
-        match (expected_ty, actual_ty) {
+        match (result_ty.clone(), actual_ty) {
             (Some(expected_ty), Some(actual_ty))
                 if !hir_types_match_or_numeric_compatible(
                     workspace,
@@ -11354,8 +12308,8 @@ fn validate_record_region_semantics(
             {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
-                    line: region.span.line,
-                    column: region.span.column,
+                    line: span.line,
+                    column: span.column,
                     message: format!(
                         "{region_kind} place target type `{}` does not match {region_kind} result type `{}`",
                         actual_ty.render(),
@@ -11366,55 +12320,79 @@ fn validate_record_region_semantics(
             (Some(_), None) => {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
-                    line: region.span.line,
-                    column: region.span.column,
+                    line: span.line,
+                    column: span.column,
                     message: format!("{region_kind} place target must have a known type in v1"),
                 });
             }
             _ => {}
         }
     }
-    if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+    if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = destination
         && scope.contains(name)
     {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
-            line: region.span.line,
-            column: region.span.column,
+            line: span.line,
+            column: span.column,
             message: format!("{region_kind} deliver binding `{name}` already exists in this scope"),
         });
     }
 
-    if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union) && region.base.is_some()
-    {
+    if matches!(kind, NominalRegionKind::Union) && base.is_some() {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
-            line: region.span.line,
-            column: region.span.column,
+            line: span.line,
+            column: span.column,
             message: "union regions do not support `from <base>` in this phase".to_string(),
         });
     }
-    let base_fields = region
-        .base
-        .as_ref()
-        .and_then(|base| infer_expr_value_type(workspace, resolved_module, type_scope, scope, base))
-        .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty))
-        .and_then(|ty| resolve_record_fields_for_type(workspace, resolved_module, &ty));
+    let base_ty = base
+        .and_then(|expr| infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr))
+        .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
+    let base_fields = match kind {
+        NominalRegionKind::Record => base_ty
+            .as_ref()
+            .and_then(|ty| resolve_record_fields_for_type(workspace, resolved_module, ty)),
+        NominalRegionKind::Struct => {
+            if let (Some(base_ty), Some(target_ty)) = (base_ty.as_ref(), result_ty.as_ref()) {
+                if canonical_hir_type_key(workspace, resolved_module, base_ty)
+                    == canonical_hir_type_key(workspace, resolved_module, target_ty)
+                {
+                    resolve_struct_target_fields(workspace, resolved_module, &target_path)
+                } else {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "struct base must have exact type `{}`; found `{}`",
+                            target_ty.render(),
+                            base_ty.render()
+                        ),
+                    });
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        NominalRegionKind::Union => None,
+    };
 
-    if region.base.is_some()
-        && !matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union)
-        && base_fields.is_none()
-    {
+    if base.is_some() && !matches!(kind, NominalRegionKind::Union) && base_fields.is_none() {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
-            line: region.span.line,
-            column: region.span.column,
-            message: format!("{region_kind} base must have a known {region_kind} type in v1"),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "{region_kind} base must have a known {region_kind} type in this phase"
+            ),
         });
     }
 
     let mut seen = BTreeSet::new();
-    for line in &region.lines {
+    for line in lines {
         if !seen.insert(line.name.clone()) {
             diagnostics.push(Diagnostic {
                 path: module_path.to_path_buf(),
@@ -11439,7 +12417,7 @@ fn validate_record_region_semantics(
             });
             continue;
         };
-        let modifier = line.modifier.as_ref().or(region.default_modifier.as_ref());
+        let modifier = line.modifier.as_ref().or(default_modifier);
         validate_construct_contribution_semantics(
             workspace,
             resolved_module,
@@ -11473,12 +12451,12 @@ fn validate_record_region_semantics(
         }
     }
 
-    if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union) {
+    if matches!(kind, NominalRegionKind::Union) {
         if seen.len() != 1 {
             diagnostics.push(Diagnostic {
                 path: module_path.to_path_buf(),
-                line: region.span.line,
-                column: region.span.column,
+                line: span.line,
+                column: span.column,
                 message: "union regions must initialize exactly one field in this phase"
                     .to_string(),
             });
@@ -11508,8 +12486,8 @@ fn validate_record_region_semantics(
         {
             diagnostics.push(Diagnostic {
                 path: module_path.to_path_buf(),
-                line: region.span.line,
-                column: region.span.column,
+                line: span.line,
+                column: span.column,
                 message: format!(
                     "{region_kind} base field `{field_name}` has incompatible type `{}` for target `{}` field `{}`",
                     base_ty.render(),
@@ -11522,8 +12500,8 @@ fn validate_record_region_semantics(
         if type_option_payload(field_ty).is_none() {
             diagnostics.push(Diagnostic {
                 path: module_path.to_path_buf(),
-                line: region.span.line,
-                column: region.span.column,
+                line: span.line,
+                column: span.column,
                 message: format!(
                     "{region_kind} target `{}` is missing required field `{field_name}`",
                     target_path.join(".")
@@ -11531,6 +12509,90 @@ fn validate_record_region_semantics(
             });
         }
     }
+}
+
+fn validate_record_region_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
+    region: &arcana_hir::HirRecordRegion,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_nominal_region_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        expected_return_type,
+        NominalRegionKind::Record,
+        &region.target,
+        region.base.as_deref(),
+        region.destination.as_ref(),
+        region.default_modifier.as_ref(),
+        &region.lines,
+        region.span,
+        diagnostics,
+    );
+}
+
+fn validate_struct_region_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
+    region: &arcana_hir::HirStructRegion,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_nominal_region_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        expected_return_type,
+        NominalRegionKind::Struct,
+        &region.target,
+        region.base.as_deref(),
+        region.destination.as_ref(),
+        region.default_modifier.as_ref(),
+        &region.lines,
+        region.span,
+        diagnostics,
+    );
+}
+
+fn validate_union_region_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
+    region: &arcana_hir::HirUnionRegion,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_nominal_region_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        expected_return_type,
+        NominalRegionKind::Union,
+        &region.target,
+        region.base.as_deref(),
+        region.destination.as_ref(),
+        region.default_modifier.as_ref(),
+        &region.lines,
+        region.span,
+        diagnostics,
+    );
 }
 
 fn validate_array_region_semantics(
@@ -11989,6 +13051,32 @@ fn validate_module_semantics(
                 message: format!(
                     "cleanup contract lang item `cleanup_contract` must target a trait, found `{}`",
                     symbol_ref.symbol.kind.as_str()
+                ),
+            });
+        } else if is_callable_contract_lang_item(&lang_item.name)
+            && symbol_ref.symbol.kind != HirSymbolKind::Trait
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: lang_item.span.line,
+                column: lang_item.span.column,
+                message: format!(
+                    "callable contract lang item `{}` must target a trait, found `{}`",
+                    lang_item.name,
+                    symbol_ref.symbol.kind.as_str()
+                ),
+            });
+        } else if is_callable_contract_lang_item(&lang_item.name)
+            && let HirSymbolBody::Trait { methods, .. } = &symbol_ref.symbol.body
+            && callable_contract_methods_use_hold_receiver(methods)
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: lang_item.span.line,
+                column: lang_item.span.column,
+                message: format!(
+                    "callable contract lang item `{}` may not use `hold self` in this phase",
+                    lang_item.name
                 ),
             });
         }
@@ -12587,6 +13675,37 @@ fn validate_impl_surface_types(
             "impl trait path",
             diagnostics,
         );
+        if let Some(resolved_trait) =
+            lookup_symbol_path(workspace, resolved_module, &trait_path.path.segments)
+                .map(resolved_symbol_path)
+            && let Some(lang_item) = callable_contract_lang_item_for_trait_path(
+                workspace,
+                resolved_module,
+                &resolved_trait,
+            )
+        {
+            if symbol_kind_for_hir_type_path(workspace, resolved_module, &impl_decl.target_type)
+                != Some(HirSymbolKind::Struct)
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: impl_decl.span.line,
+                    column: impl_decl.span.column,
+                    message: format!(
+                        "callable contract impl `{lang_item}` must target a struct type in this phase"
+                    ),
+                });
+            } else if callable_contract_methods_use_hold_receiver(&impl_decl.methods) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: impl_decl.span.line,
+                    column: impl_decl.span.column,
+                    message: format!(
+                        "callable contract impl `{lang_item}` may not use `hold self` in this phase"
+                    ),
+                });
+            }
+        }
     }
     validate_type_surface(
         workspace,
@@ -12954,7 +14073,7 @@ enum GateShape {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ConstructTargetShape {
-    Record { fields: BTreeMap<String, HirType> },
+    Struct { fields: BTreeMap<String, HirType> },
     Variant { payload: HirType },
 }
 
@@ -13437,21 +14556,18 @@ fn resolve_construct_target_shape(
     resolved_module: &HirResolvedModule,
     path: &[String],
 ) -> Option<ConstructTargetShape> {
-    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
-        match &resolved.symbol.body {
-            HirSymbolBody::Record { fields } | HirSymbolBody::Struct { fields } => {
-                return Some(ConstructTargetShape::Record {
-                    fields: fields
-                        .iter()
-                        .map(|field| (field.name.clone(), field.ty.clone()))
-                        .collect(),
-                });
-            }
-            _ => {}
-        }
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path)
+        && let HirSymbolBody::Struct { fields } = &resolved.symbol.body
+    {
+        return Some(ConstructTargetShape::Struct {
+            fields: fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        });
     }
     if let Some(fields) = shackle_decl_fields(workspace, resolved_module, path) {
-        return Some(ConstructTargetShape::Record { fields });
+        return Some(ConstructTargetShape::Struct { fields });
     }
     let (variant_name, enum_path) = path.split_last()?;
     let resolved = lookup_symbol_path(workspace, resolved_module, enum_path)?;
@@ -13473,9 +14589,47 @@ fn resolve_record_target_fields(
 ) -> Option<BTreeMap<String, HirType>> {
     if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
         let fields = match &resolved.symbol.body {
-            HirSymbolBody::Record { fields }
-            | HirSymbolBody::Struct { fields }
-            | HirSymbolBody::Union { fields } => fields,
+            HirSymbolBody::Record { fields } => fields,
+            _ => return None,
+        };
+        return Some(
+            fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        );
+    }
+    shackle_decl_fields(workspace, resolved_module, path)
+}
+
+fn resolve_struct_target_fields(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
+        let fields = match &resolved.symbol.body {
+            HirSymbolBody::Struct { fields } => fields,
+            _ => return None,
+        };
+        return Some(
+            fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        );
+    }
+    shackle_decl_fields(workspace, resolved_module, path)
+}
+
+fn resolve_union_target_fields(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
+        let fields = match &resolved.symbol.body {
+            HirSymbolBody::Union { fields } => fields,
             _ => return None,
         };
         return Some(
@@ -13513,6 +14667,34 @@ fn resolve_record_result_type(
     path: &[String],
 ) -> Option<HirType> {
     resolve_record_target_fields(workspace, resolved_module, path)?;
+    Some(canonical_type_from_path(
+        workspace,
+        resolved_module,
+        path,
+        Span::default(),
+    ))
+}
+
+fn resolve_struct_result_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_struct_target_fields(workspace, resolved_module, path)?;
+    Some(canonical_type_from_path(
+        workspace,
+        resolved_module,
+        path,
+        Span::default(),
+    ))
+}
+
+fn resolve_union_result_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_union_target_fields(workspace, resolved_module, path)?;
     Some(canonical_type_from_path(
         workspace,
         resolved_module,
@@ -16227,6 +17409,308 @@ fn validate_statement_block_semantics(
                     borrow_state.clear_local(name);
                 }
             }
+            HirStatementKind::Struct(region) => {
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &region.target,
+                    region.span,
+                    diagnostics,
+                );
+                if let Some(base) = &region.base {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        base,
+                        region.span,
+                        diagnostics,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                {
+                    validate_assign_target_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        target,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_assign_target_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        target,
+                        region.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                }
+                if let Some(modifier) = &region.default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`struct -return` payload",
+                        diagnostics,
+                    );
+                }
+                for line in &region.lines {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        &line.value,
+                        line.span,
+                        diagnostics,
+                    );
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`struct -return` payload",
+                            diagnostics,
+                        );
+                    }
+                }
+                validate_struct_region_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    expected_return_type,
+                    region,
+                    diagnostics,
+                );
+                if let Some(arcana_hir::HirConstructDestination::Deliver { name }) =
+                    &region.destination
+                {
+                    let delivered_ty =
+                        flatten_callable_expr_path(&region.target).and_then(|path| {
+                            resolve_struct_result_type(workspace, resolved_module, &path)
+                        });
+                    let ownership = delivered_ty
+                        .as_ref()
+                        .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                        .unwrap_or_default();
+                    borrow_state.clear_local(name);
+                    scope.insert_typed(name, false, ownership, delivered_ty);
+                    activate_current_cleanup_binding(
+                        workspace,
+                        resolved_module,
+                        borrow_state,
+                        scope,
+                        current_block_cleanup_policy,
+                        name,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                    && let Some(name) = assign_target_root_local(target, scope)
+                {
+                    borrow_state.clear_local(name);
+                }
+            }
+            HirStatementKind::Union(region) => {
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &region.target,
+                    region.span,
+                    diagnostics,
+                );
+                if let Some(base) = &region.base {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        base,
+                        region.span,
+                        diagnostics,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                {
+                    validate_assign_target_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        target,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_assign_target_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        target,
+                        region.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                }
+                if let Some(modifier) = &region.default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`union -return` payload",
+                        diagnostics,
+                    );
+                }
+                for line in &region.lines {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        &line.value,
+                        line.span,
+                        diagnostics,
+                    );
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`union -return` payload",
+                            diagnostics,
+                        );
+                    }
+                }
+                validate_union_region_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    expected_return_type,
+                    region,
+                    diagnostics,
+                );
+                if let Some(arcana_hir::HirConstructDestination::Deliver { name }) =
+                    &region.destination
+                {
+                    let delivered_ty =
+                        flatten_callable_expr_path(&region.target).and_then(|path| {
+                            resolve_union_result_type(workspace, resolved_module, &path)
+                        });
+                    let ownership = delivered_ty
+                        .as_ref()
+                        .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                        .unwrap_or_default();
+                    borrow_state.clear_local(name);
+                    scope.insert_typed(name, false, ownership, delivered_ty);
+                    activate_current_cleanup_binding(
+                        workspace,
+                        resolved_module,
+                        borrow_state,
+                        scope,
+                        current_block_cleanup_policy,
+                        name,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                    && let Some(name) = assign_target_root_local(target, scope)
+                {
+                    borrow_state.clear_local(name);
+                }
+            }
             HirStatementKind::Array(region) => {
                 let mut region_scope = scope.clone();
                 region_scope.headed_region_depth += 1;
@@ -16818,27 +18302,19 @@ fn validate_expr_semantics(
         | HirExpr::IntLiteral { .. }
         | HirExpr::FloatLiteral { .. }
         | HirExpr::StrLiteral { .. } => {}
-        HirExpr::Pair { left, right } => {
-            validate_expr_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                type_scope,
-                scope,
-                left,
-                span,
-                diagnostics,
-            );
-            validate_expr_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                type_scope,
-                scope,
-                right,
-                span,
-                diagnostics,
-            );
+        HirExpr::Tuple { items } => {
+            for item in items {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    item,
+                    span,
+                    diagnostics,
+                );
+            }
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -17106,6 +18582,246 @@ fn validate_expr_semantics(
                 }
             }
             validate_record_region_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                scope.enclosing_return_type.as_ref(),
+                region,
+                diagnostics,
+            );
+        }
+        HirExpr::StructRegion(region) => {
+            if scope.headed_region_depth > 0 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "headed regions cannot nest inside another headed region in v1"
+                        .to_string(),
+                });
+            }
+            let mut region_scope = scope.clone();
+            region_scope.headed_region_depth += 1;
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                &region.target,
+                span,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    base,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    target,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    payload,
+                    span,
+                    diagnostics,
+                );
+                validate_return_modifier_payload_type(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    modifier,
+                    scope.enclosing_return_type.as_ref(),
+                    "`struct -return` payload",
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &line.value,
+                    line.span,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        line.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        scope.enclosing_return_type.as_ref(),
+                        "`struct -return` payload",
+                        diagnostics,
+                    );
+                }
+            }
+            validate_struct_region_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                scope.enclosing_return_type.as_ref(),
+                region,
+                diagnostics,
+            );
+        }
+        HirExpr::UnionRegion(region) => {
+            if scope.headed_region_depth > 0 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "headed regions cannot nest inside another headed region in v1"
+                        .to_string(),
+                });
+            }
+            let mut region_scope = scope.clone();
+            region_scope.headed_region_depth += 1;
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                &region.target,
+                span,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    base,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    target,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    payload,
+                    span,
+                    diagnostics,
+                );
+                validate_return_modifier_payload_type(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    modifier,
+                    scope.enclosing_return_type.as_ref(),
+                    "`union -return` payload",
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &line.value,
+                    line.span,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        line.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        scope.enclosing_return_type.as_ref(),
+                        "`union -return` payload",
+                        diagnostics,
+                    );
+                }
+            }
+            validate_union_region_semantics(
                 workspace,
                 resolved_module,
                 module_path,
@@ -17489,6 +19205,7 @@ fn validate_expr_semantics(
                 subject,
                 *qualifier_kind,
                 qualifier,
+                qualifier_type_args,
                 args,
                 attached,
                 span,
@@ -17828,14 +19545,14 @@ fn validate_expr_semantics(
             if let HirExpr::MemberAccess { member, .. } = member_expr
                 && is_tuple_projection_member(member)
                 && let Some(actual) = infer_expr_type(expr)
-                && actual != ExprTypeClass::Pair
+                && actual != ExprTypeClass::Tuple
             {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
                     diagnostics,
                     format!(
-                        "tuple field access `.{member}` requires a pair value, found {}",
+                        "tuple field access `.{member}` requires a tuple value, found {}",
                         actual.label()
                     ),
                 );
@@ -18539,13 +20256,13 @@ fn collect_typed_binding_pattern_entries(
             };
             let HirTypeKind::Tuple(items) = &ty.kind else {
                 return Err(format!(
-                    "tuple destructuring requires a pair value, found {}",
+                    "tuple destructuring requires a 2-element tuple value, found {}",
                     ty.render()
                 ));
             };
             let [left_ty, right_ty] = items.as_slice() else {
                 return Err(format!(
-                    "tuple destructuring requires a pair value, found {}",
+                    "tuple destructuring requires a 2-element tuple value, found {}",
                     ty.render()
                 ));
             };
@@ -18867,11 +20584,11 @@ mod tests {
         for (fixture, expected) in [
             (
                 "tuple_field_out_of_range.arc",
-                "tuple field access only supports `.0` and `.1` in v1",
+                "tuple field access only supports `.0`, `.1`, and `.2` in this phase",
             ),
             (
                 "tuple_triple_type.arc",
-                "tuple types must have exactly 2 elements in v1",
+                "tuple types must have exactly 2 or 3 elements in this phase",
             ),
             (
                 "tuple_field_assignment.arc",
@@ -22233,7 +23950,7 @@ mod tests {
 
         let err = check_path(&root).expect_err("tuple projection on non-pair should fail");
         assert!(
-            err.contains("tuple field access `.0` requires a pair value, found Str"),
+            err.contains("tuple field access `.0` requires a tuple value, found Str"),
             "{err}"
         );
 
@@ -23440,7 +25157,7 @@ mod tests {
 
         let err = check_path(&root).expect_err("duplicate opaque family binding should fail");
         assert!(
-            err.contains("opaque family lang item `task_handle` is declared more than once"),
+            err.contains("lang item `task_handle` is declared more than once"),
             "{err}"
         );
 
@@ -23953,7 +25670,7 @@ mod tests {
         for (source, expected) in [
             (
                 concat!(
-                    "record Widget:\n",
+                    "struct Widget:\n",
                     "    value: Int\n",
                     "    maybe: Option[Int]\n",
                     "fn main() -> Int:\n",
@@ -23962,6 +25679,17 @@ mod tests {
                     "    return 0\n",
                 ),
                 "missing required field `value`",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let built = construct yield Widget -return 0\n",
+                    "        value = 1\n",
+                    "    return 0\n",
+                ),
+                "construct target `Widget` must resolve to a struct or single-payload enum variant",
             ),
             (
                 concat!(
@@ -23991,7 +25719,7 @@ mod tests {
                     "        value = 1\n",
                     "    return 0\n",
                 ),
-                "record base must have a known record type in v1",
+                "record base must have a known record type in this phase",
             ),
             (
                 concat!(
@@ -24127,9 +25855,9 @@ mod tests {
             ),
             (
                 concat!(
-                    "record Widget:\n",
+                    "struct Widget:\n",
                     "    value: Int\n",
-                    "record Other:\n",
+                    "struct Other:\n",
                     "    value: Int\n",
                     "fn main() -> Int:\n",
                     "    let target = Other :: value = 0 :: call\n",
@@ -24155,7 +25883,7 @@ mod tests {
             ),
             (
                 concat!(
-                    "record Widget:\n",
+                    "struct Widget:\n",
                     "    value: Int\n",
                     "fn main() -> Int:\n",
                     "    let built = construct yield Widget -break\n",
@@ -24166,7 +25894,7 @@ mod tests {
             ),
             (
                 concat!(
-                    "record Widget:\n",
+                    "struct Widget:\n",
                     "    value: Int\n",
                     "fn main() -> Int:\n",
                     "    let built = construct yield Widget -return 0\n",
@@ -24177,7 +25905,7 @@ mod tests {
             ),
             (
                 concat!(
-                    "record Widget:\n",
+                    "struct Widget:\n",
                     "    value: Int\n",
                     "enum Option[T]:\n",
                     "    Some(T)\n",
@@ -24274,7 +26002,7 @@ mod tests {
             ),
             (
                 concat!(
-                    "record Widget:\n",
+                    "struct Widget:\n",
                     "    value: Int\n",
                     "fn main() -> Int:\n",
                     "    let built = construct yield Widget -return \"x\"\n",
@@ -24318,7 +26046,7 @@ mod tests {
                 (
                     "src/shelf.arc",
                     concat!(
-                        "record Widget:\n",
+                        "struct Widget:\n",
                         "    value: Int\n",
                         "enum Option[T]:\n",
                         "    Some(T)\n",
@@ -24360,16 +26088,12 @@ mod tests {
                         "    Some(T)\n",
                         "    None\n",
                         "fn main() -> Int:\n",
-                        "    let base = construct yield Widget -return 0\n",
-                        "        value = 1\n",
-                        "        maybe = Option.None[Int] :: :: call\n",
+                        "    let base = Widget :: value = 1, maybe = Option.None[Int] :: :: call :: call\n",
                         "    let built = record yield Widget from base -return 0\n",
                         "        value = 2\n",
                         "    record deliver Widget from built -> mirrored -return 0\n",
                         "        maybe = Option.Some[Int] :: 9 :: call\n",
-                        "    let mut placed = construct yield Widget -return 0\n",
-                        "        value = 0\n",
-                        "        maybe = Option.None[Int] :: :: call\n",
+                        "    let mut placed = Widget :: value = 0, maybe = Option.None[Int] :: :: call :: call\n",
                         "    record place Widget from mirrored -> placed -return 0\n",
                         "        value = mirrored.value\n",
                         "    return placed.value\n",
@@ -24379,6 +26103,41 @@ mod tests {
             ],
         );
         check_path(&root).expect("record headed regions should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_struct_headed_regions_with_base_copy() {
+        let root = make_temp_package(
+            "struct_headed_region_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "struct Widget:\n",
+                        "    value: Int\n",
+                        "    maybe: Option[Int]\n",
+                        "enum Option[T]:\n",
+                        "    Some(T)\n",
+                        "    None\n",
+                        "fn main() -> Int:\n",
+                        "    let base = Widget :: value = 1, maybe = Option.None[Int] :: :: call :: call\n",
+                        "    let built = struct yield Widget from base -return 0\n",
+                        "        value = 2\n",
+                        "    struct deliver Widget from built -> mirrored -return 0\n",
+                        "        maybe = Option.Some[Int] :: 9 :: call\n",
+                        "    let mut placed = Widget :: value = 0, maybe = Option.None[Int] :: :: call :: call\n",
+                        "    struct place Widget from mirrored -> placed -return 0\n",
+                        "        value = mirrored.value\n",
+                        "    return placed.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        check_path(&root).expect("struct headed regions should check");
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
@@ -25209,6 +26968,211 @@ mod tests {
         let err = check_path(&root).expect_err("bitfield base should fail");
         assert!(
             err.contains("must use a fixed-width integer builtin base type"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_callable_struct_contracts() {
+        let root = make_temp_package(
+            "callable_structs_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "trait CallableRead[Args, Out]:\n",
+                        "    fn call(read self: Self, take args: Args) -> Out\n",
+                        "trait CallableEdit[Args, Out]:\n",
+                        "    fn call(edit self: Self, take args: Args) -> Out\n",
+                        "lang call_contract_read = CallableRead\n",
+                        "lang call_contract_edit = CallableEdit\n",
+                        "struct Sum3:\n",
+                        "    seed: Int\n",
+                        "struct Counter:\n",
+                        "    value: Int\n",
+                        "impl CallableRead[(Int, Int, Int), Int] for Sum3:\n",
+                        "    fn call(read self: Sum3, take args: (Int, Int, Int)) -> Int:\n",
+                        "        return self.seed + args.0 + args.1 + args.2\n",
+                        "impl CallableEdit[Int, Int] for Counter:\n",
+                        "    fn call(edit self: Counter, take args: Int) -> Int:\n",
+                        "        self.value += args\n",
+                        "        return self.value\n",
+                        "fn main() -> Int:\n",
+                        "    let sum3 = Sum3 :: seed = 1 :: call\n",
+                        "    let total = sum3 :: 2, 3, 4 :: call[(Int, Int, Int), Int]\n",
+                        "    let mut counter = Counter :: value = 5 :: call\n",
+                        "    let next = counter :: 7 :: call[Int, Int]\n",
+                        "    return total + next + counter.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("callable struct package should check");
+        assert_eq!(summary.package_count, 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_zero_arg_record_and_struct_constructors() {
+        let root = make_temp_package(
+            "zero_arg_nominal_constructors",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "record Marker:\n",
+                        "struct MaybeBox:\n",
+                        "    value: Option[Int]\n",
+                        "enum Option[T]:\n",
+                        "    Some(T)\n",
+                        "    None\n",
+                        "fn main() -> Int:\n",
+                        "    let marker = Marker :: :: call\n",
+                        "    let maybe = MaybeBox :: :: call\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("zero-arg nominal constructors should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_record_value_calls() {
+        let root = make_temp_package(
+            "record_value_call_invalid",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "record Box:\n",
+                        "    value: Int\n",
+                        "fn main() -> Int:\n",
+                        "    let box = Box :: value = 1 :: call\n",
+                        "    return box :: 1 :: call\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("record value call should fail");
+        assert!(err.contains("record values are not callable"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_callable_contract_impls_on_record_types() {
+        let root = make_temp_package(
+            "callable_record_impl_invalid",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "trait CallableRead[Args, Out]:\n",
+                        "    fn call(read self: Self, take args: Args) -> Out\n",
+                        "lang call_contract_read = CallableRead\n",
+                        "record Box:\n",
+                        "    value: Int\n",
+                        "impl CallableRead[Int, Int] for Box:\n",
+                        "    fn call(read self: Box, take args: Int) -> Int:\n",
+                        "        return self.value + args\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("record callable contract impl should fail");
+        assert!(
+            err.contains("callable contract impl `call_contract_read` must target a struct type"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_callable_contract_lang_items_with_hold_self() {
+        let root = make_temp_package(
+            "callable_contract_hold_lang_item_invalid",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "trait CallableRead[Args, Out]:\n",
+                        "    fn call(hold self: Self, take args: Args) -> Out\n",
+                        "lang call_contract_read = CallableRead\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("hold-self callable contract should fail");
+        assert!(
+            err.contains(
+                "callable contract lang item `call_contract_read` may not use `hold self`"
+            ),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_callable_contract_impls_with_hold_self() {
+        let root = make_temp_package(
+            "callable_contract_hold_impl_invalid",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "trait CallableRead[Args, Out]:\n",
+                        "    fn call(read self: Self, take args: Args) -> Out\n",
+                        "lang call_contract_read = CallableRead\n",
+                        "struct Box:\n",
+                        "    value: Int\n",
+                        "impl CallableRead[Int, Int] for Box:\n",
+                        "    fn call(hold self: Box, take args: Int) -> Int:\n",
+                        "        return self.value + args\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("hold-self callable contract impl should fail");
+        assert!(
+            err.contains("callable contract impl `call_contract_read` may not use `hold self`"),
             "{err}"
         );
 

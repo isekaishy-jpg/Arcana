@@ -22,7 +22,7 @@ This scope extracts the current rewrite-era contract for typed opaque handles an
 ## Rewrite Guidance
 
 - The concrete ABI/representation of handles is not frozen here.
-- The binding-owned typed-family boundary, ownership rules, validity rules, and diagnostics are frozen enough for pre-selfhost runtime/backend work.
+- The typed-family boundary, ownership rules, validity rules, and diagnostics are frozen enough for pre-selfhost runtime/backend work.
 - Runtime/backend work must not replace this with an erased catch-all resource carrier.
 
 ## Relationship To Host/App Scopes

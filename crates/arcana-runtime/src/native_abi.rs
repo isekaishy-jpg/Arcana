@@ -206,10 +206,10 @@ fn runtime_value_from_abi(value: RuntimeAbiValue) -> RuntimeValue {
         RuntimeAbiValue::Bool(value) => RuntimeValue::Bool(value),
         RuntimeAbiValue::Str(value) => RuntimeValue::Str(value),
         RuntimeAbiValue::Bytes(bytes) => RuntimeValue::Bytes(bytes),
-        RuntimeAbiValue::Pair(left, right) => RuntimeValue::Pair(
-            Box::new(runtime_value_from_abi(*left)),
-            Box::new(runtime_value_from_abi(*right)),
-        ),
+        RuntimeAbiValue::Pair(left, right) => RuntimeValue::Tuple(vec![
+            runtime_value_from_abi(*left),
+            runtime_value_from_abi(*right),
+        ]),
         RuntimeAbiValue::Unit => RuntimeValue::Unit,
     }
 }
@@ -264,6 +264,20 @@ fn abi_value_from_runtime(value: RuntimeValue) -> Result<RuntimeAbiValue, String
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RuntimeValue::Tuple(values) if values.len() == 2 => Ok(RuntimeAbiValue::Pair(
+            Box::new(abi_value_from_runtime(
+                values
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "runtime abi missing tuple element `.0`".to_string())?,
+            )?),
+            Box::new(abi_value_from_runtime(
+                values
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| "runtime abi missing tuple element `.1`".to_string())?,
+            )?),
         )),
         RuntimeValue::Pair(left, right) => Ok(RuntimeAbiValue::Pair(
             Box::new(abi_value_from_runtime(*left)?),

@@ -46,10 +46,13 @@ use arcana_ir::{
     ExecNamedBindingId as ParsedNamedBindingId, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
     ExecProjectionFamily as ParsedProjectionFamily, ExecRecordRegion as ParsedRecordRegion,
-    ExecRecycleLineKind as ParsedRecycleLineKind, ExecStmt as ParsedStmt,
-    ExecStructBitfieldFieldLayout, ExecStructBitfieldLayout, ExecUnaryOp as ParsedUnaryOp,
-    IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row, parse_routine_type_text,
-    parse_struct_bitfield_layout_row, validate_runtime_main_entry_contract,
+    ExecRecycleLineKind as ParsedRecycleLineKind,
+    ExecResolvedSubjectKind as ParsedResolvedSubjectKind, ExecStmt as ParsedStmt,
+    ExecStructBitfieldFieldLayout, ExecStructBitfieldLayout,
+    ExecStructRegion as ParsedStructRegion, ExecUnaryOp as ParsedUnaryOp,
+    ExecUnionRegion as ParsedUnionRegion, IrRoutineType, IrRoutineTypeKind,
+    parse_memory_spec_surface_row, parse_routine_type_text, parse_struct_bitfield_layout_row,
+    validate_runtime_main_entry_contract,
 };
 use arcana_syntax::{
     MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
@@ -1986,6 +1989,8 @@ fn validate_runtime_cleanup_footer_handlers_in_statements(
             | ParsedStmt::Recycle { .. }
             | ParsedStmt::Bind { .. }
             | ParsedStmt::Record(_)
+            | ParsedStmt::Struct(_)
+            | ParsedStmt::Union(_)
             | ParsedStmt::Array(_)
             | ParsedStmt::Construct(_)
             | ParsedStmt::MemorySpec(_) => {}
@@ -2185,6 +2190,15 @@ fn runtime_nominal_type_name(type_name: &str) -> String {
         .unwrap_or(type_name)
         .trim()
         .to_string()
+}
+
+fn runtime_nominal_type_matches(expected: &str, actual: &str) -> bool {
+    let expected = runtime_nominal_type_name(expected);
+    let actual = runtime_nominal_type_name(actual);
+    if expected == actual {
+        return true;
+    }
+    expected.ends_with(&format!(".{actual}")) || actual.ends_with(&format!(".{expected}"))
 }
 
 fn runtime_bitfield_storage_key(storage_index: u16) -> String {
@@ -2644,6 +2658,14 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        RuntimeValue::Tuple(values) => format!(
+            "({})",
+            values
+                .iter()
+                .map(runtime_value_to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         RuntimeValue::Pair(left, right) => format!(
             "({}, {})",
             runtime_value_to_string(left),
@@ -2888,7 +2910,9 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
         RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(handle)) => {
             format!("<Lazy:{}>", handle.0)
         }
-        RuntimeValue::Record { name, fields } => format!(
+        RuntimeValue::Record { name, fields }
+        | RuntimeValue::Struct { name, fields }
+        | RuntimeValue::Union { name, fields } => format!(
             "{}{{{}}}",
             name,
             fields
@@ -4269,11 +4293,49 @@ fn runtime_local_value_ref<'a>(
         .map(|value| ("<captured>", value, false, false, false))
 }
 
+fn runtime_tuple_member_index(member: &str) -> Option<usize> {
+    match member {
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        _ => None,
+    }
+}
+
+fn runtime_tuple_member_ref<'a>(
+    values: &'a [RuntimeValue],
+    member: &str,
+    label: &str,
+) -> Result<Option<&'a RuntimeValue>, String> {
+    let Some(index) = runtime_tuple_member_index(member) else {
+        return Err(format!("{label} has no member `.{member}`"));
+    };
+    values
+        .get(index)
+        .map(Some)
+        .ok_or_else(|| format!("{label} has no member `.{member}`"))
+}
+
+fn runtime_tuple_member_value(
+    values: Vec<RuntimeValue>,
+    member: &str,
+    label: &str,
+) -> Result<RuntimeValue, String> {
+    let Some(index) = runtime_tuple_member_index(member) else {
+        return Err(format!("{label} has no member `.{member}`"));
+    };
+    values
+        .get(index)
+        .cloned()
+        .ok_or_else(|| format!("{label} has no member `.{member}`"))
+}
+
 fn runtime_member_value_ref<'a>(
     value: &'a RuntimeValue,
     member: &str,
 ) -> Result<Option<&'a RuntimeValue>, String> {
     match value {
+        RuntimeValue::Tuple(values) => runtime_tuple_member_ref(values, member, "tuple"),
         RuntimeValue::Pair(left, right) => match member {
             "0" => Ok(Some(left.as_ref())),
             "1" => Ok(Some(right.as_ref())),
@@ -4283,6 +4345,14 @@ fn runtime_member_value_ref<'a>(
             .get(member)
             .map(Some)
             .ok_or_else(|| format!("record `{name}` has no field `.{member}`")),
+        RuntimeValue::Struct { name, fields } => fields
+            .get(member)
+            .map(Some)
+            .ok_or_else(|| format!("struct `{name}` has no field `.{member}`")),
+        RuntimeValue::Union { name, fields } => fields
+            .get(member)
+            .map(Some)
+            .ok_or_else(|| format!("union `{name}` has no field `.{member}`")),
         RuntimeValue::Variant { .. } | RuntimeValue::OwnerHandle(_) => Ok(None),
         other => Err(format!(
             "unsupported runtime member access `.{member}` on `{other:?}`"
@@ -4852,6 +4922,16 @@ fn runtime_value_contains_reference_or_opaque_conflict(
         RuntimeValue::Opaque(opaque) => {
             ignored_opaque != Some(*opaque) && opaque_predicate(opaque, state)
         }
+        RuntimeValue::Tuple(values) => values.iter().any(|value| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        }),
         RuntimeValue::Pair(left, right) => {
             runtime_value_contains_reference_or_opaque_conflict(
                 left,
@@ -4896,7 +4976,9 @@ fn runtime_value_contains_reference_or_opaque_conflict(
                 ignored_opaque,
             )
         }),
-        RuntimeValue::Record { fields, .. } => fields.values().any(|value| {
+        RuntimeValue::Record { fields, .. }
+        | RuntimeValue::Struct { fields, .. }
+        | RuntimeValue::Union { fields, .. } => fields.values().any(|value| {
             runtime_value_contains_reference_or_opaque_conflict(
                 value,
                 state,
@@ -8808,11 +8890,14 @@ fn runtime_execution_arg_for_bound_param(
     if !matches!(
         arg.value,
         RuntimeValue::Str(_)
+            | RuntimeValue::Tuple(_)
             | RuntimeValue::Pair(_, _)
             | RuntimeValue::Array(_)
             | RuntimeValue::List(_)
             | RuntimeValue::Map(_)
             | RuntimeValue::Record { .. }
+            | RuntimeValue::Struct { .. }
+            | RuntimeValue::Union { .. }
             | RuntimeValue::Variant { .. }
     ) {
         return Ok(arg.value.clone());
@@ -8957,7 +9042,9 @@ fn runtime_receiver_type_args(
     state: &RuntimeExecutionState,
 ) -> Vec<String> {
     match receiver {
-        RuntimeValue::Record { name, .. } => parse_runtime_value_type_args(name),
+        RuntimeValue::Record { name, .. }
+        | RuntimeValue::Struct { name, .. }
+        | RuntimeValue::Union { name, .. } => parse_runtime_value_type_args(name),
         RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)) => state
             .channels
             .get(handle)
@@ -9188,6 +9275,15 @@ fn runtime_value_type_from_state(
                 },
             })
         }),
+        RuntimeValue::Tuple(values) => {
+            let items = values
+                .iter()
+                .map(|value| runtime_value_type_from_state(value, state))
+                .collect::<Option<Vec<_>>>()?;
+            Some(IrRoutineType {
+                kind: IrRoutineTypeKind::Tuple(items),
+            })
+        }
         RuntimeValue::Pair(left, right) => {
             let left = runtime_value_type_from_state(left, state)?;
             let right = runtime_value_type_from_state(right, state)?;
@@ -9252,7 +9348,9 @@ fn runtime_value_type_from_state(
             ),
             _ => unreachable!(),
         }),
-        RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
+        RuntimeValue::Record { name, .. }
+        | RuntimeValue::Struct { name, .. }
+        | RuntimeValue::Union { name, .. } => parse_routine_type_text(name)
             .ok()
             .or_else(|| runtime_simple_type(runtime_type_root_name(name).as_str())),
         RuntimeValue::Variant { name, .. } => {
@@ -9403,6 +9501,7 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         RuntimeValue::ByteBuffer(_) => Some("ByteBuffer".to_string()),
         RuntimeValue::Utf16(_) => Some("Utf16".to_string()),
         RuntimeValue::Utf16Buffer(_) => Some("Utf16Buffer".to_string()),
+        RuntimeValue::Tuple(_) => Some("Tuple".to_string()),
         RuntimeValue::Pair(_, _) => Some("Pair".to_string()),
         RuntimeValue::Array(_) => Some("Array".to_string()),
         RuntimeValue::List(_) => Some("List".to_string()),
@@ -9418,7 +9517,9 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
             | RuntimeOpaqueValue::StrView(_),
         ) => Some("View".to_string()),
         RuntimeValue::Opaque(value) => Some(runtime_type_root_name(opaque_type_name(value))),
-        RuntimeValue::Record { name, .. } => Some(runtime_type_root_name(name)),
+        RuntimeValue::Record { name, .. }
+        | RuntimeValue::Struct { name, .. }
+        | RuntimeValue::Union { name, .. } => Some(runtime_type_root_name(name)),
         RuntimeValue::Variant { name, .. } => {
             Some(runtime_type_root_name(&runtime_variant_enum_name(name)))
         }
@@ -9435,6 +9536,7 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         | RuntimeValue::OwnerHandle(_)
         | RuntimeValue::Ref(_)
         | RuntimeValue::Unit => true,
+        RuntimeValue::Tuple(values) => values.iter().all(runtime_value_is_copy),
         RuntimeValue::Pair(left, right) => {
             runtime_value_is_copy(left) && runtime_value_is_copy(right)
         }
@@ -9457,6 +9559,8 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         | RuntimeValue::List(_)
         | RuntimeValue::Map(_)
         | RuntimeValue::Record { .. }
+        | RuntimeValue::Struct { .. }
+        | RuntimeValue::Union { .. }
         | RuntimeValue::Variant { .. } => false,
         RuntimeValue::Opaque(_) => false,
     }
@@ -9491,6 +9595,9 @@ fn runtime_validate_split_value_with_ring_move(
         RuntimeValue::Ref(_) => Err(format!(
             "{context} cannot capture Ref values across split workers"
         )),
+        RuntimeValue::Tuple(values) => values.iter().try_for_each(|value| {
+            runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
+        }),
         RuntimeValue::Pair(left, right) => {
             runtime_validate_split_value_with_ring_move(left, state, context, allow_ring_move)?;
             runtime_validate_split_value_with_ring_move(right, state, context, allow_ring_move)
@@ -9504,7 +9611,9 @@ fn runtime_validate_split_value_with_ring_move(
             runtime_validate_split_value_with_ring_move(key, state, context, allow_ring_move)?;
             runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
         }),
-        RuntimeValue::Record { fields, .. } => fields.values().try_for_each(|value| {
+        RuntimeValue::Record { fields, .. }
+        | RuntimeValue::Struct { fields, .. }
+        | RuntimeValue::Union { fields, .. } => fields.values().try_for_each(|value| {
             runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
         }),
         RuntimeValue::Variant { payload, .. } => payload.iter().try_for_each(|value| {
@@ -10001,6 +10110,16 @@ fn assign_record_member(
     value: RuntimeValue,
 ) -> Result<RuntimeValue, String> {
     match base {
+        RuntimeValue::Tuple(mut values) => {
+            let Some(index) = runtime_tuple_member_index(member) else {
+                return Err(format!("tuple has no member `.{member}`"));
+            };
+            let Some(slot) = values.get_mut(index) else {
+                return Err(format!("tuple has no member `.{member}`"));
+            };
+            *slot = value;
+            Ok(RuntimeValue::Tuple(values))
+        }
         RuntimeValue::Pair(left, right) => match member {
             "0" => Ok(RuntimeValue::Pair(Box::new(value), right)),
             "1" => Ok(RuntimeValue::Pair(left, Box::new(value))),
@@ -10010,6 +10129,16 @@ fn assign_record_member(
             fields.insert(member.to_string(), value);
             apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)?;
             Ok(RuntimeValue::Record { name, fields })
+        }
+        RuntimeValue::Struct { name, mut fields } => {
+            fields.insert(member.to_string(), value);
+            apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)?;
+            Ok(RuntimeValue::Struct { name, fields })
+        }
+        RuntimeValue::Union { name, mut fields } => {
+            fields.insert(member.to_string(), value);
+            apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)?;
+            Ok(RuntimeValue::Union { name, fields })
         }
         other => Err(format!(
             "unsupported runtime member assignment `.{member}` on `{other:?}`"
@@ -10533,6 +10662,7 @@ fn write_back_bound_args(
 fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, String> {
     match base {
         RuntimeValue::OwnerHandle(owner_key) => Ok(make_owner_object_reference(&owner_key, member)),
+        RuntimeValue::Tuple(values) => runtime_tuple_member_value(values, member, "tuple"),
         RuntimeValue::Pair(left, right) => match member {
             "0" => Ok((*left).clone()),
             "1" => Ok((*right).clone()),
@@ -10542,6 +10672,14 @@ fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, S
             .get(member)
             .cloned()
             .ok_or_else(|| format!("record `{name}` has no field `.{member}`")),
+        RuntimeValue::Struct { name, fields } => fields
+            .get(member)
+            .cloned()
+            .ok_or_else(|| format!("struct `{name}` has no field `.{member}`")),
+        RuntimeValue::Union { name, fields } => fields
+            .get(member)
+            .cloned()
+            .ok_or_else(|| format!("union `{name}` has no field `.{member}`")),
         RuntimeValue::Variant { name, payload } => {
             match (name.as_str(), member, payload.as_slice()) {
                 (name, "is_ok", [_]) if variant_name_matches(name, "Result.Ok") => {
@@ -10636,6 +10774,70 @@ fn read_runtime_value_if_ref(
                 fields: materialized,
             })
         }
+        RuntimeValue::Struct { name, fields } => {
+            let mut materialized = BTreeMap::new();
+            for (key, value) in fields {
+                materialized.insert(
+                    key,
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
+                );
+            }
+            Ok(RuntimeValue::Struct {
+                name,
+                fields: materialized,
+            })
+        }
+        RuntimeValue::Union { name, fields } => {
+            let mut materialized = BTreeMap::new();
+            for (key, value) in fields {
+                materialized.insert(
+                    key,
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
+                );
+            }
+            Ok(RuntimeValue::Union {
+                name,
+                fields: materialized,
+            })
+        }
+        RuntimeValue::Tuple(values) => Ok(RuntimeValue::Tuple(
+            values
+                .into_iter()
+                .map(|value| {
+                    read_runtime_value_if_ref(
+                        value,
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         RuntimeValue::Pair(left, right) => Ok(RuntimeValue::Pair(
             Box::new(read_runtime_value_if_ref(
                 *left,
@@ -11159,9 +11361,7 @@ fn expect_cleanup_outcome(value: RuntimeValue) -> Result<(), String> {
     }
 }
 
-fn try_construct_record_value(
-    callable: &[String],
-    resolved_type_args: &[String],
+fn try_collect_named_constructor_fields(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     plan: &RuntimePackagePlan,
@@ -11172,11 +11372,8 @@ fn try_construct_record_value(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeCoreHost,
-) -> RuntimeEvalResult<Option<RuntimeValue>> {
+) -> RuntimeEvalResult<Option<BTreeMap<String, RuntimeValue>>> {
     if !attached.is_empty() {
-        return Ok(None);
-    }
-    if args.is_empty() {
         return Ok(None);
     }
     let mut fields = BTreeMap::new();
@@ -11185,11 +11382,7 @@ fn try_construct_record_value(
             return Ok(None);
         };
         if fields.contains_key(name) {
-            return Err(format!(
-                "record constructor `{}` provided duplicate field `{name}`",
-                callable.join(".")
-            )
-            .into());
+            return Err(format!("constructor provided duplicate field `{name}`").into());
         }
         fields.insert(
             name.clone(),
@@ -11206,14 +11399,146 @@ fn try_construct_record_value(
             )?,
         );
     }
-    let name = if resolved_type_args.is_empty() {
+    Ok(Some(fields))
+}
+
+fn runtime_nominal_constructor_name(callable: &[String], resolved_type_args: &[String]) -> String {
+    if resolved_type_args.is_empty() {
         callable.join(".")
     } else {
         format!("{}[{}]", callable.join("."), resolved_type_args.join(", "))
+    }
+}
+
+fn try_construct_record_value(
+    callable: &[String],
+    resolved_type_args: &[String],
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    let Some(mut fields) = try_collect_named_constructor_fields(
+        args,
+        attached,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?
+    else {
+        return Ok(None);
     };
+    let name = runtime_nominal_constructor_name(callable, resolved_type_args);
     apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)
         .map_err(RuntimeEvalSignal::from)?;
     Ok(Some(RuntimeValue::Record { name, fields }))
+}
+
+fn try_construct_struct_value(
+    callable: &[String],
+    resolved_type_args: &[String],
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    let Some(mut fields) = try_collect_named_constructor_fields(
+        args,
+        attached,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?
+    else {
+        return Ok(None);
+    };
+    let name = runtime_nominal_constructor_name(callable, resolved_type_args);
+    apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)
+        .map_err(RuntimeEvalSignal::from)?;
+    Ok(Some(RuntimeValue::Struct { name, fields }))
+}
+
+fn try_construct_nominal_value(
+    callable: &[String],
+    resolved_subject_kind: Option<ParsedResolvedSubjectKind>,
+    resolved_type_args: &[String],
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    if args.is_empty() && resolved_subject_kind.is_none() {
+        return Ok(None);
+    }
+    let subject_kind = resolved_subject_kind.unwrap_or(ParsedResolvedSubjectKind::Record);
+    if matches!(
+        subject_kind,
+        ParsedResolvedSubjectKind::Union | ParsedResolvedSubjectKind::Array
+    ) {
+        return Ok(None);
+    }
+    if args.iter().any(|arg| arg.name.is_none()) {
+        return Ok(None);
+    }
+    match subject_kind {
+        ParsedResolvedSubjectKind::Record => try_construct_record_value(
+            callable,
+            resolved_type_args,
+            args,
+            attached,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        ParsedResolvedSubjectKind::Struct => try_construct_struct_value(
+            callable,
+            resolved_type_args,
+            args,
+            attached,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        ParsedResolvedSubjectKind::Union | ParsedResolvedSubjectKind::Array => Ok(None),
+    }
 }
 
 fn looks_like_variant_constructor(callable: &[String]) -> bool {
@@ -12047,6 +12372,7 @@ fn execute_runtime_apply_phrase(
     qualifier_type_args: &[String],
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
+    resolved_subject_kind: Option<ParsedResolvedSubjectKind>,
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
@@ -12093,8 +12419,9 @@ fn execute_runtime_apply_phrase(
         || runtime_arcana_owned_callable_key(&callable).is_some();
     if !has_runtime_routine && !has_runtime_intrinsic {
         // Constructor fallback is only valid when lowering did not identify a routine call.
-        if let Some(record) = try_construct_record_value(
+        if let Some(record) = try_construct_nominal_value(
             &callable,
+            resolved_subject_kind,
             &type_args,
             args,
             attached,
@@ -13866,6 +14193,7 @@ fn eval_spawn_expr(
         qualifier_type_args,
         resolved_callable,
         resolved_routine,
+        resolved_subject_kind: _,
         dynamic_dispatch,
         attached,
     } = expr
@@ -13983,7 +14311,11 @@ fn memory_detail_atom(value: RuntimeValue, context: &str) -> Result<String, Stri
         RuntimeValue::Variant { name, payload } if payload.is_empty() => {
             Ok(name.rsplit('.').next().unwrap_or(&name).to_string())
         }
-        RuntimeValue::Record { name, fields } if fields.is_empty() => {
+        RuntimeValue::Record { name, fields }
+        | RuntimeValue::Struct { name, fields }
+        | RuntimeValue::Union { name, fields }
+            if fields.is_empty() =>
+        {
             Ok(name.rsplit('.').next().unwrap_or(&name).to_string())
         }
         RuntimeValue::OwnerHandle(name) => Ok(name),
@@ -14779,6 +15111,40 @@ fn runtime_construct_contribution_outcome(
     }
 }
 
+fn eval_nominal_region_fields(
+    context: &str,
+    default_modifier: Option<&ParsedHeadedModifier>,
+    lines: &[ParsedConstructLine],
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> RuntimeEvalResult<BTreeMap<String, RuntimeValue>> {
+    let mut fields = BTreeMap::new();
+    for line in lines {
+        if let Some(value) = eval_construct_contribution_value(
+            line,
+            default_modifier,
+            context,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )? {
+            fields.insert(line.name.clone(), value);
+        }
+    }
+    Ok(fields)
+}
+
 fn eval_record_region_value(
     region: &ParsedRecordRegion,
     plan: &RuntimePackagePlan,
@@ -14793,7 +15159,7 @@ fn eval_record_region_value(
     let target_name = runtime_expr_path_name(&region.target)
         .ok_or_else(|| "record target must be a path-like record reference".to_string())?;
     let mut fields = BTreeMap::new();
-    if let Some(base_expr) = &region.base {
+    if let Some(base_expr) = region.base.as_deref() {
         let base_value = eval_expr(
             base_expr,
             plan,
@@ -14806,8 +15172,8 @@ fn eval_record_region_value(
             host,
         )?;
         let RuntimeValue::Record {
+            name: base_name,
             fields: base_fields,
-            ..
         } = base_value
         else {
             return Err("record base must evaluate to a record value"
@@ -14821,12 +15187,48 @@ fn eval_record_region_value(
                 .ok_or_else(|| format!("record base is missing copied field `{field_name}`"))?;
             fields.insert(field_name.clone(), value);
         }
+        if base_name != target_name {
+            // Record copy is semantic, not nominally exact; copied fields already capture the base.
+        }
     }
-    for line in &region.lines {
-        if let Some(value) = eval_construct_contribution_value(
-            line,
-            region.default_modifier.as_ref(),
-            "record",
+    fields.extend(eval_nominal_region_fields(
+        "record",
+        region.default_modifier.as_ref(),
+        &region.lines,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?);
+    apply_runtime_struct_bitfield_layout(plan, &target_name, &mut fields)
+        .map_err(RuntimeEvalSignal::from)?;
+    Ok(RuntimeValue::Record {
+        name: target_name,
+        fields,
+    })
+}
+
+fn eval_struct_region_value(
+    region: &ParsedStructRegion,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let target_name = runtime_expr_path_name(&region.target)
+        .ok_or_else(|| "struct target must be a path-like struct reference".to_string())?;
+    let mut fields = BTreeMap::new();
+    if let Some(base_expr) = region.base.as_deref() {
+        let base_value = eval_expr(
+            base_expr,
             plan,
             current_package_id,
             current_module_id,
@@ -14835,13 +15237,83 @@ fn eval_record_region_value(
             type_bindings,
             state,
             host,
-        )? {
-            fields.insert(line.name.clone(), value);
+        )?;
+        let RuntimeValue::Struct {
+            name: base_name,
+            fields: base_fields,
+        } = base_value
+        else {
+            return Err("struct base must evaluate to a struct value"
+                .to_string()
+                .into());
+        };
+        if !runtime_nominal_type_matches(&target_name, &base_name) {
+            return Err(format!(
+                "struct base must evaluate to `{target_name}`, found `{base_name}`"
+            )
+            .into());
+        }
+        for field_name in &region.copied_fields {
+            let value = base_fields
+                .get(field_name)
+                .cloned()
+                .ok_or_else(|| format!("struct base is missing copied field `{field_name}`"))?;
+            fields.insert(field_name.clone(), value);
         }
     }
+    fields.extend(eval_nominal_region_fields(
+        "struct",
+        region.default_modifier.as_ref(),
+        &region.lines,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?);
     apply_runtime_struct_bitfield_layout(plan, &target_name, &mut fields)
         .map_err(RuntimeEvalSignal::from)?;
-    Ok(RuntimeValue::Record {
+    Ok(RuntimeValue::Struct {
+        name: target_name,
+        fields,
+    })
+}
+
+fn eval_union_region_value(
+    region: &ParsedUnionRegion,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeCoreHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    if region.base.is_some() {
+        return Err("union base is not supported".to_string().into());
+    }
+    let target_name = runtime_expr_path_name(&region.target)
+        .ok_or_else(|| "union target must be a path-like union reference".to_string())?;
+    let mut fields = eval_nominal_region_fields(
+        "union",
+        region.default_modifier.as_ref(),
+        &region.lines,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    apply_runtime_struct_bitfield_layout(plan, &target_name, &mut fields)
+        .map_err(RuntimeEvalSignal::from)?;
+    Ok(RuntimeValue::Union {
         name: target_name,
         fields,
     })

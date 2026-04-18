@@ -116,29 +116,23 @@ pub(super) fn eval_expr(
         }),
         ParsedExpr::Bool(value) => Ok(RuntimeValue::Bool(*value)),
         ParsedExpr::Str(value) => Ok(RuntimeValue::Str(value.clone())),
-        ParsedExpr::Pair { left, right } => Ok(RuntimeValue::Pair(
-            Box::new(eval_expr(
-                left,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?),
-            Box::new(eval_expr(
-                right,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?),
+        ParsedExpr::Tuple { items } => Ok(RuntimeValue::Tuple(
+            items
+                .iter()
+                .map(|item| {
+                    eval_expr(
+                        item,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .collect::<RuntimeEvalResult<Vec<_>>>()?,
         )),
         ParsedExpr::Collection { items } => Ok(RuntimeValue::List(
             items
@@ -203,13 +197,35 @@ pub(super) fn eval_expr(
                     payload,
                 })
             } else {
-                Ok(RuntimeValue::Record {
+                Ok(RuntimeValue::Struct {
                     name: target_name,
                     fields,
                 })
             }
         }
         ParsedExpr::RecordRegion(region) => eval_record_region_value(
+            region,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        ParsedExpr::StructRegion(region) => eval_struct_region_value(
+            region,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        ParsedExpr::UnionRegion(region) => eval_union_region_value(
             region,
             plan,
             current_package_id,
@@ -952,6 +968,7 @@ pub(super) fn eval_expr(
             qualifier_type_args,
             resolved_callable,
             resolved_routine,
+            resolved_subject_kind,
             dynamic_dispatch,
             attached,
         } => match qualifier_kind {
@@ -962,6 +979,7 @@ pub(super) fn eval_expr(
                 qualifier_type_args,
                 resolved_callable.as_deref(),
                 resolved_routine.as_deref(),
+                *resolved_subject_kind,
                 plan,
                 current_package_id,
                 current_module_id,
@@ -1025,6 +1043,7 @@ pub(super) fn eval_expr(
                 &[],
                 resolved_callable.as_deref(),
                 None,
+                None,
                 plan,
                 current_package_id,
                 current_module_id,
@@ -1059,6 +1078,7 @@ pub(super) fn eval_expr(
                     args,
                     attached,
                     &[],
+                    None,
                     None,
                     None,
                     plan,
@@ -1253,6 +1273,7 @@ pub(super) fn eval_expr(
                 init_args,
                 attached,
                 &[],
+                None,
                 None,
                 None,
                 plan,
@@ -2576,6 +2597,100 @@ pub(super) fn execute_statements(
                 }
                 FlowSignal::Next
             }
+            ParsedStmt::Struct(region) => {
+                let value = eval_expr(
+                    &ParsedExpr::StructRegion(Box::new(region.clone())),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                match &region.destination {
+                    Some(ParsedConstructDestination::Deliver { name }) => {
+                        let current_scope_depth = scopes.len().saturating_sub(1);
+                        let current_scope = scopes
+                            .last_mut()
+                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                        insert_runtime_local(
+                            state,
+                            current_scope_depth,
+                            current_scope,
+                            0,
+                            name.clone(),
+                            false,
+                            value,
+                        );
+                    }
+                    Some(ParsedConstructDestination::Place { target }) => {
+                        apply_assign(
+                            target,
+                            ParsedAssignOp::Assign,
+                            value,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?;
+                    }
+                    None => {}
+                }
+                FlowSignal::Next
+            }
+            ParsedStmt::Union(region) => {
+                let value = eval_expr(
+                    &ParsedExpr::UnionRegion(Box::new(region.clone())),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                match &region.destination {
+                    Some(ParsedConstructDestination::Deliver { name }) => {
+                        let current_scope_depth = scopes.len().saturating_sub(1);
+                        let current_scope = scopes
+                            .last_mut()
+                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                        insert_runtime_local(
+                            state,
+                            current_scope_depth,
+                            current_scope,
+                            0,
+                            name.clone(),
+                            false,
+                            value,
+                        );
+                    }
+                    Some(ParsedConstructDestination::Place { target }) => {
+                        apply_assign(
+                            target,
+                            ParsedAssignOp::Assign,
+                            value,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?;
+                    }
+                    None => {}
+                }
+                FlowSignal::Next
+            }
             ParsedStmt::Array(region) => {
                 let value = eval_expr(
                     &ParsedExpr::ArrayRegion(Box::new(region.clone())),
@@ -3324,6 +3439,7 @@ pub fn execute_entrypoint_routine(
         | RuntimeValue::ByteBuffer(_)
         | RuntimeValue::Utf16(_)
         | RuntimeValue::Utf16Buffer(_)
+        | RuntimeValue::Tuple(_)
         | RuntimeValue::Pair(_, _)
         | RuntimeValue::Array(_)
         | RuntimeValue::List(_)
@@ -3333,6 +3449,8 @@ pub fn execute_entrypoint_routine(
         | RuntimeValue::Ref(_)
         | RuntimeValue::Opaque(_)
         | RuntimeValue::Record { .. }
+        | RuntimeValue::Struct { .. }
+        | RuntimeValue::Union { .. }
         | RuntimeValue::Variant { .. } => {
             Err("main must return Int or Unit in the current runtime lane".to_string())
         }
@@ -3490,7 +3608,7 @@ mod raw_binding_tests {
     }
 
     fn rect_value(left: i64, top: i64, flags: i64) -> RuntimeValue {
-        RuntimeValue::Record {
+        RuntimeValue::Struct {
             name: "hostapi.raw.Rect".to_string(),
             fields: BTreeMap::from([
                 ("left".to_string(), RuntimeValue::Int(left)),
@@ -3556,7 +3674,7 @@ mod raw_binding_tests {
         .expect("array output should decode");
         assert_eq!(decoded, words);
 
-        let union = RuntimeValue::Record {
+        let union = RuntimeValue::Union {
             name: "hostapi.raw.ValueUnion".to_string(),
             fields: BTreeMap::from([("as_word".to_string(), RuntimeValue::Int(7))]),
         };
@@ -3578,8 +3696,8 @@ mod raw_binding_tests {
             "union result",
         )
         .expect("union output should decode");
-        let RuntimeValue::Record { fields, .. } = decoded else {
-            panic!("decoded union should remain a record");
+        let RuntimeValue::Union { fields, .. } = decoded else {
+            panic!("decoded union should remain a union");
         };
         assert_eq!(fields.get("as_word"), Some(&RuntimeValue::Int(7)));
 
@@ -3654,7 +3772,7 @@ mod raw_binding_tests {
             &layouts,
             "hostapi",
             "hostapi.raw.ValueUnion",
-            RuntimeValue::Record {
+            RuntimeValue::Union {
                 name: "hostapi.raw.ValueUnion".to_string(),
                 fields: BTreeMap::from([
                     ("as_int".to_string(), RuntimeValue::Int(1)),

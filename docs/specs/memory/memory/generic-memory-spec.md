@@ -26,7 +26,7 @@ This is the canonical generic reference for Arcana memory-system evolution after
 - Attached blocks are statement-context only.
 - Attached blocks support `name = expr` entries and chain lines.
 - Attached entries may carry forewords as header-local metadata.
-- If more than 3 independent inputs are needed, group them into ordinary pair/record data rather than treating phrase arity as a reason to add callable/context objects.
+- If more than 3 independent inputs are needed, group them into ordinary tuple/record data rather than treating phrase arity as a reason to add broader callable transport.
 
 ## Core Model
 

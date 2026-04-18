@@ -23,10 +23,10 @@ use arcana_hir::{
     HirResolvedModule, HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol,
     HirSymbolBody, HirSymbolKind, HirType, HirTypeBindingScope, HirTypeKind, HirTypeSubstitutions,
     HirUnaryOp, HirWhereClause, HirWorkspacePackage, HirWorkspaceSummary,
-    canonicalize_hir_type_in_module, current_workspace_package_for_module, hir_type_matches,
-    impl_target_is_public_from_package, infer_receiver_expr_type,
-    lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lookup_symbol_path,
-    match_name_resolves_to_zero_payload_variant, render_symbol_signature,
+    canonicalize_hir_type_in_module, current_workspace_package_for_module,
+    hir_strip_reference_type, hir_type_matches, impl_target_is_public_from_package,
+    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lookup_shackle_decl_path,
+    lookup_symbol_path, match_name_resolves_to_zero_payload_variant, render_symbol_signature,
     routine_key_for_impl_method, routine_key_for_object_method, routine_key_for_symbol,
 };
 pub use entrypoint::{
@@ -45,7 +45,8 @@ pub use executable::{
     ExecDynamicDispatch, ExecExpr, ExecFloatKind, ExecHeadedModifier, ExecHeaderAttachment,
     ExecMatchArm, ExecMatchPattern, ExecMemoryDetailLine, ExecMemorySpecDecl, ExecNamedBindingId,
     ExecPhraseArg, ExecPhraseQualifierKind, ExecProjectionFamily, ExecRecordRegion,
-    ExecRecycleLine, ExecRecycleLineKind, ExecStmt, ExecUnaryOp,
+    ExecRecycleLine, ExecRecycleLineKind, ExecResolvedSubjectKind, ExecStmt, ExecStructRegion,
+    ExecUnaryOp, ExecUnionRegion,
 };
 pub use routine_signature::{
     IrRoutineParam, IrRoutineProvenance, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
@@ -878,6 +879,112 @@ fn rewrite_stmt_routine_keys(
             }
             Ok(())
         }
+        ExecStmt::Struct(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        ExecStmt::Union(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
         ExecStmt::Array(region) => {
             rewrite_expr_routine_keys(
                 package_display_names,
@@ -1036,7 +1143,7 @@ fn rewrite_expr_routine_keys(
         | ExecExpr::Bool(_)
         | ExecExpr::Str(_)
         | ExecExpr::Path(_) => Ok(()),
-        ExecExpr::Pair { left, right } | ExecExpr::Binary { left, right, .. } => {
+        ExecExpr::Binary { left, right, .. } => {
             rewrite_expr_routine_keys(
                 package_display_names,
                 package_direct_dep_ids,
@@ -1053,6 +1160,19 @@ fn rewrite_expr_routine_keys(
                 current_package_id,
                 right,
             )
+        }
+        ExecExpr::Tuple { items } => {
+            for item in items {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    item,
+                )?;
+            }
+            Ok(())
         }
         ExecExpr::Collection { items } => {
             for item in items {
@@ -1205,6 +1325,88 @@ fn rewrite_expr_routine_keys(
                         payload,
                     )?;
                 }
+            }
+            Ok(())
+        }
+        ExecExpr::StructRegion(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+            }
+            Ok(())
+        }
+        ExecExpr::UnionRegion(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
             }
             Ok(())
         }
@@ -1580,6 +1782,7 @@ struct LowerValueScope {
 struct LowerValueBinding {
     binding_id: u64,
     ty: HirType,
+    mutable: bool,
 }
 
 impl Default for LowerValueScope {
@@ -1606,11 +1809,30 @@ impl LowerValueScope {
     }
 
     fn insert(&mut self, name: impl Into<String>, ty: HirType) -> u64 {
+        self.insert_with_mutability(name, ty, false)
+    }
+
+    fn insert_with_mutability(
+        &mut self,
+        name: impl Into<String>,
+        ty: HirType,
+        mutable: bool,
+    ) -> u64 {
         let binding_id = self.next_binding_id.get();
         self.next_binding_id.set(binding_id + 1);
-        self.locals
-            .insert(name.into(), LowerValueBinding { binding_id, ty });
+        self.locals.insert(
+            name.into(),
+            LowerValueBinding {
+                binding_id,
+                ty,
+                mutable,
+            },
+        );
         binding_id
+    }
+
+    fn is_mutable(&self, name: &str) -> bool {
+        self.locals.get(name).is_some_and(|binding| binding.mutable)
     }
 
     fn fresh_temp_name(&self, prefix: &str) -> String {
@@ -1688,9 +1910,9 @@ fn synthetic_hir_type(name: String) -> HirType {
     }
 }
 
-fn pair_hir_type(left: HirType, right: HirType) -> HirType {
+fn tuple_hir_type(items: Vec<HirType>) -> HirType {
     HirType {
-        kind: HirTypeKind::Tuple(vec![left, right]),
+        kind: HirTypeKind::Tuple(items),
         span: Default::default(),
     }
 }
@@ -2691,7 +2913,10 @@ fn collect_typed_binding_pattern_exec_lets(
 ) -> Result<(), String> {
     match pattern {
         BindingPattern::Name(name) => {
-            let binding_id = scope.value_scope.insert(name.clone(), ty.clone());
+            let binding_id =
+                scope
+                    .value_scope
+                    .insert_with_mutability(name.clone(), ty.clone(), mutable);
             lets.push(ExecStmt::Let {
                 binding_id,
                 mutable,
@@ -2813,7 +3038,18 @@ struct ResolvedMethod<'a> {
 struct ResolvedPhraseTarget {
     path: Vec<String>,
     routine_key: Option<String>,
+    subject_kind: Option<ExecResolvedSubjectKind>,
     dynamic_dispatch: Option<ExecDynamicDispatch>,
+}
+
+fn lower_resolved_subject_kind(kind: HirSymbolKind) -> Option<ExecResolvedSubjectKind> {
+    match kind {
+        HirSymbolKind::Record => Some(ExecResolvedSubjectKind::Record),
+        HirSymbolKind::Struct => Some(ExecResolvedSubjectKind::Struct),
+        HirSymbolKind::Union => Some(ExecResolvedSubjectKind::Union),
+        HirSymbolKind::Array => Some(ExecResolvedSubjectKind::Array),
+        _ => None,
+    }
 }
 
 struct ResolvedOwnerActivation<'a> {
@@ -2885,6 +3121,94 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
         }
     }
     Ok(candidates)
+}
+
+const CALL_CONTRACT_READ0_LANG_ITEM: &str = "call_contract_read0";
+const CALL_CONTRACT_EDIT0_LANG_ITEM: &str = "call_contract_edit0";
+const CALL_CONTRACT_TAKE0_LANG_ITEM: &str = "call_contract_take0";
+const CALL_CONTRACT_READ_LANG_ITEM: &str = "call_contract_read";
+const CALL_CONTRACT_EDIT_LANG_ITEM: &str = "call_contract_edit";
+const CALL_CONTRACT_TAKE_LANG_ITEM: &str = "call_contract_take";
+
+fn callable_contract_lang_item_name(
+    mode: arcana_hir::HirParamMode,
+    zero_arity: bool,
+) -> Option<&'static str> {
+    match (mode, zero_arity) {
+        (arcana_hir::HirParamMode::Read, true) => Some(CALL_CONTRACT_READ0_LANG_ITEM),
+        (arcana_hir::HirParamMode::Edit, true) => Some(CALL_CONTRACT_EDIT0_LANG_ITEM),
+        (arcana_hir::HirParamMode::Take, true) => Some(CALL_CONTRACT_TAKE0_LANG_ITEM),
+        (arcana_hir::HirParamMode::Read, false) => Some(CALL_CONTRACT_READ_LANG_ITEM),
+        (arcana_hir::HirParamMode::Edit, false) => Some(CALL_CONTRACT_EDIT_LANG_ITEM),
+        (arcana_hir::HirParamMode::Take, false) => Some(CALL_CONTRACT_TAKE_LANG_ITEM),
+        (arcana_hir::HirParamMode::Hold, _) => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LowerPlaceMutability {
+    Immutable,
+    Mutable,
+    Unknown,
+}
+
+fn expr_place_mutability_for_scope(
+    expr: &HirExpr,
+    scope: &LowerValueScope,
+) -> Option<LowerPlaceMutability> {
+    match expr {
+        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
+            Some(if scope.is_mutable(&segments[0]) {
+                LowerPlaceMutability::Mutable
+            } else {
+                LowerPlaceMutability::Immutable
+            })
+        }
+        HirExpr::MemberAccess { expr, .. }
+        | HirExpr::Index { expr, .. }
+        | HirExpr::Slice { expr, .. } => expr_place_mutability_for_scope(expr, scope),
+        HirExpr::Unary {
+            op: HirUnaryOp::Deref,
+            ..
+        } => Some(LowerPlaceMutability::Unknown),
+        _ => None,
+    }
+}
+
+fn callable_struct_allows_edit_receiver(
+    subject: &HirExpr,
+    scope: &ResolvedRenderScope<'_>,
+) -> bool {
+    matches!(
+        expr_place_mutability_for_scope(subject, &scope.value_scope),
+        Some(LowerPlaceMutability::Mutable | LowerPlaceMutability::Unknown)
+    )
+}
+
+fn resolve_callable_contract_trait_path_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    lang_item_name: &str,
+) -> Option<Vec<String>> {
+    let mut candidates = Vec::new();
+    for package in scope.workspace.packages.values() {
+        for module in &package.summary.modules {
+            for lang_item in &module.lang_items {
+                if lang_item.name != lang_item_name {
+                    continue;
+                }
+                let symbol_ref =
+                    lookup_symbol_path(scope.workspace, scope.resolved_module, &lang_item.target)?;
+                if symbol_ref.symbol.kind != HirSymbolKind::Trait {
+                    continue;
+                }
+                candidates.push(resolved_symbol_path(symbol_ref));
+            }
+        }
+    }
+    match candidates.as_slice() {
+        [path] => Some(path.clone()),
+        _ => None,
+    }
 }
 
 fn lower_symbol_routine_type(ty: &HirType) -> IrRoutineType {
@@ -3042,7 +3366,7 @@ fn infer_iterable_binding_type(
             if hir_path_matches_any(base, &[&["Map"], &["std", "collections", "map", "Map"]]) =>
         {
             match (args.first(), args.get(1)) {
-                (Some(key), Some(value)) => Some(pair_hir_type(key.clone(), value.clone())),
+                (Some(key), Some(value)) => Some(tuple_hir_type(vec![key.clone(), value.clone()])),
                 _ => None,
             }
         }
@@ -3066,6 +3390,7 @@ fn resolve_qualified_phrase_target_path(
                 ResolvedPhraseTarget {
                     path: resolved_symbol_path(resolved),
                     routine_key: Some(routine_key),
+                    subject_kind: lower_resolved_subject_kind(resolved.symbol.kind),
                     dynamic_dispatch: None,
                 }
             })
@@ -3077,6 +3402,7 @@ fn resolve_qualified_phrase_target_path(
             Some(ResolvedPhraseTarget {
                 path: resolved_symbol_path(resolved),
                 routine_key: Some(routine_key),
+                subject_kind: lower_resolved_subject_kind(resolved.symbol.kind),
                 dynamic_dispatch: None,
             })
         }
@@ -3106,6 +3432,7 @@ fn resolve_bare_method_target(
             return Some(ResolvedPhraseTarget {
                 path,
                 routine_key: Some(resolved.routine_key),
+                subject_kind: None,
                 dynamic_dispatch: None,
             });
         }
@@ -3134,6 +3461,7 @@ fn resolve_bare_method_target(
             Some(ResolvedPhraseTarget {
                 path,
                 routine_key: None,
+                subject_kind: None,
                 dynamic_dispatch: resolved
                     .trait_path
                     .map(|trait_path| ExecDynamicDispatch::TraitMethod { trait_path }),
@@ -3168,9 +3496,15 @@ fn infer_expr_hir_type(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Optio
             .and_then(|path| resolve_construct_result_type_for_scope(scope, &path)),
         HirExpr::RecordRegion(region) => flatten_callable_expr_path(&region.target)
             .and_then(|path| resolve_record_result_type_for_scope(scope, &path)),
-        HirExpr::Pair { left, right } => Some(pair_hir_type(
-            infer_expr_hir_type(scope, left)?,
-            infer_expr_hir_type(scope, right)?,
+        HirExpr::StructRegion(region) => flatten_callable_expr_path(&region.target)
+            .and_then(|path| resolve_struct_result_type_for_scope(scope, &path)),
+        HirExpr::UnionRegion(region) => flatten_callable_expr_path(&region.target)
+            .and_then(|path| resolve_union_result_type_for_scope(scope, &path)),
+        HirExpr::Tuple { items } => Some(tuple_hir_type(
+            items
+                .iter()
+                .map(|item| infer_expr_hir_type(scope, item))
+                .collect::<Option<Vec<_>>>()?,
         )),
         _ => None,
     }
@@ -3190,7 +3524,7 @@ fn infer_headed_payload_binding_type(
 
 #[derive(Clone, Debug)]
 enum ResolvedConstructTargetShape {
-    Record(BTreeMap<String, HirType>),
+    Struct(BTreeMap<String, HirType>),
     Variant(HirType),
 }
 
@@ -3203,6 +3537,37 @@ fn canonicalize_scope_hir_type(scope: &ResolvedRenderScope<'_>, ty: &HirType) ->
         module,
         ty,
     ))
+}
+
+fn canonical_scope_hir_type_key(scope: &ResolvedRenderScope<'_>, ty: &HirType) -> Option<String> {
+    Some(canonicalize_scope_hir_type(scope, ty)?.render())
+}
+
+fn infer_callable_struct_packed_args_type_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    args: &[HirPhraseArg],
+) -> Option<HirType> {
+    if args.is_empty()
+        || args
+            .iter()
+            .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
+        return None;
+    }
+    let item_types = args
+        .iter()
+        .map(|arg| match arg {
+            HirPhraseArg::Positional(expr) => infer_expr_hir_type(scope, expr),
+            HirPhraseArg::Named { .. } => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if item_types.len() == 1 {
+        return item_types.into_iter().next();
+    }
+    Some(HirType {
+        kind: HirTypeKind::Tuple(item_types),
+        span: Default::default(),
+    })
 }
 
 fn type_option_payload_for_construct(ty: &HirType) -> Option<HirType> {
@@ -3288,7 +3653,7 @@ fn resolve_construct_target_shape_for_scope(
     path: &[String],
 ) -> Option<ResolvedConstructTargetShape> {
     if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, path)
-        && let HirSymbolBody::Record { fields } = &resolved.symbol.body
+        && let HirSymbolBody::Struct { fields } = &resolved.symbol.body
     {
         let mut lowered = BTreeMap::new();
         for field in fields {
@@ -3297,10 +3662,10 @@ fn resolve_construct_target_shape_for_scope(
                 canonicalize_scope_hir_type(scope, &field.ty)?,
             );
         }
-        return Some(ResolvedConstructTargetShape::Record(lowered));
+        return Some(ResolvedConstructTargetShape::Struct(lowered));
     }
     if let Some(fields) = shackle_decl_fields_for_scope(scope, path) {
-        return Some(ResolvedConstructTargetShape::Record(fields));
+        return Some(ResolvedConstructTargetShape::Struct(fields));
     }
     let (variant_name, enum_path) = path.split_last()?;
     let resolved = lookup_symbol_path(scope.workspace, scope.resolved_module, enum_path)?;
@@ -3321,9 +3686,7 @@ fn resolve_record_target_fields_for_scope(
 ) -> Option<BTreeMap<String, HirType>> {
     if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, path) {
         let fields = match &resolved.symbol.body {
-            HirSymbolBody::Record { fields }
-            | HirSymbolBody::Struct { fields }
-            | HirSymbolBody::Union { fields } => fields,
+            HirSymbolBody::Record { fields } => fields,
             _ => return None,
         };
         let mut lowered = BTreeMap::new();
@@ -3338,15 +3701,224 @@ fn resolve_record_target_fields_for_scope(
     shackle_decl_fields_for_scope(scope, path)
 }
 
-fn resolve_record_fields_for_hir_type(
+fn resolve_callable_struct_target(
+    scope: &ResolvedRenderScope<'_>,
+    subject: &HirExpr,
+    args: &[HirPhraseArg],
+    qualifier_type_args: &[HirType],
+) -> Option<ResolvedPhraseTarget> {
+    let subject_ty = infer_receiver_expr_type(
+        scope.workspace,
+        scope.resolved_module,
+        &scope.value_scope,
+        subject,
+    )?;
+    let subject_kind = match &hir_strip_reference_type(&subject_ty).kind {
+        HirTypeKind::Path(path) => {
+            lookup_symbol_path(scope.workspace, scope.resolved_module, &path.segments)
+                .map(|resolved| resolved.symbol.kind)
+        }
+        HirTypeKind::Apply { base, .. } => {
+            lookup_symbol_path(scope.workspace, scope.resolved_module, &base.segments)
+                .map(|resolved| resolved.symbol.kind)
+        }
+        _ => None,
+    }?;
+    if subject_kind != HirSymbolKind::Struct {
+        return None;
+    }
+    if args
+        .iter()
+        .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
+        return None;
+    }
+    let packed_args_ty = infer_callable_struct_packed_args_type_for_scope(scope, args);
+    let zero_arity = packed_args_ty.is_none();
+    if !qualifier_type_args.is_empty()
+        && qualifier_type_args.len() != if zero_arity { 1 } else { 2 }
+    {
+        scope.note_error(if zero_arity {
+            "callable zero-arg struct dispatch expects `:: call[Out]`".to_string()
+        } else {
+            "callable struct dispatch expects `:: call[Args, Out]`".to_string()
+        });
+        return None;
+    }
+    let packed_key = packed_args_ty
+        .as_ref()
+        .and_then(|ty| canonical_scope_hir_type_key(scope, ty));
+    let explicit_keys = qualifier_type_args
+        .iter()
+        .map(|ty| canonical_scope_hir_type_key(scope, ty))
+        .collect::<Option<Vec<_>>>()?;
+    let mut allowed_modes = vec![
+        arcana_hir::HirParamMode::Read,
+        arcana_hir::HirParamMode::Take,
+    ];
+    if callable_struct_allows_edit_receiver(subject, scope) {
+        allowed_modes.push(arcana_hir::HirParamMode::Edit);
+    }
+    let trait_paths = allowed_modes
+        .into_iter()
+        .filter_map(|mode| {
+            let lang_item = callable_contract_lang_item_name(mode, zero_arity)?;
+            Some((
+                mode,
+                resolve_callable_contract_trait_path_for_scope(scope, lang_item)?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let candidates = lookup_method_candidates_for_hir_type(
+        scope.workspace,
+        scope.resolved_module,
+        &subject_ty,
+        "call",
+    )
+    .into_iter()
+    .filter(|candidate| {
+        let Some(receiver) = candidate.symbol.params.first() else {
+            return false;
+        };
+        let Some(receiver_mode) = receiver.mode else {
+            return false;
+        };
+        if receiver_mode == arcana_hir::HirParamMode::Hold {
+            return false;
+        }
+        let Some(expected_trait_path) = trait_paths
+            .iter()
+            .find_map(|(mode, path)| (*mode == receiver_mode).then_some(path))
+        else {
+            return false;
+        };
+        if candidate.trait_path.as_ref() != Some(expected_trait_path) {
+            return false;
+        }
+        if zero_arity {
+            if candidate.symbol.params.len() != 1 {
+                return false;
+            }
+        } else {
+            if candidate.symbol.params.len() != 2 {
+                return false;
+            }
+            let Some(packed_param) = candidate.symbol.params.get(1) else {
+                return false;
+            };
+            if packed_param.mode != Some(arcana_hir::HirParamMode::Take) {
+                return false;
+            }
+            let Some(param_key) = canonical_scope_hir_type_key(scope, &packed_param.ty) else {
+                return false;
+            };
+            if Some(param_key) != packed_key {
+                return false;
+            }
+        }
+        let Some(return_type) = candidate.symbol.return_type.as_ref() else {
+            return false;
+        };
+        let Some(return_key) = canonical_scope_hir_type_key(scope, return_type) else {
+            return false;
+        };
+        if !explicit_keys.is_empty() {
+            if zero_arity {
+                if explicit_keys.first() != Some(&return_key) {
+                    return false;
+                }
+            } else if explicit_keys.first() != packed_key.as_ref()
+                || explicit_keys.get(1) != Some(&return_key)
+            {
+                return false;
+            }
+        }
+        true
+    })
+    .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [candidate] => {
+            let mut path = candidate
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(candidate.symbol.name.clone());
+            Some(ResolvedPhraseTarget {
+                path,
+                routine_key: Some(candidate.routine_key.clone()),
+                subject_kind: None,
+                dynamic_dispatch: None,
+            })
+        }
+        [] => None,
+        _ => {
+            scope.note_error(format!(
+                "callable struct dispatch on `{}` is ambiguous across callable contracts",
+                subject_ty.render()
+            ));
+            None
+        }
+    }
+}
+
+fn resolve_struct_target_fields_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, path) {
+        let fields = match &resolved.symbol.body {
+            HirSymbolBody::Struct { fields } => fields,
+            _ => return None,
+        };
+        let mut lowered = BTreeMap::new();
+        for field in fields {
+            lowered.insert(
+                field.name.clone(),
+                canonicalize_scope_hir_type(scope, &field.ty)?,
+            );
+        }
+        return Some(lowered);
+    }
+    shackle_decl_fields_for_scope(scope, path)
+}
+
+fn resolve_union_target_fields_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, path) {
+        let fields = match &resolved.symbol.body {
+            HirSymbolBody::Union { fields } => fields,
+            _ => return None,
+        };
+        let mut lowered = BTreeMap::new();
+        for field in fields {
+            lowered.insert(
+                field.name.clone(),
+                canonicalize_scope_hir_type(scope, &field.ty)?,
+            );
+        }
+        return Some(lowered);
+    }
+    shackle_decl_fields_for_scope(scope, path)
+}
+
+type ResolveNominalTargetFields =
+    for<'a> fn(&ResolvedRenderScope<'a>, &[String]) -> Option<BTreeMap<String, HirType>>;
+type ResolveNominalBaseFields =
+    for<'a> fn(&ResolvedRenderScope<'a>, &HirType) -> Option<BTreeMap<String, HirType>>;
+
+fn resolve_nominal_fields_for_hir_type(
     scope: &ResolvedRenderScope<'_>,
     ty: &HirType,
+    resolve_target_fields: ResolveNominalTargetFields,
 ) -> Option<BTreeMap<String, HirType>> {
     let path = match &ty.kind {
         HirTypeKind::Path(path) | HirTypeKind::Apply { base: path, .. } => &path.segments,
         _ => return None,
     };
-    resolve_record_target_fields_for_scope(scope, path)
+    resolve_target_fields(scope, path)
 }
 
 fn canonical_scope_type_from_path(scope: &ResolvedRenderScope<'_>, path: &[String]) -> HirType {
@@ -3395,17 +3967,37 @@ fn resolve_record_result_type_for_scope(
     Some(canonical_scope_type_from_path(scope, path))
 }
 
-fn collect_record_copied_fields(
+fn resolve_struct_result_type_for_scope(
     scope: &ResolvedRenderScope<'_>,
-    region: &arcana_hir::HirRecordRegion,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_struct_target_fields_for_scope(scope, path)?;
+    Some(canonical_scope_type_from_path(scope, path))
+}
+
+fn resolve_union_result_type_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_union_target_fields_for_scope(scope, path)?;
+    Some(canonical_scope_type_from_path(scope, path))
+}
+
+fn collect_nominal_copied_fields(
+    scope: &ResolvedRenderScope<'_>,
+    target: &HirExpr,
+    base: Option<&HirExpr>,
+    lines: &[arcana_hir::HirConstructLine],
+    resolve_target_fields: ResolveNominalTargetFields,
+    resolve_base_fields: ResolveNominalBaseFields,
 ) -> Vec<String> {
-    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+    let Some(target_path) = flatten_callable_expr_path(target) else {
         return Vec::new();
     };
-    let Some(target_fields) = resolve_record_target_fields_for_scope(scope, &target_path) else {
+    let Some(target_fields) = resolve_target_fields(scope, &target_path) else {
         return Vec::new();
     };
-    let Some(base) = &region.base else {
+    let Some(base) = base else {
         return Vec::new();
     };
     let Some(base_ty) =
@@ -3413,11 +4005,10 @@ fn collect_record_copied_fields(
     else {
         return Vec::new();
     };
-    let Some(base_fields) = resolve_record_fields_for_hir_type(scope, &base_ty) else {
+    let Some(base_fields) = resolve_base_fields(scope, &base_ty) else {
         return Vec::new();
     };
-    let explicit = region
-        .lines
+    let explicit = lines
         .iter()
         .map(|line| line.name.as_str())
         .collect::<BTreeSet<_>>();
@@ -3433,6 +4024,22 @@ fn collect_record_copied_fields(
         .collect()
 }
 
+fn collect_record_copied_fields(
+    scope: &ResolvedRenderScope<'_>,
+    region: &arcana_hir::HirRecordRegion,
+) -> Vec<String> {
+    collect_nominal_copied_fields(
+        scope,
+        &region.target,
+        region.base.as_deref(),
+        &region.lines,
+        resolve_record_target_fields_for_scope,
+        |scope, ty| {
+            resolve_nominal_fields_for_hir_type(scope, ty, resolve_record_target_fields_for_scope)
+        },
+    )
+}
+
 fn infer_construct_contribution_mode(
     scope: &ResolvedRenderScope<'_>,
     region: &arcana_hir::HirConstructRegion,
@@ -3442,7 +4049,7 @@ fn infer_construct_contribution_mode(
         return ExecConstructContributionMode::Direct;
     };
     let Some(expected_ty) = (match resolve_construct_target_shape_for_scope(scope, &target_path) {
-        Some(ResolvedConstructTargetShape::Record(fields)) => fields.get(&line.name).cloned(),
+        Some(ResolvedConstructTargetShape::Struct(fields)) => fields.get(&line.name).cloned(),
         Some(ResolvedConstructTargetShape::Variant(payload)) if line.name == "payload" => {
             Some(payload)
         }
@@ -3472,15 +4079,16 @@ fn infer_construct_contribution_mode(
     ExecConstructContributionMode::Direct
 }
 
-fn infer_record_contribution_mode(
+fn infer_record_region_contribution_mode(
     scope: &ResolvedRenderScope<'_>,
-    region: &arcana_hir::HirRecordRegion,
+    region_target: &HirExpr,
     line: &arcana_hir::HirConstructLine,
+    resolve_target_fields: ResolveNominalTargetFields,
 ) -> ExecConstructContributionMode {
-    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+    let Some(target_path) = flatten_callable_expr_path(region_target) else {
         return ExecConstructContributionMode::Direct;
     };
-    let Some(expected_ty) = resolve_record_target_fields_for_scope(scope, &target_path)
+    let Some(expected_ty) = resolve_target_fields(scope, &target_path)
         .and_then(|fields| fields.get(&line.name).cloned())
     else {
         return ExecConstructContributionMode::Direct;
@@ -3505,6 +4113,19 @@ fn infer_record_contribution_mode(
         return ExecConstructContributionMode::ResultPayload;
     }
     ExecConstructContributionMode::Direct
+}
+
+fn infer_record_contribution_mode(
+    scope: &ResolvedRenderScope<'_>,
+    region: &arcana_hir::HirRecordRegion,
+    line: &arcana_hir::HirConstructLine,
+) -> ExecConstructContributionMode {
+    infer_record_region_contribution_mode(
+        scope,
+        &region.target,
+        line,
+        resolve_record_target_fields_for_scope,
+    )
 }
 
 fn lower_rollup(rollup: &HirCleanupFooter) -> ExecCleanupFooter {
@@ -4446,7 +5067,84 @@ fn lower_construct_region_exec(region: &arcana_hir::HirConstructRegion) -> ExecC
 
 fn lower_record_region_exec(region: &arcana_hir::HirRecordRegion) -> ExecRecordRegion {
     ExecRecordRegion {
-        kind: region.kind.as_str().to_string(),
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr(&region.target)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec(target),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(lower_headed_modifier_exec),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecConstructLine {
+                name: line.name.clone(),
+                value: lower_exec_expr(&line.value),
+                mode: ExecConstructContributionMode::Direct,
+                modifier: line.modifier.as_ref().map(lower_headed_modifier_exec),
+            })
+            .collect(),
+        copied_fields: Vec::new(),
+    }
+}
+
+fn lower_struct_region_exec(region: &arcana_hir::HirStructRegion) -> ExecStructRegion {
+    ExecStructRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr(&region.target)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec(target),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(lower_headed_modifier_exec),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecConstructLine {
+                name: line.name.clone(),
+                value: lower_exec_expr(&line.value),
+                mode: ExecConstructContributionMode::Direct,
+                modifier: line.modifier.as_ref().map(lower_headed_modifier_exec),
+            })
+            .collect(),
+        copied_fields: Vec::new(),
+    }
+}
+
+fn lower_union_region_exec(region: &arcana_hir::HirUnionRegion) -> ExecUnionRegion {
+    ExecUnionRegion {
         completion: region.completion.as_str().to_string(),
         target: Box::new(lower_exec_expr(&region.target)),
         base: region
@@ -4566,7 +5264,6 @@ fn lower_record_region_exec_resolved(
     scope: &ResolvedRenderScope<'_>,
 ) -> ExecRecordRegion {
     ExecRecordRegion {
-        kind: region.kind.as_str().to_string(),
         completion: region.completion.as_str().to_string(),
         target: Box::new(lower_exec_expr_resolved(&region.target, scope)),
         base: region
@@ -4604,6 +5301,132 @@ fn lower_record_region_exec_resolved(
             })
             .collect(),
         copied_fields: collect_record_copied_fields(scope, region),
+    }
+}
+
+fn lower_struct_region_exec_resolved(
+    region: &arcana_hir::HirStructRegion,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecStructRegion {
+    ExecStructRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr_resolved(&region.target, scope)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr_resolved(base, scope))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec_resolved(target, scope),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecConstructLine {
+                name: line.name.clone(),
+                value: lower_exec_expr_resolved(&line.value, scope),
+                mode: infer_record_region_contribution_mode(
+                    scope,
+                    &region.target,
+                    line,
+                    resolve_struct_target_fields_for_scope,
+                ),
+                modifier: line
+                    .modifier
+                    .as_ref()
+                    .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+            })
+            .collect(),
+        copied_fields: collect_nominal_copied_fields(
+            scope,
+            &region.target,
+            region.base.as_deref(),
+            &region.lines,
+            resolve_struct_target_fields_for_scope,
+            |scope, ty| {
+                resolve_nominal_fields_for_hir_type(
+                    scope,
+                    ty,
+                    resolve_struct_target_fields_for_scope,
+                )
+            },
+        ),
+    }
+}
+
+fn lower_union_region_exec_resolved(
+    region: &arcana_hir::HirUnionRegion,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecUnionRegion {
+    ExecUnionRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr_resolved(&region.target, scope)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr_resolved(base, scope))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec_resolved(target, scope),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecConstructLine {
+                name: line.name.clone(),
+                value: lower_exec_expr_resolved(&line.value, scope),
+                mode: infer_record_region_contribution_mode(
+                    scope,
+                    &region.target,
+                    line,
+                    resolve_union_target_fields_for_scope,
+                ),
+                modifier: line
+                    .modifier
+                    .as_ref()
+                    .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+            })
+            .collect(),
+        copied_fields: collect_nominal_copied_fields(
+            scope,
+            &region.target,
+            region.base.as_deref(),
+            &region.lines,
+            resolve_union_target_fields_for_scope,
+            |scope, ty| {
+                resolve_nominal_fields_for_hir_type(
+                    scope,
+                    ty,
+                    resolve_union_target_fields_for_scope,
+                )
+            },
+        ),
     }
 }
 
@@ -4665,9 +5488,8 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
         HirExpr::StrLiteral { text } => {
             ExecExpr::Str(decode_source_string_literal(text).unwrap_or_else(|_| text.clone()))
         }
-        HirExpr::Pair { left, right } => ExecExpr::Pair {
-            left: Box::new(lower_exec_expr(left)),
-            right: Box::new(lower_exec_expr(right)),
+        HirExpr::Tuple { items } => ExecExpr::Tuple {
+            items: items.iter().map(lower_exec_expr).collect(),
         },
         HirExpr::CollectionLiteral { items } => ExecExpr::Collection {
             items: items.iter().map(lower_exec_expr).collect(),
@@ -4687,6 +5509,12 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
         }
         HirExpr::RecordRegion(region) => {
             ExecExpr::RecordRegion(Box::new(lower_record_region_exec(region)))
+        }
+        HirExpr::StructRegion(region) => {
+            ExecExpr::StructRegion(Box::new(lower_struct_region_exec(region)))
+        }
+        HirExpr::UnionRegion(region) => {
+            ExecExpr::UnionRegion(Box::new(lower_union_region_exec(region)))
         }
         HirExpr::ArrayRegion(region) => {
             ExecExpr::ArrayRegion(Box::new(lower_array_region_exec(region)))
@@ -4735,6 +5563,7 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
                 .collect(),
             resolved_callable: None,
             resolved_routine: None,
+            resolved_subject_kind: None,
             dynamic_dispatch: None,
             attached: attached.iter().map(lower_header_attachment_exec).collect(),
         },
@@ -4806,9 +5635,11 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         HirExpr::StrLiteral { text } => {
             ExecExpr::Str(decode_source_string_literal(text).unwrap_or_else(|_| text.clone()))
         }
-        HirExpr::Pair { left, right } => ExecExpr::Pair {
-            left: Box::new(lower_exec_expr_resolved(left, scope)),
-            right: Box::new(lower_exec_expr_resolved(right, scope)),
+        HirExpr::Tuple { items } => ExecExpr::Tuple {
+            items: items
+                .iter()
+                .map(|item| lower_exec_expr_resolved(item, scope))
+                .collect(),
         },
         HirExpr::CollectionLiteral { items } => ExecExpr::Collection {
             items: items
@@ -4837,6 +5668,12 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         )),
         HirExpr::RecordRegion(region) => {
             ExecExpr::RecordRegion(Box::new(lower_record_region_exec_resolved(region, scope)))
+        }
+        HirExpr::StructRegion(region) => {
+            ExecExpr::StructRegion(Box::new(lower_struct_region_exec_resolved(region, scope)))
+        }
+        HirExpr::UnionRegion(region) => {
+            ExecExpr::UnionRegion(Box::new(lower_union_region_exec_resolved(region, scope)))
         }
         HirExpr::ArrayRegion(region) => {
             ExecExpr::ArrayRegion(Box::new(lower_array_region_exec_resolved(region, scope)))
@@ -4885,8 +5722,16 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
             attached,
         } => {
             let hir_qualifier_kind = *qualifier_kind;
-            let qualifier_kind = lower_phrase_qualifier_kind(hir_qualifier_kind);
-            let resolved = match qualifier_kind {
+            let mut lowered_qualifier_kind = lower_phrase_qualifier_kind(hir_qualifier_kind);
+            let mut lowered_qualifier_type_args = qualifier_type_args
+                .iter()
+                .map(arcana_hir::HirType::render)
+                .collect::<Vec<_>>();
+            let mut lowered_args = args
+                .iter()
+                .map(|arg| lower_phrase_arg_exec_resolved(arg, scope))
+                .collect::<Vec<_>>();
+            let mut resolved = match lowered_qualifier_kind {
                 ExecPhraseQualifierKind::Call
                 | ExecPhraseQualifierKind::Weave
                 | ExecPhraseQualifierKind::Split
@@ -4901,22 +5746,45 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
                 }
                 _ => None,
             };
+            if hir_qualifier_kind == arcana_hir::HirQualifiedPhraseQualifierKind::Call
+                && qualifier == "call"
+                && resolved.is_none()
+                && let Some(target) =
+                    resolve_callable_struct_target(scope, subject, args, qualifier_type_args)
+            {
+                resolved = Some(target);
+                lowered_qualifier_kind = ExecPhraseQualifierKind::BareMethod;
+                lowered_qualifier_type_args.clear();
+                lowered_args = match args.as_slice() {
+                    [] => Vec::new(),
+                    [single] => vec![lower_phrase_arg_exec_resolved(single, scope)],
+                    many => vec![ExecPhraseArg {
+                        name: None,
+                        value: ExecExpr::Tuple {
+                            items: many
+                                .iter()
+                                .filter_map(|arg| match arg {
+                                    HirPhraseArg::Positional(expr) => {
+                                        Some(lower_exec_expr_resolved(expr, scope))
+                                    }
+                                    HirPhraseArg::Named { .. } => None,
+                                })
+                                .collect(),
+                        },
+                    }],
+                };
+            }
             ExecExpr::Phrase {
                 subject: Box::new(lower_exec_expr_resolved(subject, scope)),
-                args: args
-                    .iter()
-                    .map(|arg| lower_phrase_arg_exec_resolved(arg, scope))
-                    .collect(),
-                qualifier_kind,
+                args: lowered_args,
+                qualifier_kind: lowered_qualifier_kind,
                 qualifier: qualifier.clone(),
-                qualifier_type_args: qualifier_type_args
-                    .iter()
-                    .map(arcana_hir::HirType::render)
-                    .collect(),
+                qualifier_type_args: lowered_qualifier_type_args,
                 resolved_callable: resolved.as_ref().map(|target| target.path.clone()),
                 resolved_routine: resolved
                     .as_ref()
                     .and_then(|target| target.routine_key.clone()),
+                resolved_subject_kind: resolved.as_ref().and_then(|target| target.subject_kind),
                 dynamic_dispatch: resolved.and_then(|target| target.dynamic_dispatch),
                 attached: attached
                     .iter()
@@ -5225,6 +6093,12 @@ fn lower_exec_stmt_sequence(statement: &HirStatement) -> Vec<ExecStmt> {
         HirStatementKind::Record(region) => {
             vec![ExecStmt::Record(lower_record_region_exec(region))]
         }
+        HirStatementKind::Struct(region) => {
+            vec![ExecStmt::Struct(lower_struct_region_exec(region))]
+        }
+        HirStatementKind::Union(region) => {
+            vec![ExecStmt::Union(lower_union_region_exec(region))]
+        }
         HirStatementKind::Array(region) => {
             vec![ExecStmt::Array(lower_array_region_exec(region))]
         }
@@ -5304,9 +6178,11 @@ fn lower_exec_stmt_resolved(
                             "tuple destructuring requires a known pair type".to_string()
                         })?;
                         let temp_name = scope.value_scope.fresh_temp_name("tuple_let");
-                        scope
-                            .value_scope
-                            .insert(temp_name.clone(), value_ty.clone());
+                        scope.value_scope.insert_with_mutability(
+                            temp_name.clone(),
+                            value_ty.clone(),
+                            false,
+                        );
                         let base_expr = ExecExpr::Path(vec![temp_name.clone()]);
                         let mut statements = vec![ExecStmt::Let {
                             binding_id: 0,
@@ -5330,7 +6206,11 @@ fn lower_exec_stmt_resolved(
                     _ => {
                         let mut binding_id = 0;
                         if let Some(ty) = infer_expr_hir_type(scope, value) {
-                            binding_id = scope.value_scope.insert(name.clone(), ty);
+                            binding_id = scope.value_scope.insert_with_mutability(
+                                name.clone(),
+                                ty,
+                                *mutable,
+                            );
                         }
                         (
                             vec![ExecStmt::Let {
@@ -5545,7 +6425,11 @@ fn lower_exec_stmt_resolved(
                 } else {
                     let mut binding_id = 0;
                     if let Some(ty) = iterable_binding_ty {
-                        binding_id = body_scope.value_scope.insert(binding.clone(), ty.clone());
+                        binding_id = body_scope.value_scope.insert_with_mutability(
+                            binding.clone(),
+                            ty.clone(),
+                            false,
+                        );
                         push_cleanup_binding_candidate(
                             &mut rollup_bindings,
                             binding.clone(),
@@ -5612,7 +6496,11 @@ fn lower_exec_stmt_resolved(
                 && let HirAssignTarget::Name { text } = target
                 && let Some(ty) = infer_expr_hir_type(scope, value)
             {
-                scope.value_scope.insert(text.clone(), ty);
+                if scope.value_scope.contains(text) {
+                    scope.value_scope.update_type(text, ty);
+                } else {
+                    scope.value_scope.insert(text.clone(), ty);
+                }
             }
             (vec![lowered], Vec::new())
         }
@@ -5654,10 +6542,20 @@ fn lower_exec_stmt_resolved(
                     }),
                 };
                 match &line.kind {
-                    arcana_hir::HirRecycleLineKind::Let { name, gate, .. } => {
+                    arcana_hir::HirRecycleLineKind::Let {
+                        mutable,
+                        name,
+                        gate,
+                    } => {
                         if let Some(ty) = infer_headed_payload_binding_type(&region_scope, gate) {
-                            region_scope.value_scope.insert(name.clone(), ty.clone());
-                            scope.value_scope.insert(name.clone(), ty);
+                            region_scope.value_scope.insert_with_mutability(
+                                name.clone(),
+                                ty.clone(),
+                                *mutable,
+                            );
+                            scope
+                                .value_scope
+                                .insert_with_mutability(name.clone(), ty, *mutable);
                         }
                     }
                     arcana_hir::HirRecycleLineKind::Assign { name, gate } => {
@@ -5718,10 +6616,20 @@ fn lower_exec_stmt_resolved(
                     }),
                 };
                 match &line.kind {
-                    arcana_hir::HirBindLineKind::Let { name, gate, .. } => {
+                    arcana_hir::HirBindLineKind::Let {
+                        mutable,
+                        name,
+                        gate,
+                    } => {
                         if let Some(ty) = infer_headed_payload_binding_type(&region_scope, gate) {
-                            region_scope.value_scope.insert(name.clone(), ty.clone());
-                            scope.value_scope.insert(name.clone(), ty);
+                            region_scope.value_scope.insert_with_mutability(
+                                name.clone(),
+                                ty.clone(),
+                                *mutable,
+                            );
+                            scope
+                                .value_scope
+                                .insert_with_mutability(name.clone(), ty, *mutable);
                         }
                     }
                     arcana_hir::HirBindLineKind::Assign { name, gate } => {
@@ -5759,6 +6667,26 @@ fn lower_exec_stmt_resolved(
             if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
                 && let Some(target_path) = flatten_callable_expr_path(&region.target)
                 && let Some(ty) = resolve_record_result_type_for_scope(scope, &target_path)
+            {
+                scope.value_scope.insert(name.clone(), ty);
+            }
+            (vec![lowered], Vec::new())
+        }
+        HirStatementKind::Struct(region) => {
+            let lowered = ExecStmt::Struct(lower_struct_region_exec_resolved(region, scope));
+            if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+                && let Some(target_path) = flatten_callable_expr_path(&region.target)
+                && let Some(ty) = resolve_struct_result_type_for_scope(scope, &target_path)
+            {
+                scope.value_scope.insert(name.clone(), ty);
+            }
+            (vec![lowered], Vec::new())
+        }
+        HirStatementKind::Union(region) => {
+            let lowered = ExecStmt::Union(lower_union_region_exec_resolved(region, scope));
+            if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+                && let Some(target_path) = flatten_callable_expr_path(&region.target)
+                && let Some(ty) = resolve_union_result_type_for_scope(scope, &target_path)
             {
                 scope.value_scope.insert(name.clone(), ty);
             }
@@ -6129,9 +7057,11 @@ fn lower_routine_resolved(
         &type_params,
     );
     for param in &symbol.params {
-        scope
-            .value_scope
-            .insert(param.name.clone(), param.ty.clone());
+        scope.value_scope.insert_with_mutability(
+            param.name.clone(),
+            param.ty.clone(),
+            matches!(param.mode, Some(arcana_hir::HirParamMode::Edit)),
+        );
     }
     let lowered_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
         &symbol.statements,
@@ -7823,7 +8753,7 @@ mod tests {
                 lower_module_text(
                     "app",
                     concat!(
-                        "record Counter:\n",
+                        "struct Counter:\n",
                         "    value: Int\n",
                         "impl Counter:\n",
                         "    fn tap(read self: Counter) -> Int:\n",
@@ -7878,7 +8808,7 @@ mod tests {
                 lower_module_text(
                     "app",
                     concat!(
-                        "record Counter:\n",
+                        "struct Counter:\n",
                         "    value: Int\n",
                         "impl Counter:\n",
                         "    fn tap(read self: Counter) -> Int:\n",
@@ -7969,7 +8899,7 @@ mod tests {
                 lower_module_text(
                     "app",
                     concat!(
-                        "record Counter:\n",
+                        "struct Counter:\n",
                         "    value: Int\n",
                         "impl Counter:\n",
                         "    fn tap(read self: Counter) -> Int:\n",

@@ -1,4 +1,4 @@
-record Widget:
+struct Widget:
     value: Int
 
 record Other:

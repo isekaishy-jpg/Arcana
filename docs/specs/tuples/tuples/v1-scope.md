@@ -3,23 +3,27 @@
 Status: `approved-pre-selfhost`
 
 Tuples are part of the selfhost-facing language contract and must be explicit before typed frontend work hardens.
-Pair-only tuples are the current stabilization point, not the intended permanent ceiling for the language.
+The current stabilization point is explicit 2- and 3-tuples, not unbounded tuple families.
 
 ## Baseline Contract
 
-- Arcana v1 supports pair tuples only.
-- Tuple type syntax is `(A, B)`.
-- Tuple literal syntax is `(a, b)`.
-- Nested pairs are allowed.
-- Exact recursive pair destructuring is supported in `let` bindings and `for` headers.
-- Three-or-more-element tuples are not part of the contract.
+- Arcana v1 supports 2- and 3-tuples only.
+- Tuple type syntax is:
+  - `(A, B)`
+  - `(A, B, C)`
+- Tuple literal syntax is:
+  - `(a, b)`
+  - `(a, b, c)`
+- Nested tuples are allowed.
+- Exact recursive tuple destructuring is supported in `let` bindings and `for` headers.
+- Four-or-more-element tuples are not part of the contract.
 - This is the current selfhost baseline, not a claim that generalized tuples are undesirable.
 
 ## Access Contract
 
 - Tuple field access is positional only.
-- Only `.0` and `.1` are valid tuple field selectors.
-- `.2` and above are invalid in v1.
+- Only `.0`, `.1`, and `.2` are valid tuple field selectors in v1.
+- `.3` and above are invalid in v1.
 - Tuple access remains distinct from record field access even though both use `.` syntax.
 
 ## Construction and Use
@@ -28,10 +32,12 @@ Pair-only tuples are the current stabilization point, not the intended permanent
 - Whole-tuple construction and whole-value passing/returning are supported.
 - Tuple destructuring is exact-shape only in current v1:
   - `let (left, right) = pair`
+  - `let (first, second, third) = triple`
   - `for (left, right) in values:`
-- Nested exact pair destructuring is allowed inside those `let` and `for` forms.
+  - `for (first, second, third) in values:`
+- Nested exact tuple destructuring is allowed inside those `let` and `for` forms.
 - Tuple-specific `match` patterns are not part of the v1 contract.
-- Current tuple use around `match` is limited to ordinary whole-value flow plus explicit `.0` / `.1` access before matching.
+- Current tuple use around `match` is limited to ordinary whole-value flow plus explicit positional access before matching.
 - Tuples may be nested to build protocol payloads, but named records are preferred once the shape becomes semantically meaningful.
 
 ## Explicit Exclusions
@@ -51,20 +57,21 @@ Pair-only tuples are the current stabilization point, not the intended permanent
 
 ## Equality and Type Behavior
 
-- Pair equality is structural and order-sensitive.
+- Supported tuple equality is structural and order-sensitive.
 - `(A, B)` and `(B, A)` are different types unless `A` and `B` happen to be the same type.
+- `(A, B, C)` is distinct from every other tuple shape with different arity or ordering.
 - Copy/send/share behavior is component-wise and follows ordinary Arcana type rules.
 - Layout is not a public source-visible ABI contract.
 
 ## Guidance
 
-- Use tuples for small transient multi-value returns and protocol rows.
+- Use tuples for small transient multi-value returns, protocol rows, and packed callable-struct args.
 - Prefer named records when repeated positional access starts carrying domain meaning.
 - The existing anonymous-shape positional-access lint direction remains valid and should stay part of diagnostics work.
 
 ## Forward Path
 
-- Pair-only exists to keep the selfhost baseline tractable while typed ownership and layout rules are still settling; it is a staging constraint, not a philosophical rejection of standard richer tuple support.
+- 2- and 3-tuples exist to keep the selfhost baseline tractable while typed ownership and layout rules are still settling; this is a staging constraint, not a philosophical rejection of richer tuple support.
 - Generalized tuples remain the intended expansion path once the typed frontend, ownership rules, and selfhost baseline are stable enough to absorb them cleanly.
-- If pair-only tuples become a demonstrated selfhost blocker, tuple enrichment may be reconsidered only through an explicit freeze exception and updated conformance coverage.
+- If 2/3-tuple support becomes a demonstrated selfhost blocker, further tuple enrichment may be reconsidered only through an explicit freeze exception and updated conformance coverage.
 - Deferred follow-up items are tracked in `docs/specs/tuples/tuples/deferred-roadmap.md`.

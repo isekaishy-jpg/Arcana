@@ -342,9 +342,8 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
         if parts.len() != 2 {
             return Err(format!("malformed pair expression `{text}`"));
         }
-        return Ok(ParsedExpr::Pair {
-            left: Box::new(parse_expr(&parts[0])?),
-            right: Box::new(parse_expr(&parts[1])?),
+        return Ok(ParsedExpr::Tuple {
+            items: vec![parse_expr(&parts[0])?, parse_expr(&parts[1])?],
         });
     }
     if text.starts_with("collection(") && text.ends_with(')') {
@@ -603,6 +602,7 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             qualifier_type_args: Vec::new(),
             resolved_callable,
             resolved_routine,
+            resolved_subject_kind: None,
             dynamic_dispatch: None,
             attached,
         });

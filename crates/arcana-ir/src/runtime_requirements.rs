@@ -313,6 +313,50 @@ fn collect_stmt_callees(
                 }
             }
         }
+        ExecStmt::Struct(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecStmt::Union(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
         ExecStmt::Array(region) => {
             collect_expr_callees(package, current_module_id, &region.target, out);
             if let Some(base) = &region.base {
@@ -383,9 +427,10 @@ fn collect_expr_callees(
         | ExecExpr::Bool(_)
         | ExecExpr::Str(_)
         | ExecExpr::Path(_) => {}
-        ExecExpr::Pair { left, right } => {
-            collect_expr_callees(package, current_module_id, left, out);
-            collect_expr_callees(package, current_module_id, right, out);
+        ExecExpr::Tuple { items } => {
+            for item in items {
+                collect_expr_callees(package, current_module_id, item, out);
+            }
         }
         ExecExpr::Collection { items } => {
             for item in items {
@@ -418,6 +463,50 @@ fn collect_expr_callees(
             }
         }
         ExecExpr::RecordRegion(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecExpr::StructRegion(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecExpr::UnionRegion(region) => {
             collect_expr_callees(package, current_module_id, &region.target, out);
             if let Some(base) = &region.base {
                 collect_expr_callees(package, current_module_id, base, out);
@@ -737,6 +826,7 @@ mod tests {
                     callable.iter().map(|segment| segment.to_string()).collect(),
                 ),
                 resolved_routine: Some(routine_key.to_string()),
+                resolved_subject_kind: None,
                 dynamic_dispatch: None,
                 attached: Vec::new(),
             },
@@ -754,6 +844,7 @@ mod tests {
             qualifier_type_args: Vec::new(),
             resolved_callable: Some(callable.iter().map(|segment| segment.to_string()).collect()),
             resolved_routine: Some(routine_key.to_string()),
+            resolved_subject_kind: None,
             dynamic_dispatch: None,
             attached: Vec::new(),
         }

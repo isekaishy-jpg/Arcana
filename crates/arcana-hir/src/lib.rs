@@ -735,26 +735,30 @@ pub struct HirConstructRegion {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HirNominalFieldRegionKind {
-    Record,
-    Struct,
-    Union,
-}
-
-impl HirNominalFieldRegionKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Record => "record",
-            Self::Struct => "struct",
-            Self::Union => "union",
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirRecordRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<HirExpr>,
+    pub base: Option<Box<HirExpr>>,
+    pub destination: Option<HirConstructDestination>,
+    pub default_modifier: Option<HirHeadedModifier>,
+    pub lines: Vec<HirConstructLine>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HirRecordRegion {
-    pub kind: HirNominalFieldRegionKind,
+pub struct HirStructRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<HirExpr>,
+    pub base: Option<Box<HirExpr>>,
+    pub destination: Option<HirConstructDestination>,
+    pub default_modifier: Option<HirHeadedModifier>,
+    pub lines: Vec<HirConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirUnionRegion {
     pub completion: ConstructCompletionKind,
     pub target: Box<HirExpr>,
     pub base: Option<Box<HirExpr>>,
@@ -906,9 +910,8 @@ pub enum HirExpr {
     StrLiteral {
         text: String,
     },
-    Pair {
-        left: Box<HirExpr>,
-        right: Box<HirExpr>,
+    Tuple {
+        items: Vec<HirExpr>,
     },
     CollectionLiteral {
         items: Vec<HirExpr>,
@@ -919,6 +922,8 @@ pub enum HirExpr {
     },
     ConstructRegion(Box<HirConstructRegion>),
     RecordRegion(Box<HirRecordRegion>),
+    StructRegion(Box<HirStructRegion>),
+    UnionRegion(Box<HirUnionRegion>),
     ArrayRegion(Box<HirArrayRegion>),
     Chain {
         style: String,
@@ -1098,6 +1103,8 @@ pub enum HirStatementKind {
         lines: Vec<HirBindLine>,
     },
     Record(HirRecordRegion),
+    Struct(HirStructRegion),
+    Union(HirUnionRegion),
     Array(HirArrayRegion),
     Construct(HirConstructRegion),
     MemorySpec(HirMemorySpecDecl),
@@ -2115,44 +2122,334 @@ fn hir_result_ok_payload_type(ty: &HirType) -> Option<HirType> {
     }
 }
 
+const CALL_CONTRACT_READ0_LANG_ITEM: &str = "call_contract_read0";
+const CALL_CONTRACT_EDIT0_LANG_ITEM: &str = "call_contract_edit0";
+const CALL_CONTRACT_TAKE0_LANG_ITEM: &str = "call_contract_take0";
+const CALL_CONTRACT_READ_LANG_ITEM: &str = "call_contract_read";
+const CALL_CONTRACT_EDIT_LANG_ITEM: &str = "call_contract_edit";
+const CALL_CONTRACT_TAKE_LANG_ITEM: &str = "call_contract_take";
+
+fn hir_resolved_symbol_path(symbol_ref: HirResolvedSymbolRef<'_>) -> Vec<String> {
+    let mut path = symbol_ref
+        .module_id
+        .split('.')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    path.push(symbol_ref.symbol.name.clone());
+    path
+}
+
+fn resolve_callable_contract_trait_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    lang_item_name: &str,
+) -> Option<Vec<String>> {
+    let mut candidates = Vec::new();
+    for package in workspace.packages.values() {
+        for module in &package.summary.modules {
+            for lang_item in &module.lang_items {
+                if lang_item.name != lang_item_name {
+                    continue;
+                }
+                let symbol_ref = lookup_symbol_path(workspace, resolved_module, &lang_item.target)?;
+                if symbol_ref.symbol.kind != HirSymbolKind::Trait {
+                    continue;
+                }
+                candidates.push(hir_resolved_symbol_path(symbol_ref));
+            }
+        }
+    }
+    match candidates.as_slice() {
+        [path] => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn callable_contract_lang_item_name(mode: HirParamMode, zero_arity: bool) -> Option<&'static str> {
+    match (mode, zero_arity) {
+        (HirParamMode::Read, true) => Some(CALL_CONTRACT_READ0_LANG_ITEM),
+        (HirParamMode::Edit, true) => Some(CALL_CONTRACT_EDIT0_LANG_ITEM),
+        (HirParamMode::Take, true) => Some(CALL_CONTRACT_TAKE0_LANG_ITEM),
+        (HirParamMode::Read, false) => Some(CALL_CONTRACT_READ_LANG_ITEM),
+        (HirParamMode::Edit, false) => Some(CALL_CONTRACT_EDIT_LANG_ITEM),
+        (HirParamMode::Take, false) => Some(CALL_CONTRACT_TAKE_LANG_ITEM),
+        (HirParamMode::Hold, _) => None,
+    }
+}
+
+fn canonicalize_hir_type_for_module(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<HirType> {
+    let package = current_workspace_package_for_module(workspace, resolved_module)?;
+    let module = package.module(&resolved_module.module_id)?;
+    Some(canonicalize_hir_type_in_module(
+        workspace, package, module, ty,
+    ))
+}
+
+fn canonical_hir_type_key_for_module(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<String> {
+    Some(canonicalize_hir_type_for_module(workspace, resolved_module, ty)?.render())
+}
+
+fn infer_callable_struct_packed_args_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    args: &[HirPhraseArg],
+) -> Option<HirType> {
+    if args.is_empty()
+        || args
+            .iter()
+            .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
+        return None;
+    }
+    let item_types = args
+        .iter()
+        .map(|arg| match arg {
+            HirPhraseArg::Positional(expr) => {
+                infer_receiver_expr_type(workspace, resolved_module, locals, expr)
+            }
+            HirPhraseArg::Named { .. } => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if item_types.len() == 1 {
+        return item_types.into_iter().next();
+    }
+    Some(HirType {
+        kind: HirTypeKind::Tuple(item_types),
+        span: Span::default(),
+    })
+}
+
+fn infer_method_candidate_return_hir_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    subject: &HirExpr,
+    candidate: &HirMethodCandidate<'_>,
+) -> Option<HirType> {
+    let return_type = candidate.symbol.return_type.as_ref()?;
+    let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+    let bindings = placeholder_binding_scope_for_type(&candidate.declared_receiver_hir);
+    let mut substitutions = HirTypeSubstitutions::new();
+    let package = workspace.package_by_id(candidate.package_id)?;
+    let module = package.module(candidate.module_id)?;
+    let canonical_declared = canonicalize_hir_type_in_module(
+        workspace,
+        package,
+        module,
+        &candidate.declared_receiver_hir,
+    );
+    let canonical_actual = canonicalize_hir_type_in_module(
+        workspace,
+        package,
+        module,
+        hir_strip_reference_type(&subject_ty),
+    );
+    let _ = hir_type_matches(
+        &canonical_declared,
+        &canonical_actual,
+        &bindings,
+        &mut substitutions,
+    );
+    Some(substitute_type_params_hir(
+        return_type,
+        &bindings,
+        &substitutions,
+    ))
+}
+
+fn infer_callable_struct_return_hir_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    subject: &HirExpr,
+    args: &[HirPhraseArg],
+    qualifier_type_args: Option<&[HirType]>,
+) -> Option<HirType> {
+    let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+    let subject_base_kind = match &hir_strip_reference_type(&subject_ty).kind {
+        HirTypeKind::Path(path) => lookup_symbol_path(workspace, resolved_module, &path.segments)
+            .map(|resolved| resolved.symbol.kind),
+        HirTypeKind::Apply { base, .. } => {
+            lookup_symbol_path(workspace, resolved_module, &base.segments)
+                .map(|resolved| resolved.symbol.kind)
+        }
+        _ => None,
+    }?;
+    if subject_base_kind != HirSymbolKind::Struct {
+        return None;
+    }
+    if args
+        .iter()
+        .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
+        return None;
+    }
+    let packed_args_ty =
+        infer_callable_struct_packed_args_type(workspace, resolved_module, locals, args);
+    let zero_arity = packed_args_ty.is_none();
+    let qualifier_type_args = qualifier_type_args.unwrap_or(&[]);
+    if !qualifier_type_args.is_empty()
+        && qualifier_type_args.len() != if zero_arity { 1 } else { 2 }
+    {
+        return None;
+    }
+    let packed_key = packed_args_ty
+        .as_ref()
+        .and_then(|ty| canonical_hir_type_key_for_module(workspace, resolved_module, ty));
+    let explicit_keys = qualifier_type_args
+        .iter()
+        .map(|ty| canonical_hir_type_key_for_module(workspace, resolved_module, ty))
+        .collect::<Option<Vec<_>>>()?;
+    let trait_paths = [HirParamMode::Read, HirParamMode::Edit, HirParamMode::Take]
+        .into_iter()
+        .filter_map(|mode| {
+            let lang_item = callable_contract_lang_item_name(mode, zero_arity)?;
+            Some((
+                mode,
+                resolve_callable_contract_trait_path(workspace, resolved_module, lang_item)?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let candidates =
+        lookup_method_candidates_for_hir_type(workspace, resolved_module, &subject_ty, "call")
+            .into_iter()
+            .filter(|candidate| {
+                let Some(receiver) = candidate.symbol.params.first() else {
+                    return false;
+                };
+                let Some(receiver_mode) = receiver.mode else {
+                    return false;
+                };
+                if receiver_mode == HirParamMode::Hold {
+                    return false;
+                }
+                let Some(expected_trait_path) = trait_paths
+                    .iter()
+                    .find_map(|(mode, path)| (*mode == receiver_mode).then_some(path))
+                else {
+                    return false;
+                };
+                if candidate.trait_path.as_ref() != Some(expected_trait_path) {
+                    return false;
+                }
+                if zero_arity {
+                    if candidate.symbol.params.len() != 1 {
+                        return false;
+                    }
+                } else {
+                    if candidate.symbol.params.len() != 2 {
+                        return false;
+                    }
+                    let Some(packed_param) = candidate.symbol.params.get(1) else {
+                        return false;
+                    };
+                    if packed_param.mode != Some(HirParamMode::Take) {
+                        return false;
+                    }
+                    let Some(param_key) = canonical_hir_type_key_for_module(
+                        workspace,
+                        resolved_module,
+                        &packed_param.ty,
+                    ) else {
+                        return false;
+                    };
+                    if Some(param_key) != packed_key {
+                        return false;
+                    }
+                }
+                let Some(return_type) = candidate.symbol.return_type.as_ref() else {
+                    return false;
+                };
+                let Some(return_key) =
+                    canonical_hir_type_key_for_module(workspace, resolved_module, return_type)
+                else {
+                    return false;
+                };
+                if !explicit_keys.is_empty() {
+                    if zero_arity {
+                        if explicit_keys.first() != Some(&return_key) {
+                            return false;
+                        }
+                    } else if explicit_keys.first() != packed_key.as_ref()
+                        || explicit_keys.get(1) != Some(&return_key)
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [candidate] => infer_method_candidate_return_hir_type(
+            workspace,
+            resolved_module,
+            locals,
+            subject,
+            candidate,
+        ),
+        _ => None,
+    }
+}
+
 fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     subject: &HirExpr,
+    args: &[HirPhraseArg],
     qualifier_type_args: Option<&[HirType]>,
+    allow_callable_struct_dispatch: bool,
 ) -> Option<HirType> {
-    let path = flatten_callable_expr_path(subject)?;
-    if let [name] = &path[..]
-        && builtin_type_info(name).is_some()
-    {
-        return Some(builtin_hir_type(name));
-    }
-    let generic_args = qualifier_type_args
-        .filter(|args| !args.is_empty())
-        .map(|args| args.to_vec())
-        .unwrap_or_else(|| extract_expr_generic_hir_type_args(subject))
-        .into_iter()
-        .map(|arg| {
-            let package = current_workspace_package_for_module(workspace, resolved_module)?;
-            let module = package.module(&resolved_module.module_id)?;
-            Some(canonicalize_hir_type_in_module(
-                workspace, package, module, &arg,
-            ))
-        })
-        .collect::<Option<Vec<_>>>()?;
-    if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) {
-        return symbol_call_return_type(workspace, symbol_ref, &generic_args);
-    }
-    if path.len() >= 2 {
-        let enum_path = path[..path.len() - 1].to_vec();
-        if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path)
-            && matches!(enum_ref.symbol.kind, HirSymbolKind::Enum)
+    if let Some(path) = flatten_callable_expr_path(subject) {
+        if let [name] = &path[..]
+            && builtin_type_info(name).is_some()
         {
-            return symbol_call_return_type(workspace, enum_ref, &generic_args);
+            return Some(builtin_hir_type(name));
+        }
+        let generic_args = qualifier_type_args
+            .filter(|args| !args.is_empty())
+            .map(|args| args.to_vec())
+            .unwrap_or_else(|| extract_expr_generic_hir_type_args(subject))
+            .into_iter()
+            .map(|arg| {
+                let package = current_workspace_package_for_module(workspace, resolved_module)?;
+                let module = package.module(&resolved_module.module_id)?;
+                Some(canonicalize_hir_type_in_module(
+                    workspace, package, module, &arg,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) {
+            return symbol_call_return_type(workspace, symbol_ref, &generic_args);
+        }
+        if path.len() >= 2 {
+            let enum_path = path[..path.len() - 1].to_vec();
+            if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path)
+                && matches!(enum_ref.symbol.kind, HirSymbolKind::Enum)
+            {
+                return symbol_call_return_type(workspace, enum_ref, &generic_args);
+            }
         }
     }
-    let _ = locals;
+    if allow_callable_struct_dispatch {
+        return infer_callable_struct_return_hir_type(
+            workspace,
+            resolved_module,
+            locals,
+            subject,
+            args,
+            qualifier_type_args,
+        );
+    }
     None
 }
 
@@ -2518,11 +2815,13 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             HirFloatLiteralKind::F64 => "F64",
         })),
         HirExpr::StrLiteral { .. } => Some(builtin_hir_type("Str")),
-        HirExpr::Pair { left, right } => Some(HirType {
-            kind: HirTypeKind::Tuple(vec![
-                infer_receiver_expr_type(workspace, resolved_module, locals, left)?,
-                infer_receiver_expr_type(workspace, resolved_module, locals, right)?,
-            ]),
+        HirExpr::Tuple { items } => Some(HirType {
+            kind: HirTypeKind::Tuple(
+                items
+                    .iter()
+                    .map(|item| infer_receiver_expr_type(workspace, resolved_module, locals, item))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
             span: Span::default(),
         }),
         HirExpr::CollectionLiteral { items } => {
@@ -2624,6 +2923,7 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         }
         HirExpr::QualifiedPhrase {
             subject,
+            args,
             qualifier_kind: HirQualifiedPhraseQualifierKind::Call,
             qualifier_type_args,
             ..
@@ -2632,10 +2932,13 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             resolved_module,
             locals,
             subject,
+            args,
             Some(qualifier_type_args),
+            true,
         ),
         HirExpr::QualifiedPhrase {
             subject,
+            args,
             qualifier_kind: HirQualifiedPhraseQualifierKind::Weave,
             qualifier_type_args,
             ..
@@ -2644,11 +2947,14 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             resolved_module,
             locals,
             subject,
+            args,
             Some(qualifier_type_args),
+            false,
         )
         .map(|inner| ambient_apply_hir_type(&["std", "concurrent", "Task"], vec![inner])),
         HirExpr::QualifiedPhrase {
             subject,
+            args,
             qualifier_kind: HirQualifiedPhraseQualifierKind::Split,
             qualifier_type_args,
             ..
@@ -2657,7 +2963,9 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             resolved_module,
             locals,
             subject,
+            args,
             Some(qualifier_type_args),
+            false,
         )
         .map(|inner| ambient_apply_hir_type(&["std", "concurrent", "Thread"], vec![inner])),
         HirExpr::QualifiedPhrase {
@@ -2784,11 +3092,20 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::RecordRegion(region) => {
             let target_path = flatten_callable_expr_path(&region.target)?;
             let symbol_ref = lookup_symbol_path(workspace, resolved_module, &target_path)?;
-            matches!(
-                symbol_ref.symbol.kind,
-                HirSymbolKind::Record | HirSymbolKind::Struct | HirSymbolKind::Union
-            )
-            .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
+            matches!(symbol_ref.symbol.kind, HirSymbolKind::Record)
+                .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
+        }
+        HirExpr::StructRegion(region) => {
+            let target_path = flatten_callable_expr_path(&region.target)?;
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, &target_path)?;
+            matches!(symbol_ref.symbol.kind, HirSymbolKind::Struct)
+                .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
+        }
+        HirExpr::UnionRegion(region) => {
+            let target_path = flatten_callable_expr_path(&region.target)?;
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, &target_path)?;
+            matches!(symbol_ref.symbol.kind, HirSymbolKind::Union)
+                .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
         }
         HirExpr::ArrayRegion(region) => {
             let target_path = flatten_callable_expr_path(&region.target)?;
@@ -4755,11 +5072,72 @@ fn lower_construct_region(region: &arcana_syntax::ConstructRegion) -> HirConstru
 
 fn lower_record_region(region: &arcana_syntax::RecordRegion) -> HirRecordRegion {
     HirRecordRegion {
-        kind: match region.kind {
-            arcana_syntax::NominalFieldRegionKind::Record => HirNominalFieldRegionKind::Record,
-            arcana_syntax::NominalFieldRegionKind::Struct => HirNominalFieldRegionKind::Struct,
-            arcana_syntax::NominalFieldRegionKind::Union => HirNominalFieldRegionKind::Union,
-        },
+        completion: region.completion,
+        target: Box::new(lower_expr(&region.target)),
+        base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_syntax::ConstructDestination::Deliver { name } => {
+                    HirConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_syntax::ConstructDestination::Place { target } => {
+                    HirConstructDestination::Place {
+                        target: lower_assign_target(target),
+                    }
+                }
+            }),
+        default_modifier: region.default_modifier.as_ref().map(lower_headed_modifier),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| HirConstructLine {
+                name: line.name.clone(),
+                value: lower_expr(&line.value),
+                modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                span: line.span,
+            })
+            .collect(),
+        span: region.span,
+    }
+}
+
+fn lower_struct_region(region: &arcana_syntax::StructRegion) -> HirStructRegion {
+    HirStructRegion {
+        completion: region.completion,
+        target: Box::new(lower_expr(&region.target)),
+        base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_syntax::ConstructDestination::Deliver { name } => {
+                    HirConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_syntax::ConstructDestination::Place { target } => {
+                    HirConstructDestination::Place {
+                        target: lower_assign_target(target),
+                    }
+                }
+            }),
+        default_modifier: region.default_modifier.as_ref().map(lower_headed_modifier),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| HirConstructLine {
+                name: line.name.clone(),
+                value: lower_expr(&line.value),
+                modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                span: line.span,
+            })
+            .collect(),
+        span: region.span,
+    }
+}
+
+fn lower_union_region(region: &arcana_syntax::UnionRegion) -> HirUnionRegion {
+    HirUnionRegion {
         completion: region.completion,
         target: Box::new(lower_expr(&region.target)),
         base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
@@ -4912,9 +5290,8 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             },
         },
         ParsedExpr::StrLiteral { text } => HirExpr::StrLiteral { text: text.clone() },
-        ParsedExpr::Pair { left, right } => HirExpr::Pair {
-            left: Box::new(lower_expr(left)),
-            right: Box::new(lower_expr(right)),
+        ParsedExpr::Tuple { items } => HirExpr::Tuple {
+            items: items.iter().map(lower_expr).collect(),
         },
         ParsedExpr::CollectionLiteral { items } => HirExpr::CollectionLiteral {
             items: items.iter().map(lower_expr).collect(),
@@ -4935,6 +5312,12 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         }
         ParsedExpr::RecordRegion(region) => {
             HirExpr::RecordRegion(Box::new(lower_record_region(region)))
+        }
+        ParsedExpr::StructRegion(region) => {
+            HirExpr::StructRegion(Box::new(lower_struct_region(region)))
+        }
+        ParsedExpr::UnionRegion(region) => {
+            HirExpr::UnionRegion(Box::new(lower_union_region(region)))
         }
         ParsedExpr::ArrayRegion(region) => {
             HirExpr::ArrayRegion(Box::new(lower_array_region(region)))
@@ -5290,6 +5673,12 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
             }
             ParsedStatementKind::Record(region) => {
                 HirStatementKind::Record(lower_record_region(region))
+            }
+            ParsedStatementKind::Struct(region) => {
+                HirStatementKind::Struct(lower_struct_region(region))
+            }
+            ParsedStatementKind::Union(region) => {
+                HirStatementKind::Union(lower_union_region(region))
             }
             ParsedStatementKind::Array(region) => {
                 HirStatementKind::Array(lower_array_region(region))
@@ -6301,7 +6690,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_module_text_captures_pair_tuple_expressions() {
+    fn lower_module_text_captures_tuple_expressions() {
         let module = lower_module_text(
             "pair_expr",
             "fn main() -> Int:\n    let pair = (left, right)\n    return pair.0\n",
@@ -6313,19 +6702,13 @@ mod tests {
                 assert_eq!(name, "pair");
                 assert!(matches!(
                     value,
-                    HirExpr::Pair {
-                        left,
-                        right,
-                    } if matches!(
-                        left.as_ref(),
-                        expr if expr_is_path(expr, "left")
-                    ) && matches!(
-                        right.as_ref(),
-                        expr if expr_is_path(expr, "right")
-                    )
+                    HirExpr::Tuple { items }
+                        if items.len() == 2
+                            && matches!(&items[0], expr if expr_is_path(expr, "left"))
+                            && matches!(&items[1], expr if expr_is_path(expr, "right"))
                 ));
             }
-            other => panic!("expected pair let, got {other:?}"),
+            other => panic!("expected tuple let, got {other:?}"),
         }
     }
 

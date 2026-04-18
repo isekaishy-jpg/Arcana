@@ -3,7 +3,7 @@
 Status: `authoritative-deferred-ledger`
 
 This ledger is authoritative for deferred tuple work.
-It exists because pair-only tuples are a current selfhost baseline, not a claim that Arcana should stop there.
+It exists because 2/3-tuple support is the current selfhost baseline, not a claim that Arcana should stop there.
 
 Required fields per entry:
 - `id`
@@ -21,12 +21,12 @@ Trigger Condition Template (required single-line format):
 - `trigger_condition: ready_when=<objective readiness>; verify=<objective verification>; blocked_by=<current blocker>`
 
 id: TUP-D1
-title: generalized tuples beyond pairs
-reason_deferred: the current selfhost baseline only requires pair tuples; expanding arity before typed ownership and layout rules settle would add surface area without clear pre-selfhost payoff, even though richer tuples remain an expected language direction.
+title: generalized tuples beyond 3-tuples
+reason_deferred: the current selfhost baseline only requires 2/3-tuples; expanding arity before typed ownership and layout rules settle would add surface area without clear pre-selfhost payoff, even though richer tuples remain an expected language direction.
 target_window: post-selfhost tuple expansion window
-trigger_condition: ready_when=typed frontend, ownership flow, and tuple layout policy are stable or pair-only tuples become a demonstrated selfhost blocker; verify=parser/typecheck/borrow tests cover 3+-element tuples and nested access deterministically; blocked_by=no approved generalized tuple contract.
+trigger_condition: ready_when=typed frontend, ownership flow, and tuple layout policy are stable or 2/3-tuple support becomes a demonstrated selfhost blocker; verify=parser/typecheck/borrow tests cover 4+-element tuples and nested access deterministically; blocked_by=no approved generalized tuple contract.
 owner: Arcana language/type-system team
-acceptance_criteria: 3+-element tuples are specified with deterministic syntax, access, equality, and ownership behavior and do not weaken pair-tuple guarantees.
+acceptance_criteria: 4+-element tuples are specified with deterministic syntax, access, equality, and ownership behavior and do not weaken the 2/3-tuple guarantees.
 status: deferred
 
 id: TUP-D2

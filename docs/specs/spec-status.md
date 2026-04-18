@@ -59,6 +59,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/std/std/v1-status.md`
 - `docs/specs/os-bindings/os-bindings/v1-scope.md`
 - `docs/specs/headed-regions/headed-regions/v1-scope.md`
+- `docs/specs/callables/callables/v1-status.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
 - `docs/specs/memory/memory/v1-scope.md`
 - `docs/specs/forewords/forewords/v1-scope.md`
@@ -69,7 +70,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/backend/native-products-cabi-v1-scope.md`
 
 `reserved-post-selfhost`
-- `docs/specs/callables/callables/v1-status.md`
+- none currently registered
 
 `reference-only`
 - `docs/reference/audits/milestone_6_7_findings_closure_matrix_v1.md`
@@ -101,16 +102,16 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - A third explicit freeze exception is now approved in the memory domain: views, borrowed-slice syntax, `temp` / `session` / `ring` / `slab`, publication state (`seal` / `unseal`), and the narrow `std.binary` layer are pre-selfhost contract rather than post-selfhost speculation.
 - Rewrite-era scopes for access modes, qualified phrases, collections/ranges, `where`, concurrency, resources, memory, and chain surface now supersede stale Meadow-era planning notes where they overlap.
 - Chain surface should stay explicit as style qualifier plus introducer family plus connector-directed edges.
-- Pair-tuple rules must be explicit before selfhost because the imported corpus already depends on them heavily.
-- Pair-only tuples are the current baseline, not a statement that generalized tuples are off the table forever.
-- Exact recursive pair destructuring in `let` and `for` is now part of the approved tuple baseline; parameter destructuring, tuple `match` patterns, tuple field assignment, and 3+ tuples remain out of scope.
+- The current 2/3-tuple rules must be explicit before selfhost because the imported corpus already depends on tuple transport heavily.
+- 2- and 3-tuples are the current baseline, not a statement that generalized tuples are off the table forever.
+- Exact recursive tuple destructuring in `let` and `for` is now part of the approved tuple baseline; parameter destructuring, tuple `match` patterns, tuple field assignment, and 4+ tuples remain out of scope.
 - `plan` and `lazy` chain semantics must stay explicit in the frozen docs so pipeline validation and demand-sensitive execution are not inferred from old implementation shortcuts.
 - Chain runtime semantics are now explicit rewrite contract, not name-based inference: `parallel` is true fanout, `broadcast` is same-input fanout, `collect` is directional output collection, `plan` is pass-through validation, `async` auto-awaits between stages, and `lazy` is deferred-until-demand.
 - Qualified-phrase surface now includes dedicated `call`, `await`, `weave`, `split`, `must`, and `fallback` qualifier kinds plus optional qualifier type args on `call`, bare-method, and named-path qualifiers.
 - Owner activation context is now an explicit owner-level `context:` clause rather than an implicit "discover a shared hook context type" rule.
 - `AnyBox` or equivalent erased Arcana value carriers are banned from the rewrite contract.
-- Closures are not the intended direction; if first-class callable capability is added later, it should be through explicit function/context objects.
-- The 3-top-level-arg phrase cap is intentional and does not, by itself, justify reopening closure semantics or general function values; use explicit data shaping and the approved object/owner model where that surface fits.
+- Closures are not the intended direction; the approved pre-selfhost callable-value answer is explicit callable structs, and any broader callable transport still requires an explicit function/context object contract.
+- The 3-top-level-arg phrase cap is intentional and does not, by itself, justify reopening closure semantics or general function values; use explicit data shaping, supported tuples, callable structs where they fit, and the approved object/owner model where that surface fits.
 - Legacy Meadow backend planning must not override the rewrite path; extract only explicitly approved deferred items and keep the original documents reference-only.
 - Rebuild imported `std` for the rewrite architecture instead of preserving Meadow-era layering; showcase/game convenience logic does not become std contract just because it was carried over.
 - `std` is rewrite-owned first-party library surface, not an imported MeadowLang artifact to preserve wholesale.

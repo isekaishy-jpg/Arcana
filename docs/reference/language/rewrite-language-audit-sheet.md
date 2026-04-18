@@ -64,8 +64,8 @@ Use this order when judging anything in this file:
 - `current`: `Unit`
 - `current`: records
 - `current`: enums
-- `current`: pair tuples `(A, B)`
-- `intentional`: pair-only tuple baseline; wider tuple support is not the current baseline
+- `current`: 2/3-tuples `(A, B)` and `(A, B, C)`
+- `intentional`: 2/3-tuple baseline; wider tuple support is not the current baseline
 - `current`: `List[T]`
 - `current`: `Array[T]`
 - `current`: `Map[K, V]`
@@ -179,11 +179,12 @@ Use this order when judging anything in this file:
 
 ## Tuple Surface
 
-- `current`: pair tuples in expressions and types
-- `current`: `.0` / `.1`
-- `intentional`: pair-only tuple contract in current rewrite baseline
+- `current`: 2/3-tuples in expressions and types
+- `current`: `.0` / `.1` / `.2`
+- `intentional`: 2/3-tuple contract in current rewrite baseline
 - `intentional`: tuple patterns in `match` are excluded from the current rewrite baseline
-- `gap`: general tuple destructuring in bindings/params
+- `current`: exact recursive tuple destructuring in `let` and `for`
+- `gap`: tuple destructuring in params
 - `old-only`: richer Meadow-era tuple behavior should not be auto-restored without redesign
 
 ## Chain Surface

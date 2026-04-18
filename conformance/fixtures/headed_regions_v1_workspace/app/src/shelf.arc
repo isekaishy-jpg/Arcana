@@ -1,6 +1,6 @@
 import core.types
 
-record Widget:
+struct Widget:
     value: Int
     maybe: Option[Int]
 

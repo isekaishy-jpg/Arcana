@@ -1320,9 +1320,9 @@ impl<'a> NativeLoweringBuilder<'a> {
                 ),
                 ty: NativeAbiType::Bytes,
             }),
-            ExecExpr::Pair { left, right } => {
-                let left = self.lower_typed_expr(left, bindings)?;
-                let right = self.lower_typed_expr(right, bindings)?;
+            ExecExpr::Tuple { items } if items.len() == 2 => {
+                let left = self.lower_typed_expr(&items[0], bindings)?;
+                let right = self.lower_typed_expr(&items[1], bindings)?;
                 Some(LoweredDirectExpr {
                     expr: NativeDirectExpr::Pair {
                         left: Box::new(left.expr),
@@ -2793,6 +2793,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
                         resolved_routine: Some("core#fn-1".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -2942,6 +2943,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -3002,6 +3004,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
                         resolved_routine: Some("core#fn-5".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -3182,6 +3185,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
                         resolved_routine: Some("core#fn-1".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -3451,6 +3455,7 @@ mod tests {
                                     "helper".to_string(),
                                 ]),
                                 resolved_routine: Some("core#fn-1".to_string()),
+                                resolved_subject_kind: None,
                                 dynamic_dispatch: None,
                                 attached: Vec::new(),
                             },
@@ -3603,6 +3608,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
                         resolved_routine: Some("core#fn-1".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -3690,6 +3696,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
                         resolved_routine: Some("core#fn-1".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: vec![arcana_ir::ExecHeaderAttachment::Named {
                             name: "trace".to_string(),
@@ -3951,6 +3958,7 @@ mod tests {
                             qualifier_type_args: Vec::new(),
                             resolved_callable: Some(vec!["core".to_string(), "touch".to_string()]),
                             resolved_routine: Some("core#fn-1".to_string()),
+                            resolved_subject_kind: None,
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
@@ -4081,6 +4089,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "touch".to_string()]),
                         resolved_routine: Some("core#fn-1".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     })),
@@ -4339,6 +4348,7 @@ mod tests {
                         qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec!["core".to_string(), "run".to_string()]),
                         resolved_routine: Some("core#fn-1".to_string()),
+                        resolved_subject_kind: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
@@ -4496,6 +4506,7 @@ mod tests {
                                     "touch".to_string(),
                                 ]),
                                 resolved_routine: Some("core#fn-1".to_string()),
+                                resolved_subject_kind: None,
                                 dynamic_dispatch: None,
                                 attached: Vec::new(),
                             })),
@@ -4671,6 +4682,7 @@ mod tests {
                                     "touch".to_string(),
                                 ]),
                                 resolved_routine: Some("core#fn-1".to_string()),
+                                resolved_subject_kind: None,
                                 dynamic_dispatch: None,
                                 attached: Vec::new(),
                             })),

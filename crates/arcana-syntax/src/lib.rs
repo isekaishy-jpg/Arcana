@@ -658,7 +658,7 @@ pub struct ConstructRegion {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NominalFieldRegionKind {
+enum NominalFieldRegionKind {
     Record,
     Struct,
     Union,
@@ -676,7 +676,28 @@ impl NominalFieldRegionKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordRegion {
-    pub kind: NominalFieldRegionKind,
+    pub completion: ConstructCompletionKind,
+    pub target: Box<Expr>,
+    pub base: Option<Box<Expr>>,
+    pub destination: Option<ConstructDestination>,
+    pub default_modifier: Option<HeadedModifier>,
+    pub lines: Vec<ConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<Expr>,
+    pub base: Option<Box<Expr>>,
+    pub destination: Option<ConstructDestination>,
+    pub default_modifier: Option<HeadedModifier>,
+    pub lines: Vec<ConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnionRegion {
     pub completion: ConstructCompletionKind,
     pub target: Box<Expr>,
     pub base: Option<Box<Expr>>,
@@ -813,9 +834,8 @@ pub enum Expr {
     StrLiteral {
         text: String,
     },
-    Pair {
-        left: Box<Expr>,
-        right: Box<Expr>,
+    Tuple {
+        items: Vec<Expr>,
     },
     CollectionLiteral {
         items: Vec<Expr>,
@@ -826,6 +846,8 @@ pub enum Expr {
     },
     ConstructRegion(Box<ConstructRegion>),
     RecordRegion(Box<RecordRegion>),
+    StructRegion(Box<StructRegion>),
+    UnionRegion(Box<UnionRegion>),
     ArrayRegion(Box<ArrayRegion>),
     Chain {
         style: String,
@@ -1005,6 +1027,8 @@ pub enum StatementKind {
         lines: Vec<BindLine>,
     },
     Record(RecordRegion),
+    Struct(StructRegion),
+    Union(UnionRegion),
     Array(ArrayRegion),
     Construct(ConstructRegion),
     MemorySpec(MemorySpecDecl),
@@ -4608,18 +4632,50 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if head.is_record_like() {
+    if head == HeadedRegionHead::Record {
         let region = parse_record_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
             return Err(format!(
-                "{}:{}: `{} yield` is expression-form only",
-                entry.span.line,
-                entry.span.column,
-                region.kind.as_str()
+                "{}:{}: `record yield` is expression-form only",
+                entry.span.line, entry.span.column
             ));
         }
         return Ok(Some(Statement {
             kind: StatementKind::Record(region),
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    if head == HeadedRegionHead::Struct {
+        let region = parse_struct_region(&entry.text, &entry.children, entry.span)?;
+        if matches!(region.completion, ConstructCompletionKind::Yield) {
+            return Err(format!(
+                "{}:{}: `struct yield` is expression-form only",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Struct(region),
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    if head == HeadedRegionHead::Union {
+        let region = parse_union_region(&entry.text, &entry.children, entry.span)?;
+        if matches!(region.completion, ConstructCompletionKind::Yield) {
+            return Err(format!(
+                "{}:{}: `union yield` is expression-form only",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Union(region),
             availability: Vec::new(),
             forewords: Vec::new(),
             cleanup_footers: Vec::new(),
@@ -4709,16 +4765,39 @@ fn parse_record_yield_expression(
     if attached.is_empty() {
         return Ok(None);
     }
-    let region = parse_record_region(text, attached, span)?;
-    if !matches!(region.completion, ConstructCompletionKind::Yield) {
-        return Err(format!(
-            "{}:{}: only `{} yield` is valid in expression position",
-            span.line,
-            span.column,
-            region.kind.as_str()
-        ));
+    match head {
+        HeadedRegionHead::Record => {
+            let region = parse_record_region(text, attached, span)?;
+            if !matches!(region.completion, ConstructCompletionKind::Yield) {
+                return Err(format!(
+                    "{}:{}: only `record yield` is valid in expression position",
+                    span.line, span.column
+                ));
+            }
+            Ok(Some(Expr::RecordRegion(Box::new(region))))
+        }
+        HeadedRegionHead::Struct => {
+            let region = parse_struct_region(text, attached, span)?;
+            if !matches!(region.completion, ConstructCompletionKind::Yield) {
+                return Err(format!(
+                    "{}:{}: only `struct yield` is valid in expression position",
+                    span.line, span.column
+                ));
+            }
+            Ok(Some(Expr::StructRegion(Box::new(region))))
+        }
+        HeadedRegionHead::Union => {
+            let region = parse_union_region(text, attached, span)?;
+            if !matches!(region.completion, ConstructCompletionKind::Yield) {
+                return Err(format!(
+                    "{}:{}: only `union yield` is valid in expression position",
+                    span.line, span.column
+                ));
+            }
+            Ok(Some(Expr::UnionRegion(Box::new(region))))
+        }
+        _ => Ok(None),
     }
-    Ok(Some(Expr::RecordRegion(Box::new(region))))
 }
 
 fn parse_array_yield_expression(
@@ -4997,11 +5076,21 @@ fn parse_construct_region(
     })
 }
 
-fn parse_record_region(
+struct ParsedNominalFieldRegion {
+    completion: ConstructCompletionKind,
+    target: Box<Expr>,
+    base: Option<Box<Expr>>,
+    destination: Option<ConstructDestination>,
+    default_modifier: Option<HeadedModifier>,
+    lines: Vec<ConstructLine>,
+    span: Span,
+}
+
+fn parse_nominal_field_region(
     text: &str,
     children: &[RawBlockEntry],
     span: Span,
-) -> Result<RecordRegion, String> {
+) -> Result<(NominalFieldRegionKind, ParsedNominalFieldRegion), String> {
     if children.is_empty() {
         return Err(format!(
             "{}:{}: `record` requires an indented region body",
@@ -5116,21 +5205,92 @@ fn parse_record_region(
             kind.as_str()
         ));
     }
-    Ok(RecordRegion {
+    Ok((
         kind,
-        completion,
-        target: Box::new(parse_expression(target_text, &[], span)?),
-        base: base_text
-            .map(|base| parse_expression(base, &[], span))
-            .transpose()?
-            .map(Box::new),
-        destination,
-        default_modifier,
-        lines: children
-            .iter()
-            .map(|line| parse_record_line(line, kind))
-            .collect::<Result<Vec<_>, _>>()?,
-        span,
+        ParsedNominalFieldRegion {
+            completion,
+            target: Box::new(parse_expression(target_text, &[], span)?),
+            base: base_text
+                .map(|base| parse_expression(base, &[], span))
+                .transpose()?
+                .map(Box::new),
+            destination,
+            default_modifier,
+            lines: children
+                .iter()
+                .map(|line| parse_record_line(line, kind))
+                .collect::<Result<Vec<_>, _>>()?,
+            span,
+        },
+    ))
+}
+
+fn parse_record_region(
+    text: &str,
+    children: &[RawBlockEntry],
+    span: Span,
+) -> Result<RecordRegion, String> {
+    let (kind, region) = parse_nominal_field_region(text, children, span)?;
+    if kind != NominalFieldRegionKind::Record {
+        return Err(format!(
+            "{}:{}: malformed `record` header",
+            span.line, span.column
+        ));
+    }
+    Ok(RecordRegion {
+        completion: region.completion,
+        target: region.target,
+        base: region.base,
+        destination: region.destination,
+        default_modifier: region.default_modifier,
+        lines: region.lines,
+        span: region.span,
+    })
+}
+
+fn parse_struct_region(
+    text: &str,
+    children: &[RawBlockEntry],
+    span: Span,
+) -> Result<StructRegion, String> {
+    let (kind, region) = parse_nominal_field_region(text, children, span)?;
+    if kind != NominalFieldRegionKind::Struct {
+        return Err(format!(
+            "{}:{}: malformed `struct` header",
+            span.line, span.column
+        ));
+    }
+    Ok(StructRegion {
+        completion: region.completion,
+        target: region.target,
+        base: region.base,
+        destination: region.destination,
+        default_modifier: region.default_modifier,
+        lines: region.lines,
+        span: region.span,
+    })
+}
+
+fn parse_union_region(
+    text: &str,
+    children: &[RawBlockEntry],
+    span: Span,
+) -> Result<UnionRegion, String> {
+    let (kind, region) = parse_nominal_field_region(text, children, span)?;
+    if kind != NominalFieldRegionKind::Union {
+        return Err(format!(
+            "{}:{}: malformed `union` header",
+            span.line, span.column
+        ));
+    }
+    Ok(UnionRegion {
+        completion: region.completion,
+        target: region.target,
+        base: region.base,
+        destination: region.destination,
+        default_modifier: region.default_modifier,
+        lines: region.lines,
+        span: region.span,
     })
 }
 
@@ -5583,7 +5743,7 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
     if let Some(expr) = parse_qualified_phrase(trimmed)? {
         return Ok(expr);
     }
-    if let Some(expr) = parse_pair_expression(trimmed)? {
+    if let Some(expr) = parse_tuple_expression(trimmed)? {
         return Ok(expr);
     }
     if let Some(expr) = parse_collection_literal(trimmed)? {
@@ -6192,16 +6352,18 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
     }))
 }
 
-fn parse_pair_expression(text: &str) -> Result<Option<Expr>, String> {
+fn parse_tuple_expression(text: &str) -> Result<Option<Expr>, String> {
     let Some(parts) = tuple_parts_if_whole(text) else {
         return Ok(None);
     };
-    if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+    if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.is_empty()) {
         return Ok(None);
     }
-    Ok(Some(Expr::Pair {
-        left: Box::new(parse_expression_core(parts[0])?),
-        right: Box::new(parse_expression_core(parts[1])?),
+    Ok(Some(Expr::Tuple {
+        items: parts
+            .into_iter()
+            .map(parse_expression_core)
+            .collect::<Result<Vec<_>, _>>()?,
     }))
 }
 
@@ -7663,6 +7825,9 @@ enum ForewordTarget {
     Use,
     Function,
     Record,
+    Struct,
+    Union,
+    Array,
     Object,
     Owner,
     Enum,
@@ -7721,9 +7886,9 @@ fn symbol_foreword_target(kind: SymbolKind) -> ForewordTarget {
     match kind {
         SymbolKind::Fn => ForewordTarget::Function,
         SymbolKind::Record => ForewordTarget::Record,
-        SymbolKind::Struct => ForewordTarget::Record,
-        SymbolKind::Union => ForewordTarget::Record,
-        SymbolKind::Array => ForewordTarget::Record,
+        SymbolKind::Struct => ForewordTarget::Struct,
+        SymbolKind::Union => ForewordTarget::Union,
+        SymbolKind::Array => ForewordTarget::Array,
         SymbolKind::Object => ForewordTarget::Object,
         SymbolKind::Owner => ForewordTarget::Owner,
         SymbolKind::Enum => ForewordTarget::Enum,
@@ -7744,6 +7909,9 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
             target,
             ForewordTarget::Function
                 | ForewordTarget::Record
+                | ForewordTarget::Struct
+                | ForewordTarget::Union
+                | ForewordTarget::Array
                 | ForewordTarget::Object
                 | ForewordTarget::Owner
                 | ForewordTarget::Enum
@@ -7767,6 +7935,9 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
                 | ForewordTarget::System
                 | ForewordTarget::Function
                 | ForewordTarget::Record
+                | ForewordTarget::Struct
+                | ForewordTarget::Union
+                | ForewordTarget::Array
                 | ForewordTarget::Object
                 | ForewordTarget::Owner
                 | ForewordTarget::Enum
@@ -8744,6 +8915,40 @@ fn validate_statement_phrase_contract(statements: &[Statement]) -> Result<(), St
                     validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
                 }
             }
+            StatementKind::Struct(region) => {
+                validate_expr_phrase_contract(&region.target, region.span, false)?;
+                if let Some(base) = &region.base {
+                    validate_expr_phrase_contract(base, region.span, false)?;
+                }
+                validate_headed_modifier_phrase_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_phrase_contract(&line.value, line.span, false)?;
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::Union(region) => {
+                validate_expr_phrase_contract(&region.target, region.span, false)?;
+                if let Some(base) = &region.base {
+                    validate_expr_phrase_contract(base, region.span, false)?;
+                }
+                validate_headed_modifier_phrase_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_phrase_contract(&line.value, line.span, false)?;
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
             StatementKind::Construct(region) => {
                 validate_expr_phrase_contract(&region.target, region.span, false)?;
                 validate_headed_modifier_phrase_contract(
@@ -8791,9 +8996,10 @@ fn validate_expr_phrase_contract(
         | Expr::IntLiteral { .. }
         | Expr::FloatLiteral { .. }
         | Expr::StrLiteral { .. } => {}
-        Expr::Pair { left, right } => {
-            validate_expr_phrase_contract(left, span, false)?;
-            validate_expr_phrase_contract(right, span, false)?;
+        Expr::Tuple { items } => {
+            for item in items {
+                validate_expr_phrase_contract(item, span, false)?;
+            }
         }
         Expr::CollectionLiteral { items } => {
             for item in items {
@@ -8807,6 +9013,34 @@ fn validate_expr_phrase_contract(
             }
         }
         Expr::RecordRegion(region) => {
+            validate_expr_phrase_contract(&region.target, region.span, false)?;
+            if let Some(base) = &region.base {
+                validate_expr_phrase_contract(base, region.span, false)?;
+            }
+            validate_headed_modifier_phrase_contract(
+                region.default_modifier.as_ref(),
+                region.span,
+            )?;
+            for line in &region.lines {
+                validate_expr_phrase_contract(&line.value, line.span, false)?;
+                validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+            }
+        }
+        Expr::StructRegion(region) => {
+            validate_expr_phrase_contract(&region.target, region.span, false)?;
+            if let Some(base) = &region.base {
+                validate_expr_phrase_contract(base, region.span, false)?;
+            }
+            validate_headed_modifier_phrase_contract(
+                region.default_modifier.as_ref(),
+                region.span,
+            )?;
+            for line in &region.lines {
+                validate_expr_phrase_contract(&line.value, line.span, false)?;
+                validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+            }
+        }
+        Expr::UnionRegion(region) => {
             validate_expr_phrase_contract(&region.target, region.span, false)?;
             if let Some(base) = &region.base {
                 validate_expr_phrase_contract(base, region.span, false)?;
@@ -9312,6 +9546,40 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
                     validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
                 }
             }
+            StatementKind::Struct(region) => {
+                validate_expr_tuple_contract(&region.target, region.span)?;
+                if let Some(base) = &region.base {
+                    validate_expr_tuple_contract(base, region.span)?;
+                }
+                validate_headed_modifier_tuple_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_tuple_contract(&line.value, line.span)?;
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::Union(region) => {
+                validate_expr_tuple_contract(&region.target, region.span)?;
+                if let Some(base) = &region.base {
+                    validate_expr_tuple_contract(base, region.span)?;
+                }
+                validate_headed_modifier_tuple_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_tuple_contract(&line.value, line.span)?;
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
             StatementKind::Array(region) => {
                 validate_expr_tuple_contract(&region.target, region.span)?;
                 if let Some(base) = &region.base {
@@ -9363,10 +9631,9 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
         | Expr::IntLiteral { .. }
         | Expr::FloatLiteral { .. }
         | Expr::StrLiteral { .. } => Ok(()),
-        Expr::Pair { left, right } => {
-            validate_expr_tuple_contract(left, span)?;
-            validate_expr_tuple_contract(right, span)
-        }
+        Expr::Tuple { items } => items
+            .iter()
+            .try_for_each(|item| validate_expr_tuple_contract(item, span)),
         Expr::CollectionLiteral { items } => {
             for item in items {
                 validate_expr_tuple_contract(item, span)?;
@@ -9381,6 +9648,30 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             Ok(())
         }
         Expr::RecordRegion(region) => {
+            validate_expr_tuple_contract(&region.target, region.span)?;
+            if let Some(base) = &region.base {
+                validate_expr_tuple_contract(base, region.span)?;
+            }
+            validate_headed_modifier_tuple_contract(region.default_modifier.as_ref(), region.span)?;
+            for line in &region.lines {
+                validate_expr_tuple_contract(&line.value, line.span)?;
+                validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+            }
+            Ok(())
+        }
+        Expr::StructRegion(region) => {
+            validate_expr_tuple_contract(&region.target, region.span)?;
+            if let Some(base) = &region.base {
+                validate_expr_tuple_contract(base, region.span)?;
+            }
+            validate_headed_modifier_tuple_contract(region.default_modifier.as_ref(), region.span)?;
+            for line in &region.lines {
+                validate_expr_tuple_contract(&line.value, line.span)?;
+                validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+            }
+            Ok(())
+        }
+        Expr::UnionRegion(region) => {
             validate_expr_tuple_contract(&region.target, region.span)?;
             if let Some(base) = &region.base {
                 validate_expr_tuple_contract(base, region.span)?;
@@ -9678,9 +9969,9 @@ fn validate_tuple_groups_in_text(
                     .into_iter()
                     .map(str::trim)
                     .collect::<Vec<_>>();
-                if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+                if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.is_empty()) {
                     return Err(format!(
-                        "{}:{}: {tuple_label} must have exactly 2 elements in v1 ({context})",
+                        "{}:{}: {tuple_label} must have exactly 2 or 3 elements in this phase ({context})",
                         span.line, span.column
                     ));
                 }
@@ -9701,9 +9992,9 @@ fn validate_tuple_groups_in_text(
 }
 
 fn validate_tuple_member_access(member: &str, span: Span) -> Result<(), String> {
-    if is_numeric_member_selector(member) && member != "0" && member != "1" {
+    if is_numeric_member_selector(member) && member != "0" && member != "1" && member != "2" {
         return Err(format!(
-            "{}:{}: tuple field access only supports `.0` and `.1` in v1",
+            "{}:{}: tuple field access only supports `.0`, `.1`, and `.2` in this phase",
             span.line, span.column
         ));
     }
@@ -9725,7 +10016,7 @@ fn is_valid_tuple_binding_pattern(text: &str) -> bool {
     let Some(parts) = tuple_parts_if_whole(trimmed) else {
         return false;
     };
-    parts.len() == 2
+    (2..=3).contains(&parts.len())
         && parts
             .iter()
             .all(|part| is_valid_tuple_binding_pattern(part.trim()))
@@ -10900,10 +11191,10 @@ mod tests {
 
     #[test]
     fn parse_module_rejects_tuple_field_access_outside_pair_contract() {
-        let err = parse_module("fn main() -> Int:\n    return pair.2\n")
+        let err = parse_module("fn main() -> Int:\n    return pair.3\n")
             .expect_err("tuple field access should fail");
         assert!(
-            err.contains("tuple field access only supports `.0` and `.1` in v1"),
+            err.contains("tuple field access only supports `.0`, `.1`, and `.2` in this phase"),
             "{err}"
         );
     }
@@ -10991,10 +11282,16 @@ mod tests {
 
     #[test]
     fn parse_module_rejects_three_element_tuple_contracts() {
-        let err = parse_module("fn main() -> (Int, Int, Int):\n    return (1, 2, 3)\n")
-            .expect_err("triple tuples should fail");
+        parse_module("fn main() -> (Int, Int, Int):\n    return (1, 2, 3)\n")
+            .expect("triple tuples should parse");
+    }
+
+    #[test]
+    fn parse_module_rejects_four_element_tuple_contracts() {
+        let err = parse_module("fn main() -> (Int, Int, Int, Int):\n    return (1, 2, 3, 4)\n")
+            .expect_err("four-tuples should fail");
         assert!(
-            err.contains("tuple types must have exactly 2 elements in v1"),
+            err.contains("tuple types must have exactly 2 or 3 elements in this phase"),
             "{err}"
         );
     }
@@ -11215,7 +11512,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_keeps_parenthesized_pairs_with_phrase_pair_args() {
+    fn parse_module_keeps_parenthesized_tuples_with_phrase_tuple_args() {
         let parsed = parse_module(
             "fn main(a: Int, b: Int) -> (Bool, Int):\n    return (true, widget.emit :: (a, b) :: call)\n",
         )
@@ -11224,27 +11521,30 @@ mod tests {
         match &parsed.symbols[0].statements[0].kind {
             StatementKind::Return { value } => match value.as_ref().expect("return value expected")
             {
-                Expr::Pair { left, right } => {
-                    assert!(matches!(left.as_ref(), Expr::BoolLiteral { value: true }));
-                    match right.as_ref() {
+                Expr::Tuple { items } => {
+                    assert_eq!(items.len(), 2);
+                    assert!(matches!(&items[0], Expr::BoolLiteral { value: true }));
+                    match &items[1] {
                         Expr::QualifiedPhrase {
                             args, qualifier, ..
                         } => {
                             assert_eq!(qualifier, "call");
                             assert_eq!(args.len(), 1);
-                            assert!(matches!(&args[0], PhraseArg::Positional(Expr::Pair { .. })));
+                            assert!(
+                                matches!(&args[0], PhraseArg::Positional(Expr::Tuple { items }) if items.len() == 2)
+                            );
                         }
                         other => panic!("expected qualified phrase rhs, got {other:?}"),
                     }
                 }
-                other => panic!("expected pair return, got {other:?}"),
+                other => panic!("expected tuple return, got {other:?}"),
             },
             other => panic!("expected return statement, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_module_keeps_pair_rhs_phrase_calls_from_std_ecs_shape() {
+    fn parse_module_keeps_tuple_rhs_phrase_calls_from_std_ecs_shape() {
         let parsed = parse_module(
             "fn main() -> (Bool, Int):\n    return (true, get_component[Int] :: :: call)\n",
         )
@@ -11253,14 +11553,15 @@ mod tests {
         match &parsed.symbols[0].statements[0].kind {
             StatementKind::Return { value } => match value.as_ref().expect("return value expected")
             {
-                Expr::Pair { left, right } => {
-                    assert!(matches!(left.as_ref(), Expr::BoolLiteral { value: true }));
+                Expr::Tuple { items } => {
+                    assert_eq!(items.len(), 2);
+                    assert!(matches!(&items[0], Expr::BoolLiteral { value: true }));
                     assert!(matches!(
-                        right.as_ref(),
+                        &items[1],
                         Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
                     ));
                 }
-                other => panic!("expected pair return, got {other:?}"),
+                other => panic!("expected tuple return, got {other:?}"),
             },
             other => panic!("expected return statement, got {other:?}"),
         }
@@ -11356,7 +11657,7 @@ mod tests {
                 assert!(matches!(
                     condition,
                     Expr::Unary { op: UnaryOp::Not, expr }
-                        if !matches!(expr.as_ref(), Expr::Pair { .. })
+                        if !matches!(expr.as_ref(), Expr::Tuple { .. })
                 ));
             }
             other => panic!("expected if statement, got {other:?}"),
@@ -11497,7 +11798,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_collects_pair_tuple_expressions() {
+    fn parse_module_collects_tuple_expressions() {
         let parsed =
             parse_module("fn main() -> Int:\n    let pair = (left, right)\n    return pair.0\n")
                 .expect("parse should pass");
@@ -11507,24 +11808,18 @@ mod tests {
                 assert_eq!(name, "pair");
                 assert!(matches!(
                     value,
-                    Expr::Pair {
-                        left,
-                        right,
-                    } if matches!(
-                        left.as_ref(),
-                        expr if expr_is_path(expr, "left")
-                    ) && matches!(
-                        right.as_ref(),
-                        expr if expr_is_path(expr, "right")
-                    )
+                    Expr::Tuple { items }
+                        if items.len() == 2
+                            && matches!(&items[0], expr if expr_is_path(expr, "left"))
+                            && matches!(&items[1], expr if expr_is_path(expr, "right"))
                 ));
             }
-            other => panic!("expected pair let, got {other:?}"),
+            other => panic!("expected tuple let, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_module_collects_pair_tuple_expressions_with_binary_left_side() {
+    fn parse_module_collects_tuple_expressions_with_binary_left_side() {
         let parsed = parse_module(
             "fn main() -> Int:\n    let pair = (left + right, tail)\n    return pair.1\n",
         )
@@ -11535,12 +11830,13 @@ mod tests {
                 assert_eq!(name, "pair");
                 assert!(matches!(
                     value,
-                    Expr::Pair { left, right }
-                        if matches!(left.as_ref(), Expr::Binary { .. })
-                            && matches!(right.as_ref(), expr if expr_is_path(expr, "tail"))
+                    Expr::Tuple { items }
+                        if items.len() == 2
+                            && matches!(&items[0], Expr::Binary { .. })
+                            && matches!(&items[1], expr if expr_is_path(expr, "tail"))
                 ));
             }
-            other => panic!("expected pair let, got {other:?}"),
+            other => panic!("expected tuple let, got {other:?}"),
         }
     }
 
@@ -11665,26 +11961,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_preserves_phrase_calls_inside_pair_expressions() {
+    fn parse_module_preserves_phrase_calls_inside_tuple_expressions() {
         let parsed = parse_module(
             "fn main() -> Bool:\n    return (std.collections.list.new[Str] :: :: call, \"\")\n",
         )
-        .expect("pair expression should parse");
+        .expect("tuple expression should parse");
 
         match &parsed.symbols[0].statements[0].kind {
-            StatementKind::Return { value } => match value
-                .as_ref()
-                .expect("return should carry a value")
-            {
-                Expr::Pair { left, right } => {
-                    assert!(matches!(
-                        left.as_ref(),
-                        Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
-                    ));
-                    assert!(matches!(right.as_ref(), expr if expr_is_str_literal(expr, "\"\"")));
+            StatementKind::Return { value } => {
+                match value.as_ref().expect("return should carry a value") {
+                    Expr::Tuple { items } => {
+                        assert_eq!(items.len(), 2);
+                        assert!(matches!(
+                            &items[0],
+                            Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
+                        ));
+                        assert!(matches!(&items[1], expr if expr_is_str_literal(expr, "\"\"")));
+                    }
+                    other => panic!("expected tuple expression, got {other:?}"),
                 }
-                other => panic!("expected pair expression, got {other:?}"),
-            },
+            }
             other => panic!("expected return statement, got {other:?}"),
         }
     }

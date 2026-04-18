@@ -46,8 +46,8 @@ These are the coding patterns that appear stable enough to teach as current rewr
 ### Data Shape
 
 - Core value practice centers on `Int`, `Bool`, `Str`, `Unit`, records, enums, and first-party collections.
-- Pair tuples are the current tuple baseline.
-- Code should assume pair-only tuple practice unless and until richer tuple rules are re-ratified.
+- 2- and 3-tuples are the current tuple baseline.
+- Code should assume 2/3-tuple practice unless and until richer tuple rules are re-ratified.
 
 ### Calls And Phrases
 

@@ -20,7 +20,7 @@ Arcana v0 currently includes:
 - Multi-file Grimoires (`book.toml`, `import`, `export`, `reexport`)
 - Arcana-native concurrency/behavior support (`async fn`, `weave`, `split`, `>> await`, `behavior[...] fn`)
 - Core operators: unary `-` / `not` / `~`, `%`, `!=`, `<=`, `>=`, `and`, `or`, bitwise `& | ^ << shr`, `Str + Str`, compound assignments
-- Collections v0.9: `List[T]`, list literals, slicing with ranges, indexed assignment, `RangeInt`, pair tuples `(A, B)`
+- Collections v0.9: `List[T]`, list literals, slicing with ranges, indexed assignment, `RangeInt`, and 2/3-tuples (`(A, B)` / `(A, B, C)`)
 - Memory phrases v0.35+: `arena|frame|pool|temp|session|ring|slab: instance :> ... <: qualifier` with typed allocator storage plus explicit views/publication state
 - Headed regions v0.42: `recycle`, `construct`, `bind`, and `Memory` as structural inner blocks with head-defined rides, default modifiers, and head-specific completion/target slots
 - Ownership/lifetimes v0.32 surface: explicit capability types (`&read[T, 'a]`, `&edit[T, 'a]`, `&take[T, 'a]`, `&hold[T, 'a]`), capability/deref expressions (`&read x`, `&edit x`, `&take x`, `&hold x`, `*x`), explicit borrowed-slice forms (`&read x[a..b]`, `&edit x[a..b]`), `reclaim x` for held-capability release, a carried lexical capability contract, and `#boundary[target="lua|sql"]` signature contracts
@@ -304,7 +304,7 @@ Historical note: the archived MeadowLang operator examples now live outside this
 
 Arcana now includes a first collection surface centered on `List[T]`.
 
-- Builtin types: `List[T]`, `RangeInt`, pair tuples `(A, B)`
+- Builtin types: `List[T]`, `RangeInt`, 2/3-tuples (`(A, B)` / `(A, B, C)`)
 - List literals: `[1, 2, 3]` (non-empty only; use `std.collections.list.new[T]()` for empty)
 - Indexing/slicing:
   - `xs[i]`
@@ -329,8 +329,8 @@ Notes:
 - Bounds are strict runtime errors (no clamping / no negative indexing).
 - `RangeInt` values support equality and are primarily used for slicing.
 - Generic calls use phrase style (`foo[T] :: ... :: call`), while `foo[T]` without a qualifier remains subscript syntax.
-- Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
-- Exact recursive pair destructuring in `let` and `for` is part of the current pair-tuple baseline; parameter destructuring and tuple `match` patterns remain deferred.
+- 2- and 3-tuples are the current selfhost baseline. Wider tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
+- Exact recursive tuple destructuring in `let` and `for` is part of the current tuple baseline; parameter destructuring, tuple `match` patterns, tuple field assignment, and 4+ tuples remain deferred.
 
 Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/arcana/*`, conformance fixtures, and crate tests.
 
