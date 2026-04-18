@@ -4236,21 +4236,23 @@ mod tests {
                     generated_path.display()
                 )
             });
+            let normalized_generated = generated.replace("\r\n", "\n");
             assert!(
-                generated.starts_with("// GENERATED FILE. DO NOT EDIT BY HAND.\n"),
+                normalized_generated.starts_with("// GENERATED FILE. DO NOT EDIT BY HAND.\n"),
                 "{} should be fenced as a generated file",
                 generated_path.display()
             );
             assert!(
-                generated.contains(
+                normalized_generated.contains(
                     "// Projection config: grimoires/arcana/winapi/generation/projection.toml\n"
                 ),
                 "{} should point back at the checked-in projection config",
                 generated_path.display()
             );
             assert!(
-                generated.contains("// Source of truth: grimoires/arcana/winapi/generation/")
-                    && !generated.contains("generation/inputs/raw/"),
+                normalized_generated
+                    .contains("// Source of truth: grimoires/arcana/winapi/generation/")
+                    && !normalized_generated.contains("generation/inputs/raw/"),
                 "{} should point back at a checked-in generation manifest instead of a handwritten raw input file",
                 generated_path.display()
             );
