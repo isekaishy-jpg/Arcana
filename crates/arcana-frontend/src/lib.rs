@@ -29,9 +29,10 @@ use arcana_hir::{
     HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp,
     HirWorkspacePackage, HirWorkspaceSummary, canonicalize_hir_type_in_module,
     collect_hir_type_refs, current_workspace_package_for_module, hir_strip_reference_type,
-    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lookup_shackle_decl_path,
-    lower_module_text, match_name_resolves_to_zero_payload_variant, render_symbol_fingerprint,
-    render_symbol_signature, resolve_workspace, visible_package_root_for_module,
+    infer_receiver_expr_type, lookup_api_decl_path, lookup_method_candidates_for_hir_type,
+    lookup_shackle_decl_path, lower_module_text, match_name_resolves_to_zero_payload_variant,
+    render_symbol_fingerprint, render_symbol_signature, resolve_workspace,
+    visible_package_root_for_module,
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
 use arcana_package::{
@@ -12521,6 +12522,17 @@ fn validate_record_region_semantics(
     region: &arcana_hir::HirRecordRegion,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if matches!(region.kind, arcana_hir::HirRecordRegionKind::Api) {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message:
+                "`api` regions are boundary-only and cannot be used as ordinary local record construction"
+                    .to_string(),
+        });
+        return;
+    }
     validate_nominal_region_semantics(
         workspace,
         resolved_module,
@@ -13201,6 +13213,15 @@ fn validate_module_semantics(
             diagnostics,
         );
     }
+    for api_decl in &module.api_decls {
+        validate_api_decl_surface_types(
+            workspace,
+            resolved_module,
+            &module_path,
+            api_decl,
+            diagnostics,
+        );
+    }
     for impl_decl in &module.impls {
         validate_impl_surface_types(
             workspace,
@@ -13218,6 +13239,73 @@ fn validate_module_semantics(
             impl_decl,
             diagnostics,
         );
+    }
+}
+
+fn validate_api_decl_surface_types(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    api_decl: &arcana_hir::HirApiDecl,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_type_surface(
+        workspace,
+        resolved_module,
+        module_path,
+        &TypeScope::default(),
+        &api_decl.request_type,
+        api_decl.span,
+        &format!("api `{}` request type", api_decl.name),
+        diagnostics,
+    );
+    validate_type_surface(
+        workspace,
+        resolved_module,
+        module_path,
+        &TypeScope::default(),
+        &api_decl.response_type,
+        api_decl.span,
+        &format!("api `{}` response type", api_decl.name),
+        diagnostics,
+    );
+
+    for (label, ty) in [
+        ("request", &api_decl.request_type),
+        ("response", &api_decl.response_type),
+    ] {
+        if !arcana_hir::hir_type_is_boundary_safe(ty) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: api_decl.span.line,
+                column: api_decl.span.column,
+                message: format!(
+                    "api `{}` {} type `{}` is not boundary-safe",
+                    api_decl.name, label, ty
+                ),
+            });
+        }
+        if !api_contract_type_is_packed_nominal(workspace, resolved_module, ty) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: api_decl.span.line,
+                column: api_decl.span.column,
+                message: format!(
+                    "api `{}` {} type `{}` must be a record/struct/union contract",
+                    api_decl.name, label, ty
+                ),
+            });
+        }
+    }
+
+    if let Err(err) = arcana_cabi::validate_api_contract_metadata(&api_decl.name, &api_decl.fields)
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: api_decl.span.line,
+            column: api_decl.span.column,
+            message: err,
+        });
     }
 }
 
@@ -14715,6 +14803,45 @@ fn resolve_record_fields_for_type(
         _ => return None,
     };
     resolve_record_target_fields(workspace, resolved_module, path)
+}
+
+fn resolve_struct_fields_for_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<BTreeMap<String, HirType>> {
+    let path = match &ty.kind {
+        arcana_hir::HirTypeKind::Path(path) | arcana_hir::HirTypeKind::Apply { base: path, .. } => {
+            &path.segments
+        }
+        _ => return None,
+    };
+    resolve_struct_target_fields(workspace, resolved_module, path)
+}
+
+fn resolve_union_fields_for_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<BTreeMap<String, HirType>> {
+    let path = match &ty.kind {
+        arcana_hir::HirTypeKind::Path(path) | arcana_hir::HirTypeKind::Apply { base: path, .. } => {
+            &path.segments
+        }
+        _ => return None,
+    };
+    resolve_union_target_fields(workspace, resolved_module, path)
+}
+
+fn api_contract_type_is_packed_nominal(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> bool {
+    resolve_record_fields_for_type(workspace, resolved_module, ty)
+        .or_else(|| resolve_struct_fields_for_type(workspace, resolved_module, ty))
+        .or_else(|| resolve_union_fields_for_type(workspace, resolved_module, ty))
+        .is_some()
 }
 
 fn resolve_array_target_shape(
@@ -19957,6 +20084,9 @@ fn value_path_exists(
     if lookup_shackle_decl_path(workspace, resolved_module, path).is_some() {
         return true;
     }
+    if lookup_api_decl_path(workspace, resolved_module, path).is_some() {
+        return true;
+    }
     if let Some(binding) = resolved_module.bindings.get(&path[0])
         && target_path_exists(workspace, &binding.target, &path[1..])
     {
@@ -21183,6 +21313,94 @@ mod tests {
     }
 
     #[test]
+    fn typed_api_fingerprint_ignores_equivalent_api_decl_type_spelling() {
+        let root = make_temp_workspace(
+            "typed_api_decl_surface_spelling",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                ("app/src/shelf.arc", "fn main() -> Int:\n    return 0\n"),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    concat!(
+                        "import types\n",
+                        "use types.ProcessInfoRequest\n",
+                        "use types.ProcessInfoResponse\n",
+                        "export api GetProcessInfo:\n",
+                        "    request: ProcessInfoRequest\n",
+                        "    response: ProcessInfoResponse\n",
+                        "    backend: foreign kernel32.GetProcessInformation\n",
+                        "    field process: opaque-handle mode=in\n",
+                        "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+                    ),
+                ),
+                (
+                    "core/src/types.arc",
+                    concat!(
+                        "export record ProcessInfoRequest:\n",
+                        "    process: Int\n",
+                        "    info: Int\n",
+                        "export record ProcessInfoResponse:\n",
+                        "    ok: Int\n",
+                        "    info: Int\n",
+                    ),
+                ),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+
+        fs::write(
+            root.join("core/src/book.arc"),
+            concat!(
+                "export api GetProcessInfo:\n",
+                "    request: types.ProcessInfoRequest\n",
+                "    response: types.ProcessInfoResponse\n",
+                "    backend: foreign kernel32.GetProcessInformation\n",
+                "    field process: opaque-handle mode=in\n",
+                "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+            ),
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        assert_eq!(
+            first_fingerprints
+                .get(&core_id)
+                .map(|fingerprint| &fingerprint.api),
+            second_fingerprints
+                .get(&core_id)
+                .map(|fingerprint| &fingerprint.api)
+        );
+        assert_eq!(
+            first_fingerprints
+                .get(&app_id)
+                .map(|fingerprint| &fingerprint.api),
+            second_fingerprints
+                .get(&app_id)
+                .map(|fingerprint| &fingerprint.api)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_workspace_rejects_private_dependency_symbol_use() {
         let root = make_temp_workspace(
             "private_dependency_symbol_use",
@@ -21329,6 +21547,165 @@ mod tests {
         fs::write(
             root.join("core/src/book.arc"),
             "#boundary[target = \"sql\"]\nexport fn boundary_value(value: Int) -> Int:\n    return value\n",
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member(), core_id);
+        assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member(), app_id);
+        assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn typed_api_fingerprint_rebuilds_dependents_for_exported_api_decl_changes() {
+        let root = make_temp_workspace(
+            "typed_api_decl_contract_change",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                ("app/src/shelf.arc", "fn main() -> Int:\n    return 0\n"),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    concat!(
+                        "export api GetProcessInfo:\n",
+                        "    request: types.ProcessInfoRequest\n",
+                        "    response: types.ProcessInfoResponse\n",
+                        "    backend: foreign kernel32.GetProcessInformation\n",
+                        "    field process: opaque-handle mode=in\n",
+                        "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+                    ),
+                ),
+                (
+                    "core/src/types.arc",
+                    concat!(
+                        "export record ProcessInfoRequest:\n",
+                        "    process: Int\n",
+                        "    info: Int\n",
+                        "export record ProcessInfoResponse:\n",
+                        "    ok: Int\n",
+                        "    info: Int\n",
+                    ),
+                ),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("core/src/book.arc"),
+            concat!(
+                "export api GetProcessInfo:\n",
+                "    request: types.ProcessInfoRequest\n",
+                "    response: types.ProcessInfoResponse\n",
+                "    backend: foreign kernel32.GetProcessInformationEx\n",
+                "    field process: opaque-handle mode=in\n",
+                "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+            ),
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member(), core_id);
+        assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member(), app_id);
+        assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn typed_api_fingerprint_rebuilds_dependents_for_api_slot_changes() {
+        let root = make_temp_workspace(
+            "typed_api_slot_change",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                ("app/src/shelf.arc", "fn main() -> Int:\n    return 0\n"),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    concat!(
+                        "export api Query:\n",
+                        "    request: types.QueryRequest\n",
+                        "    response: types.QueryResponse\n",
+                        "    backend: foreign kernel32.Query\n",
+                        "    field status: value mode=out slot=return\n",
+                        "    field pid: value mode=out slot=param\n",
+                    ),
+                ),
+                (
+                    "core/src/types.arc",
+                    concat!(
+                        "export record QueryRequest:\n",
+                        "    seed: Int\n",
+                        "export record QueryResponse:\n",
+                        "    status: Int\n",
+                        "    pid: Int\n",
+                    ),
+                ),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("core/src/book.arc"),
+            concat!(
+                "export api Query:\n",
+                "    request: types.QueryRequest\n",
+                "    response: types.QueryResponse\n",
+                "    backend: foreign kernel32.Query\n",
+                "    field status: value mode=out slot=param\n",
+                "    field pid: value mode=out slot=return\n",
+            ),
         )
         .expect("rewrite should succeed");
 
@@ -23804,6 +24181,109 @@ mod tests {
     }
 
     #[test]
+    fn check_path_rejects_non_nominal_api_contract_types() {
+        let root = make_temp_package(
+            "api_non_nominal_contract",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "export api ScalarBridge:\n",
+                        "    request: Int\n",
+                        "    response: Str\n",
+                        "    backend: foreign kernel32.ScalarBridge\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-nominal api contracts should fail");
+        assert!(
+            err.contains(
+                "api `ScalarBridge` request type `Int` must be a record/struct/union contract"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "api `ScalarBridge` response type `Str` must be a record/struct/union contract"
+            ),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_local_api_regions() {
+        let root = make_temp_package(
+            "api_region_local_use",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "record Payload:\n",
+                        "    value: Int\n",
+                        "fn main() -> Payload:\n",
+                        "    let payload = api yield Payload -return 0\n",
+                        "        value = 1\n",
+                        "    return payload\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("local api region use should fail");
+        assert!(
+            err.contains("`api` regions are boundary-only and cannot be used as ordinary local record construction"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_same_package_unprefixed_api_calls() {
+        let root = make_temp_package(
+            "api_same_package_unprefixed_call",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "record PingRequest:\n",
+                        "    value: Int\n",
+                        "record PingResponse:\n",
+                        "    value: Int\n",
+                        "export api Ping:\n",
+                        "    request: PingRequest\n",
+                        "    response: PingResponse\n",
+                        "    backend: foreign kernel32.Ping\n",
+                        "fn main() -> Int:\n",
+                        "    let api = Ping\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("same-package unprefixed api call should fail");
+        assert!(err.contains("unresolved value reference `Ping`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_rejects_unresolved_type_package() {
         let err = check_path(
             &repo_root()
@@ -26231,7 +26711,7 @@ mod tests {
                         "role = \"binding\"\n",
                         "producer = \"arcana-source\"\n",
                         "file = \"hostapi_binding.dll\"\n",
-                        "contract = \"arcana.cabi.binding.v1\"\n",
+                        "contract = \"arcana.cabi.binding.v2\"\n",
                     ),
                 ),
                 ("hostapi/src/book.arc", "// hostapi root\n"),
@@ -26284,7 +26764,7 @@ mod tests {
                         "role = \"binding\"\n",
                         "producer = \"arcana-source\"\n",
                         "file = \"hostapi_binding.dll\"\n",
-                        "contract = \"arcana.cabi.binding.v1\"\n",
+                        "contract = \"arcana.cabi.binding.v2\"\n",
                     ),
                 ),
                 ("hostapi/src/book.arc", "// hostapi root\n"),
@@ -26346,7 +26826,7 @@ mod tests {
                         "role = \"binding\"\n",
                         "producer = \"arcana-source\"\n",
                         "file = \"hostapi_binding.dll\"\n",
-                        "contract = \"arcana.cabi.binding.v1\"\n",
+                        "contract = \"arcana.cabi.binding.v2\"\n",
                     ),
                 ),
                 ("hostapi/src/book.arc", "// hostapi root\n"),
@@ -26398,7 +26878,7 @@ mod tests {
                         "role = \"binding\"\n",
                         "producer = \"arcana-source\"\n",
                         "file = \"hostapi_binding.dll\"\n",
-                        "contract = \"arcana.cabi.binding.v1\"\n",
+                        "contract = \"arcana.cabi.binding.v2\"\n",
                     ),
                 ),
                 ("hostapi/src/book.arc", "// hostapi root\n"),

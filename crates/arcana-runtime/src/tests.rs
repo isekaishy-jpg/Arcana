@@ -1,23 +1,23 @@
 use super::{
     BufferedHost, ParsedAssignOp, ParsedAssignTarget, ParsedCleanupFooter, ParsedExpr,
     ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedProjectionFamily, ParsedStmt,
-    RuntimeBindingOpaqueValue, RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState,
-    RuntimeFrameArenaHandle, RuntimeFrameArenaPolicy, RuntimeFrameArenaState,
-    RuntimeFrameRecyclePolicy, RuntimeIntrinsic, RuntimeLocal, RuntimeLocalHandle,
-    RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeNativeCallbackPlan,
-    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue,
-    RuntimeReferenceMode, RuntimeReferenceTarget, RuntimeReferenceValue, RuntimeResetOnPolicy,
-    RuntimeRingIdValue, RuntimeRoutinePlan, RuntimeScope, RuntimeSessionIdValue,
-    RuntimeSlabIdValue, RuntimeSlabPolicy, RuntimeSlabState, RuntimeTempArenaHandle,
-    RuntimeTypeBindings, RuntimeValue, default_runtime_pool_policy, default_runtime_ring_policy,
-    default_runtime_session_policy, default_runtime_slab_policy, ensure_runtime_frame_capacity,
-    ensure_runtime_slab_capacity, execute_entrypoint_routine, execute_exported_abi_routine,
-    execute_exported_json_abi_routine, execute_main, execute_routine, execute_routine_with_state,
-    execute_runtime_intrinsic, insert_runtime_channel, insert_runtime_local,
-    insert_runtime_pool_arena, insert_runtime_read_view_from_reference,
-    insert_runtime_read_view_from_ring_window, insert_runtime_ring_buffer,
-    insert_runtime_session_arena, insert_runtime_slab, load_package_plan,
-    lookup_runtime_owner_plan, owner_state_key, parse_cleanup_footer_row,
+    RuntimeApiDeclPlan, RuntimeBindingOpaqueValue, RuntimeCallArg, RuntimeEntrypointPlan,
+    RuntimeExecutionState, RuntimeFrameArenaHandle, RuntimeFrameArenaPolicy,
+    RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeIntrinsic, RuntimeLocal,
+    RuntimeLocalHandle, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy,
+    RuntimeNativeCallbackPlan, RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan,
+    RuntimePoolIdValue, RuntimeReferenceMode, RuntimeReferenceTarget, RuntimeReferenceValue,
+    RuntimeResetOnPolicy, RuntimeRingIdValue, RuntimeRoutinePlan, RuntimeScope,
+    RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy, RuntimeSlabState,
+    RuntimeTempArenaHandle, RuntimeTypeBindings, RuntimeValue, default_runtime_pool_policy,
+    default_runtime_ring_policy, default_runtime_session_policy, default_runtime_slab_policy,
+    ensure_runtime_frame_capacity, ensure_runtime_slab_capacity, execute_call_by_path,
+    execute_entrypoint_routine, execute_exported_abi_routine, execute_exported_json_abi_routine,
+    execute_main, execute_routine, execute_routine_with_state, execute_runtime_intrinsic,
+    insert_runtime_channel, insert_runtime_local, insert_runtime_pool_arena,
+    insert_runtime_read_view_from_reference, insert_runtime_read_view_from_ring_window,
+    insert_runtime_ring_buffer, insert_runtime_session_arena, insert_runtime_slab,
+    load_package_plan, lookup_runtime_owner_plan, owner_state_key, parse_cleanup_footer_row,
     parse_runtime_package_image, parse_stmt, plan_from_artifact, pool_id_is_live,
     read_runtime_reference, reclaim_held_target_local, reclaim_hold_capability_root_local,
     redeem_take_reference, render_exported_json_abi_manifest, render_runtime_package_image,
@@ -26,8 +26,13 @@ use super::{
     validate_scope_hold_tokens, write_assign_target_value_runtime,
 };
 use arcana_aot::{
-    AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
+    AOT_INTERNAL_FORMAT, AotApiDeclArtifact, AotEntrypointArtifact, AotOwnerArtifact,
+    AotPackageArtifact, AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact,
+    render_package_artifact,
+};
+use arcana_cabi::{
+    ArcanaCabiApiBackendTargetKind, ArcanaCabiApiFieldContract, ArcanaCabiApiFieldMode,
+    ArcanaCabiApiLaneKind,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
 use arcana_ir::{
@@ -105,6 +110,7 @@ fn empty_runtime_plan(package_id: &str) -> RuntimePackagePlan {
         entrypoints: Vec::new(),
         routines: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -484,6 +490,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
             ],
         }],
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -551,6 +558,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
                     .expect("statement should parse")],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -644,6 +652,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                 },
             ],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -724,6 +733,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 ],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -751,6 +761,45 @@ fn plan_from_artifact_links_entrypoints_to_routines() {
         plan.main_entrypoint()
             .map(|entry| entry.symbol_name.as_str()),
         Some("main")
+    );
+}
+
+#[test]
+fn plan_from_artifact_carries_api_decls() {
+    let mut artifact = sample_return_artifact();
+    artifact.api_decls = vec![AotApiDeclArtifact {
+        package_id: "hello".to_string(),
+        module_id: "hello".to_string(),
+        exported: true,
+        name: "GetProcessInfo".to_string(),
+        request_type: parse_routine_type_text("hello.ProcessInfoRequest").expect("type"),
+        response_type: parse_routine_type_text("hello.ProcessInfoResponse").expect("type"),
+        backend_target_kind: ArcanaCabiApiBackendTargetKind::ForeignSymbol,
+        backend_target: "kernel32.GetProcessInformation".to_string(),
+        fields: vec![ArcanaCabiApiFieldContract {
+            name: "process".to_string(),
+            mode: ArcanaCabiApiFieldMode::In,
+            lane_kind: ArcanaCabiApiLaneKind::OpaqueHandle,
+            binding_slot: None,
+            input_type: Some("Int".to_string()),
+            output_type: None,
+            callback_compat: None,
+            transfer_mode: None,
+            owned_result_kind: None,
+            release_family: None,
+            release_target: None,
+            companion_fields: Vec::new(),
+            partial_failure_cleanup: false,
+        }],
+        surface_text: "export api GetProcessInfo".to_string(),
+    }];
+
+    let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
+    assert_eq!(plan.api_decls.len(), 1);
+    assert_eq!(plan.api_decls[0].name, "GetProcessInfo");
+    assert_eq!(
+        plan.api_decls[0].backend_target_kind,
+        ArcanaCabiApiBackendTargetKind::ForeignSymbol
     );
 }
 
@@ -986,6 +1035,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1090,6 +1140,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1203,6 +1254,7 @@ fn runtime_dynamic_bare_method_fallback_matches_binding_handle_receiver() {
         )]),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1247,6 +1299,7 @@ fn runtime_dynamic_bare_method_fallback_matches_binding_handle_receiver() {
                 package_id: "arcana_process",
                 type_name: "arcana_process.fs.FileStream",
                 handle: 1,
+                owned_release: None,
             })),
             source_expr: ParsedExpr::Path(vec!["stream".to_string()]),
         }],
@@ -1297,6 +1350,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1403,6 +1457,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1487,6 +1542,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1733,6 +1789,7 @@ fn runtime_json_abi_executes_exported_routine() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1804,6 +1861,7 @@ fn runtime_json_abi_round_trips_owned_buffer_payloads() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -1929,6 +1987,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2004,6 +2063,7 @@ fn runtime_json_abi_manifest_records_in_place_buffer_edit_metadata() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2078,6 +2138,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2149,6 +2210,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2229,6 +2291,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
         )]),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2380,6 +2443,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2445,6 +2509,7 @@ fn runtime_native_abi_executes_exported_routine() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2518,6 +2583,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -2689,6 +2755,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -3349,6 +3416,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
             routine_index: 1,
         }],
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -9496,6 +9564,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             routine_index: 0,
         }],
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -9867,6 +9936,7 @@ fn execute_main_rejects_use_after_take_move() {
             routine_index: 2,
         }],
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -10029,6 +10099,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             routine_index: 0,
         }],
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -10147,6 +10218,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
             routine_index: 0,
         }],
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -10550,6 +10622,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -10638,6 +10711,7 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        api_decls: Vec::new(),
         shackle_decls: Vec::new(),
         binding_layouts: Vec::new(),
         owners: Vec::new(),
@@ -10665,6 +10739,120 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
 
     let resolved = resolve_routine_index(&plan, &app, "app", &callable);
     assert!(resolved.is_none());
+}
+
+#[test]
+fn execute_call_by_path_dispatches_dependency_api_decl() {
+    let app = "path:app".to_string();
+    let provider = "registry:local:provider@1.0.0".to_string();
+    let mut plan = empty_runtime_plan(&app);
+    plan.package_id = app.clone();
+    plan.package_name = "app".to_string();
+    plan.root_module_id = "app".to_string();
+    plan.direct_deps = vec!["provider".to_string()];
+    plan.direct_dep_ids = vec![provider.clone()];
+    plan.package_display_names = test_package_display_names_with_deps(
+        app.clone(),
+        "app".to_string(),
+        vec!["provider".to_string()],
+        vec![provider.clone()],
+    );
+    plan.package_direct_dep_ids = test_package_direct_dep_ids(
+        app.clone(),
+        vec!["provider".to_string()],
+        vec![provider.clone()],
+    );
+    plan.routines.push(RuntimeRoutinePlan {
+        package_id: provider.clone(),
+        module_id: "provider.api".to_string(),
+        routine_key: "provider#fn-0".to_string(),
+        symbol_name: "ping_impl".to_string(),
+        symbol_kind: "fn".to_string(),
+        exported: false,
+        is_async: false,
+        type_params: Vec::new(),
+        behavior_attrs: BTreeMap::new(),
+        params: vec![RuntimeParamPlan {
+            binding_id: 0,
+            mode: None,
+            name: "request".to_string(),
+            ty: parse_routine_type_text("provider.api.PingEnvelope").expect("request type"),
+        }],
+        return_type: test_return_type("fn ping_impl() -> provider.api.PingEnvelope:"),
+        intrinsic_impl: None,
+        native_impl: None,
+        impl_target_type: None,
+        impl_trait_path: None,
+        availability: Vec::new(),
+        cleanup_footers: Vec::new(),
+        statements: vec![ParsedStmt::ReturnValue {
+            value: ParsedExpr::Path(vec!["request".to_string()]),
+        }],
+    });
+    plan.api_decls.push(RuntimeApiDeclPlan {
+        package_id: provider,
+        module_id: "provider.api".to_string(),
+        exported: true,
+        name: "Ping".to_string(),
+        request_type: parse_routine_type_text("provider.api.PingEnvelope")
+            .expect("request contract"),
+        response_type: parse_routine_type_text("provider.api.PingEnvelope")
+            .expect("response contract"),
+        backend_target_kind: ArcanaCabiApiBackendTargetKind::Arcana,
+        backend_target: "ping_impl".to_string(),
+        fields: vec![ArcanaCabiApiFieldContract {
+            name: "value".to_string(),
+            mode: ArcanaCabiApiFieldMode::In,
+            lane_kind: ArcanaCabiApiLaneKind::Value,
+            binding_slot: None,
+            callback_compat: None,
+            transfer_mode: None,
+            owned_result_kind: None,
+            release_family: None,
+            release_target: None,
+            companion_fields: Vec::new(),
+            partial_failure_cleanup: false,
+            input_type: Some("Int".to_string()),
+            output_type: None,
+        }],
+        surface_text: "export api Ping".to_string(),
+    });
+
+    let mut scopes = Vec::new();
+    let mut state = RuntimeExecutionState::default();
+    let mut host = BufferedHost::default();
+    let value = execute_call_by_path(
+        &[
+            "provider".to_string(),
+            "api".to_string(),
+            "Ping".to_string(),
+        ],
+        None,
+        None,
+        &app,
+        "app",
+        Vec::new(),
+        vec![RuntimeCallArg {
+            name: None,
+            value: RuntimeValue::Int(7),
+            source_expr: ParsedExpr::Int(7),
+        }],
+        true,
+        &plan,
+        &mut scopes,
+        &mut state,
+        &mut host,
+        false,
+    )
+    .expect("dependency api call should dispatch through api transport");
+
+    assert_eq!(
+        value,
+        RuntimeValue::Struct {
+            name: "provider.api.PingEnvelope".to_string(),
+            fields: BTreeMap::from([("value".to_string(), RuntimeValue::Int(7))]),
+        }
+    );
 }
 
 #[test]

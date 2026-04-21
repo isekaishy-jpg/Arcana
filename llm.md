@@ -956,7 +956,7 @@ Binding products are the current package-owned foreign seam for library packages
 - Binding packages declare a default native product in `book.toml` with:
   - `role = "binding"`
   - `producer = "arcana-source"`
-  - `contract = "arcana.cabi.binding.v1"`
+  - `contract = "arcana.cabi.binding.v2"`
 - The generated binding product is self-hosted from package source.
 - The transitional handwritten Rust bridge crate `crates/arcana-winapi` is gone. The current first-party Win32 binding lane lives under `grimoires/arcana/winapi`.
 
@@ -1029,7 +1029,7 @@ Binding products are the current package-owned foreign seam for library packages
   - `native callback`
   - `shackle`
 - Exported `shackle` items that collide with an existing symbol name in the same module are rejected during HIR lowering.
-- The public binding transport model is the revised raw-capable binding v1 model:
+- The public binding transport model is the revised raw-capable binding v2 model:
   - scalar tags: `Int`, `Bool`, `I8/U8`, `I16/U16`, `I32/U32`, `I64/U64`, `ISize/USize`, `F32/F64`
   - view/owned tags: `Str`, `Bytes`
   - handle/control tags: `Opaque`, `Unit`

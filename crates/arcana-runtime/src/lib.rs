@@ -62,6 +62,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stacker::grow;
 
+mod api_abi;
 #[cfg(test)]
 mod app_input;
 mod binding_transport;
@@ -78,6 +79,9 @@ mod routine_plan;
 mod runtime_intrinsics;
 mod runtime_types;
 mod view_runtime;
+pub use api_abi::{
+    RUNTIME_API_ABI_FORMAT, execute_exported_api_abi, render_exported_api_abi_manifest,
+};
 #[cfg(test)]
 pub use app_input::BufferedHost;
 pub use arcana_ir::{
@@ -218,6 +222,21 @@ pub struct RuntimeOwnerPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeApiDeclPlan {
+    pub package_id: String,
+    pub module_id: String,
+    pub exported: bool,
+    pub name: String,
+    pub request_type: IrRoutineType,
+    pub response_type: IrRoutineType,
+    pub backend_target_kind: arcana_cabi::ArcanaCabiApiBackendTargetKind,
+    pub backend_target: String,
+    #[serde(default)]
+    pub fields: Vec<arcana_cabi::ArcanaCabiApiFieldContract>,
+    pub surface_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePackagePlan {
     pub package_id: String,
     pub package_name: String,
@@ -238,6 +257,8 @@ pub struct RuntimePackagePlan {
     pub routines: Vec<RuntimeRoutinePlan>,
     #[serde(default)]
     pub native_callbacks: Vec<RuntimeNativeCallbackPlan>,
+    #[serde(default)]
+    pub api_decls: Vec<RuntimeApiDeclPlan>,
     #[serde(default)]
     pub shackle_decls: Vec<String>,
     #[serde(default)]
@@ -651,10 +672,19 @@ fn runtime_reference_mode_from_unary(op: ParsedUnaryOp) -> Option<RuntimeReferen
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeBindingOwnedRelease {
+    Release,
+    CoTaskMemFree,
+    LocalFree,
+    Custom(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RuntimeBindingOpaqueValue {
     package_id: &'static str,
     type_name: &'static str,
     handle: u64,
+    owned_release: Option<RuntimeBindingOwnedRelease>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1830,6 +1860,21 @@ fn build_opaque_family_types(
     Ok(families)
 }
 
+fn lower_api_decl(decl: &arcana_aot::AotApiDeclArtifact) -> RuntimeApiDeclPlan {
+    RuntimeApiDeclPlan {
+        package_id: decl.package_id.clone(),
+        module_id: decl.module_id.clone(),
+        exported: decl.exported,
+        name: decl.name.clone(),
+        request_type: decl.request_type.clone(),
+        response_type: decl.response_type.clone(),
+        backend_target_kind: decl.backend_target_kind,
+        backend_target: decl.backend_target.clone(),
+        fields: decl.fields.clone(),
+        surface_text: decl.surface_text.clone(),
+    }
+}
+
 pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackagePlan, String> {
     validate_package_artifact(artifact)?;
     let routines = artifact
@@ -1862,6 +1907,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
             .iter()
             .map(lower_native_callback)
             .collect(),
+        api_decls: artifact.api_decls.iter().map(lower_api_decl).collect(),
         shackle_decls: artifact
             .shackle_decls
             .iter()
@@ -5876,6 +5922,7 @@ fn runtime_process_file_stream_value(handle: u64) -> RuntimeValue {
         package_id: "arcana_process",
         type_name: "arcana_process.fs.FileStream",
         handle,
+        owned_release: None,
     }))
 }
 
@@ -12107,6 +12154,19 @@ fn execute_call_by_path(
     )? {
         return Ok(value);
     }
+    if let Some(api) = api_abi::resolve_runtime_api_decl_for_call(
+        plan,
+        current_package_id,
+        current_module_id,
+        callable,
+    )
+    .map_err(RuntimeEvalSignal::from)?
+    {
+        let request_value = api_abi::bind_runtime_api_request_for_call(api, &call_args)
+            .map_err(RuntimeEvalSignal::from)?;
+        return api_abi::execute_runtime_api_call(plan, api, request_value, host)
+            .map_err(RuntimeEvalSignal::from);
+    }
     let receiver_fallback_intrinsic = allow_receiver_root_fallback
         .then(|| resolve_runtime_receiver_intrinsic_fallback(callable, &call_args))
         .flatten();
@@ -12413,11 +12473,19 @@ fn execute_runtime_apply_phrase(
             .is_some(),
         None => false,
     };
+    let has_runtime_api = api_abi::resolve_runtime_api_decl_for_call(
+        plan,
+        current_package_id,
+        current_module_id,
+        &callable,
+    )
+    .map_err(RuntimeEvalSignal::from)?
+    .is_some();
     let has_runtime_routine = has_lowered_runtime_routine
         || resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_some();
     let has_runtime_intrinsic = resolve_runtime_intrinsic_path(&callable).is_some()
         || runtime_arcana_owned_callable_key(&callable).is_some();
-    if !has_runtime_routine && !has_runtime_intrinsic {
+    if !has_runtime_api && !has_runtime_routine && !has_runtime_intrinsic {
         // Constructor fallback is only valid when lowering did not identify a routine call.
         if let Some(record) = try_construct_nominal_value(
             &callable,

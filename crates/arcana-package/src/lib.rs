@@ -4042,8 +4042,8 @@ mod tests {
         assert!(manifest_text.contains("package_name = \"arcana_winapi\""));
         assert!(manifest_text.contains("product_name = \"default\""));
         assert!(manifest_text.contains("role = \"binding\""));
-        assert!(manifest_text.contains("contract_id = \"arcana.cabi.binding.v1\""));
-        assert!(manifest_text.contains("contract_version = 1"));
+        assert!(manifest_text.contains("contract_id = \"arcana.cabi.binding.v2\""));
+        assert!(manifest_text.contains("contract_version = 2"));
         assert!(manifest_text.contains("producer = \"arcana-source\""));
         assert!(manifest_text.contains("sidecars = []"));
         assert!(manifest_text.contains("file_hash = \"sha256:"));
@@ -4607,7 +4607,7 @@ mod tests {
                 "role = \"binding\"\n",
                 "producer = \"arcana-source\"\n",
                 "file = \"hostapi_binding.dll\"\n",
-                "contract = \"arcana.cabi.binding.v1\"\n",
+                "contract = \"arcana.cabi.binding.v2\"\n",
             ),
         );
         write_file(
@@ -4665,8 +4665,8 @@ mod tests {
         assert!(manifest_text.contains("package_name = \"hostapi\""));
         assert!(manifest_text.contains("product_name = \"default\""));
         assert!(manifest_text.contains("role = \"binding\""));
-        assert!(manifest_text.contains("contract_id = \"arcana.cabi.binding.v1\""));
-        assert!(manifest_text.contains("contract_version = 1"));
+        assert!(manifest_text.contains("contract_id = \"arcana.cabi.binding.v2\""));
+        assert!(manifest_text.contains("contract_version = 2"));
         assert!(manifest_text.contains("producer = \"arcana-source\""));
         assert!(manifest_text.contains("sidecars = []"));
         assert!(manifest_text.contains("file_hash = \"sha256:"));
@@ -5232,7 +5232,7 @@ mod tests {
                 "role = \"binding\"\n",
                 "producer = \"arcana-source\"\n",
                 "file = \"hostapi.dll\"\n",
-                "contract = \"arcana.cabi.binding.v1\"\n",
+                "contract = \"arcana.cabi.binding.v2\"\n",
             ),
         );
 
@@ -5260,7 +5260,7 @@ mod tests {
                 "role = \"binding\"\n",
                 "producer = \"arcana-source\"\n",
                 "file = \"hostapi.dll\"\n",
-                "contract = \"arcana.cabi.binding.v1\"\n",
+                "contract = \"arcana.cabi.binding.v2\"\n",
                 "binding_support_crate = \"support\"\n",
             ),
         );

@@ -613,6 +613,14 @@ fn resolved_module_api_rows(
             ));
         }
     }
+    for api_decl in &module.api_decls {
+        if api_decl.exported {
+            rows.push(format!(
+                "export:api:{}",
+                render_api_decl_api_fingerprint(workspace, resolved_module, api_decl)
+            ));
+        }
+    }
 
     let module_scope = TypeScope::default();
     for impl_decl in &module.impls {
@@ -691,6 +699,107 @@ fn render_symbol_api_fingerprint(
         HirSymbolKind::Const => format!("const:{}", render_symbol_fingerprint(symbol)),
     };
     append_symbol_contract_metadata(base, workspace, resolved_module, symbol)
+}
+
+fn render_api_decl_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    decl: &arcana_hir::HirApiDecl,
+) -> String {
+    let scope = TypeScope::default();
+    format!(
+        concat!(
+            "api(",
+            "name={}|request={}|response={}|backend_kind={}|backend_target={}|fields=[{}])"
+        ),
+        quote_fingerprint_text(&decl.name),
+        quote_fingerprint_text(canonicalize_surface_type(
+            workspace,
+            resolved_module,
+            &scope,
+            &decl.request_type,
+        )),
+        quote_fingerprint_text(canonicalize_surface_type(
+            workspace,
+            resolved_module,
+            &scope,
+            &decl.response_type,
+        )),
+        decl.backend_target_kind.as_str(),
+        quote_fingerprint_text(canonicalize_api_path_like_text(
+            workspace,
+            resolved_module,
+            &scope,
+            &decl.backend_target,
+        )),
+        decl.fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "field(name={}|mode={}|lane={}|slot={}|input={}|output={}|callback={}|transfer={}|owned={}|release={}|release_target={}|companions=[{}]|partial={})",
+                    quote_fingerprint_text(&field.name),
+                    field.mode.as_str(),
+                    field.lane_kind.as_str(),
+                    field
+                        .binding_slot
+                        .map(|slot| slot.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .input_type
+                        .as_ref()
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .output_type
+                        .as_ref()
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .callback_compat
+                        .as_ref()
+                        .map(|value| canonicalize_api_path_like_text(
+                            workspace,
+                            resolved_module,
+                            &scope,
+                            value,
+                        ))
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .transfer_mode
+                        .map(|mode| mode.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .owned_result_kind
+                        .map(|kind| kind.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .release_family
+                        .map(|family| family.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .release_target
+                        .as_ref()
+                        .map(|value| canonicalize_api_path_like_text(
+                            workspace,
+                            resolved_module,
+                            &scope,
+                            value,
+                        ))
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .companion_fields
+                        .iter()
+                        .map(quote_fingerprint_text)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    field.partial_failure_cleanup
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn render_opaque_type_api_fingerprint(
@@ -1510,6 +1619,17 @@ fn split_simple_path(text: &str) -> Option<Vec<String>> {
     }
 
     (!segments.is_empty()).then_some(segments)
+}
+
+fn canonicalize_api_path_like_text(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    text: &str,
+) -> String {
+    split_simple_path(text)
+        .map(|path| canonicalize_surface_path(workspace, resolved_module, scope, &path))
+        .unwrap_or_else(|| text.trim().to_string())
 }
 
 fn canonicalize_surface_path(

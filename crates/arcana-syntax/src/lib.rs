@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use arcana_cabi::{ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType};
+use arcana_cabi::{
+    ArcanaCabiApiBackendTargetKind, ArcanaCabiApiBindingSlot, ArcanaCabiApiFieldContract,
+    ArcanaCabiApiFieldMode, ArcanaCabiApiLaneKind, ArcanaCabiApiOwnedResultKind,
+    ArcanaCabiApiReleaseFamily, ArcanaCabiApiTransferMode, ArcanaCabiBindingRawType,
+    ArcanaCabiBindingScalarType,
+};
 pub mod freeze;
 mod language_contract;
 pub mod surface_text;
@@ -658,7 +663,8 @@ pub struct ConstructRegion {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NominalFieldRegionKind {
+pub enum NominalFieldRegionKind {
+    Api,
     Record,
     Struct,
     Union,
@@ -667,6 +673,7 @@ enum NominalFieldRegionKind {
 impl NominalFieldRegionKind {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Api => "api",
             Self::Record => "record",
             Self::Struct => "struct",
             Self::Union => "union",
@@ -676,6 +683,7 @@ impl NominalFieldRegionKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordRegion {
+    pub kind: NominalFieldRegionKind,
     pub completion: ConstructCompletionKind,
     pub target: Box<Expr>,
     pub base: Option<Box<Expr>>,
@@ -1113,6 +1121,19 @@ pub struct NativeCallbackDecl {
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiDecl {
+    pub exported: bool,
+    pub name: String,
+    pub request_type: SurfaceType,
+    pub response_type: SurfaceType,
+    pub backend_target_kind: ArcanaCabiApiBackendTargetKind,
+    pub backend_target: String,
+    pub fields: Vec<ArcanaCabiApiFieldContract>,
+    pub surface_text: String,
+    pub span: Span,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShackleDeclKind {
     Type,
@@ -1241,6 +1262,7 @@ pub struct ParsedModule {
     pub lang_items: Vec<LangItemDecl>,
     pub memory_specs: Vec<MemorySpecDecl>,
     pub native_callbacks: Vec<NativeCallbackDecl>,
+    pub api_decls: Vec<ApiDecl>,
     pub shackle_decls: Vec<ShackleDecl>,
     pub foreword_definitions: Vec<ForewordDefinitionDecl>,
     pub foreword_handlers: Vec<ForewordHandlerDecl>,
@@ -1275,6 +1297,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut lang_items = Vec::new();
     let mut memory_specs = Vec::new();
     let mut native_callbacks = Vec::new();
+    let mut api_decls = Vec::new();
     let mut shackle_decls = Vec::new();
     let mut foreword_definitions = Vec::new();
     let mut foreword_handlers = Vec::new();
@@ -1422,6 +1445,26 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
             continue;
         }
 
+        if let Some(api_decl) = parse_api_decl(entry)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target api declarations",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target api declarations in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            api_decls.push(api_decl);
+            index += 1;
+            continue;
+        }
+
         if let Some(shackle_decl) = parse_shackle_decl(entry)? {
             if !pending_availability.is_empty() {
                 let span = pending_availability[0].span;
@@ -1523,6 +1566,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         lang_items,
         memory_specs,
         native_callbacks,
+        api_decls,
         shackle_decls,
         foreword_definitions,
         foreword_handlers,
@@ -2794,6 +2838,226 @@ fn parse_native_callback_type_ref(
     Ok(Some((name, callback_type)))
 }
 
+fn parse_api_decl(entry: &RawBlockEntry) -> Result<Option<ApiDecl>, String> {
+    let trimmed = entry.text.trim();
+    let exported = trimmed.starts_with("export ");
+    let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let Some(rest) = rest.strip_prefix("api ").map(str::trim) else {
+        return Ok(None);
+    };
+    if entry.children.is_empty() {
+        return Err(format!(
+            "{}:{}: `api` declarations require an indented body",
+            entry.span.line, entry.span.column
+        ));
+    }
+    let name = parse_symbol_name(rest).ok_or_else(|| {
+        format!(
+            "{}:{}: malformed api declaration",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let body_entries = collect_raw_block_body_entries(&entry.children);
+    let surface_text = collect_api_surface(trimmed, &entry.children);
+    let mut request_type = None;
+    let mut response_type = None;
+    let mut backend_target_kind = None;
+    let mut backend_target = None;
+    let mut fields = Vec::new();
+
+    for line in &body_entries {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("request:") {
+            if request_type.is_some() {
+                return Err(format!(
+                    "{}:{}: api `{name}` declares `request` more than once",
+                    entry.span.line, entry.span.column
+                ));
+            }
+            request_type = Some(parse_surface_type(rest.trim()).map_err(|_| {
+                format!(
+                    "{}:{}: api `{name}` has malformed request type `{}`",
+                    entry.span.line,
+                    entry.span.column,
+                    rest.trim()
+                )
+            })?);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("response:") {
+            if response_type.is_some() {
+                return Err(format!(
+                    "{}:{}: api `{name}` declares `response` more than once",
+                    entry.span.line, entry.span.column
+                ));
+            }
+            response_type = Some(parse_surface_type(rest.trim()).map_err(|_| {
+                format!(
+                    "{}:{}: api `{name}` has malformed response type `{}`",
+                    entry.span.line,
+                    entry.span.column,
+                    rest.trim()
+                )
+            })?);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("backend:") {
+            if backend_target_kind.is_some() {
+                return Err(format!(
+                    "{}:{}: api `{name}` declares `backend` more than once",
+                    entry.span.line, entry.span.column
+                ));
+            }
+            let backend_text = rest.trim();
+            let Some((kind_text, target_text)) = split_first_token(backend_text) else {
+                return Err(format!(
+                    "{}:{}: api `{name}` has malformed backend declaration",
+                    entry.span.line, entry.span.column
+                ));
+            };
+            backend_target_kind = Some(ArcanaCabiApiBackendTargetKind::parse(kind_text)?);
+            if target_text.trim().is_empty() {
+                return Err(format!(
+                    "{}:{}: api `{name}` backend target must not be empty",
+                    entry.span.line, entry.span.column
+                ));
+            }
+            backend_target = Some(target_text.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("field ") {
+            fields.push(parse_api_field_contract(rest.trim(), entry.span)?);
+            continue;
+        }
+        return Err(format!(
+            "{}:{}: unsupported api metadata line `{trimmed}`",
+            entry.span.line, entry.span.column
+        ));
+    }
+
+    Ok(Some(ApiDecl {
+        exported,
+        name,
+        request_type: request_type.ok_or_else(|| {
+            format!(
+                "{}:{}: api declaration is missing a `request:` line",
+                entry.span.line, entry.span.column
+            )
+        })?,
+        response_type: response_type.ok_or_else(|| {
+            format!(
+                "{}:{}: api declaration is missing a `response:` line",
+                entry.span.line, entry.span.column
+            )
+        })?,
+        backend_target_kind: backend_target_kind.ok_or_else(|| {
+            format!(
+                "{}:{}: api declaration is missing a `backend:` line",
+                entry.span.line, entry.span.column
+            )
+        })?,
+        backend_target: backend_target.ok_or_else(|| {
+            format!(
+                "{}:{}: api declaration is missing a backend target",
+                entry.span.line, entry.span.column
+            )
+        })?,
+        fields,
+        surface_text,
+        span: entry.span,
+    }))
+}
+
+fn parse_api_field_contract(text: &str, span: Span) -> Result<ArcanaCabiApiFieldContract, String> {
+    let (name_text, metadata_text) = text.split_once(':').ok_or_else(|| {
+        format!(
+            "{}:{}: malformed api field declaration `{text}`",
+            span.line, span.column
+        )
+    })?;
+    let name = sanitize_name(name_text.trim());
+    let metadata_text = metadata_text.trim();
+    let Some((lane_text, rest)) = split_first_token(metadata_text) else {
+        return Err(format!(
+            "{}:{}: api field `{name}` is missing a lane kind",
+            span.line, span.column
+        ));
+    };
+    let lane_kind = ArcanaCabiApiLaneKind::parse(lane_text)?;
+    let mut mode = ArcanaCabiApiFieldMode::In;
+    let mut binding_slot = None;
+    let mut callback_compat = None;
+    let mut transfer_mode = None;
+    let mut owned_result_kind = None;
+    let mut release_family = None;
+    let mut release_target = None;
+    let mut companion_fields = Vec::new();
+    let mut partial_failure_cleanup = false;
+
+    for token in rest.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            return Err(format!(
+                "{}:{}: malformed api field option `{token}`",
+                span.line, span.column
+            ));
+        };
+        match key {
+            "mode" => mode = ArcanaCabiApiFieldMode::parse(value)?,
+            "slot" => binding_slot = Some(ArcanaCabiApiBindingSlot::parse(value)?),
+            "callback" => callback_compat = Some(value.to_string()),
+            "transfer" => transfer_mode = Some(ArcanaCabiApiTransferMode::parse(value)?),
+            "owned" => owned_result_kind = Some(ArcanaCabiApiOwnedResultKind::parse(value)?),
+            "release" => release_family = Some(ArcanaCabiApiReleaseFamily::parse(value)?),
+            "release_target" => release_target = Some(value.to_string()),
+            "companions" => {
+                companion_fields = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            }
+            "cleanup" => {
+                partial_failure_cleanup = match value {
+                    "partial" | "true" => true,
+                    "false" | "none" => false,
+                    other => {
+                        return Err(format!(
+                            "{}:{}: unsupported api field cleanup policy `{other}`",
+                            span.line, span.column
+                        ));
+                    }
+                };
+            }
+            other => {
+                return Err(format!(
+                    "{}:{}: unsupported api field option `{other}`",
+                    span.line, span.column
+                ));
+            }
+        }
+    }
+
+    Ok(ArcanaCabiApiFieldContract {
+        name,
+        mode,
+        lane_kind,
+        binding_slot,
+        input_type: None,
+        output_type: None,
+        callback_compat,
+        transfer_mode,
+        owned_result_kind,
+        release_family,
+        release_target,
+        companion_fields,
+        partial_failure_cleanup,
+    })
+}
+
 fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, String> {
     let trimmed = entry.text.trim();
     let exported = trimmed.starts_with("export ");
@@ -3395,6 +3659,17 @@ fn collect_raw_block_body_entries(entries: &[RawBlockEntry]) -> Vec<String> {
 }
 
 fn collect_shackle_surface(trimmed: &str, entries: &[RawBlockEntry]) -> String {
+    let mut surface_lines = vec![
+        trimmed
+            .strip_prefix("export ")
+            .unwrap_or(trimmed)
+            .to_string(),
+    ];
+    surface_lines.extend(collect_raw_block_body_entries(entries));
+    surface_lines.join("\n")
+}
+
+fn collect_api_surface(trimmed: &str, entries: &[RawBlockEntry]) -> String {
     let mut surface_lines = vec![
         trimmed
             .strip_prefix("export ")
@@ -4632,7 +4907,7 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if head == HeadedRegionHead::Record {
+    if matches!(head, HeadedRegionHead::Api | HeadedRegionHead::Record) {
         let region = parse_record_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
             return Err(format!(
@@ -4766,6 +5041,16 @@ fn parse_record_yield_expression(
         return Ok(None);
     }
     match head {
+        HeadedRegionHead::Api => {
+            let region = parse_record_region(text, attached, span)?;
+            if !matches!(region.completion, ConstructCompletionKind::Yield) {
+                return Err(format!(
+                    "{}:{}: only `api yield` is valid in expression position",
+                    span.line, span.column
+                ));
+            }
+            Ok(Some(Expr::RecordRegion(Box::new(region))))
+        }
         HeadedRegionHead::Record => {
             let region = parse_record_region(text, attached, span)?;
             if !matches!(region.completion, ConstructCompletionKind::Yield) {
@@ -5097,7 +5382,9 @@ fn parse_nominal_field_region(
             span.line, span.column
         ));
     }
-    let (kind, rest) = if let Some(rest) = text.strip_prefix("record ") {
+    let (kind, rest) = if let Some(rest) = text.strip_prefix("api ") {
+        (NominalFieldRegionKind::Api, rest)
+    } else if let Some(rest) = text.strip_prefix("record ") {
         (NominalFieldRegionKind::Record, rest)
     } else if let Some(rest) = text.strip_prefix("struct ") {
         (NominalFieldRegionKind::Struct, rest)
@@ -5231,13 +5518,17 @@ fn parse_record_region(
     span: Span,
 ) -> Result<RecordRegion, String> {
     let (kind, region) = parse_nominal_field_region(text, children, span)?;
-    if kind != NominalFieldRegionKind::Record {
+    if !matches!(
+        kind,
+        NominalFieldRegionKind::Api | NominalFieldRegionKind::Record
+    ) {
         return Err(format!(
             "{}:{}: malformed `record` header",
             span.line, span.column
         ));
     }
     Ok(RecordRegion {
+        kind,
         completion: region.completion,
         target: region.target,
         base: region.base,
@@ -5337,7 +5628,9 @@ fn parse_record_line(
     let line = parse_construct_line(entry)?;
     if matches!(
         kind,
-        NominalFieldRegionKind::Record | NominalFieldRegionKind::Struct
+        NominalFieldRegionKind::Api
+            | NominalFieldRegionKind::Record
+            | NominalFieldRegionKind::Struct
     ) && line.name == "payload"
     {
         return Err(format!(
@@ -11155,6 +11448,57 @@ mod tests {
                 .render(),
             "arcana_winapi.raw.user32.WNDPROC"
         );
+    }
+
+    #[test]
+    fn parse_module_handles_api_declarations_and_api_heads() {
+        use crate::NominalFieldRegionKind;
+
+        let parsed = parse_module(concat!(
+            "export api GetProcessInfo:\n",
+            "    request: host.api.ProcessInfoRequest\n",
+            "    response: host.api.ProcessInfoResponse\n",
+            "    backend: foreign kernel32.GetProcessInformation\n",
+            "    field process: opaque-handle mode=in\n",
+            "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+            "    field status: value mode=out slot=return\n",
+            "fn main() -> host.api.ProcessInfoRequest:\n",
+            "    let request = api yield host.api.ProcessInfoRequest\n",
+            "        process = 7\n",
+            "    return request\n",
+        ))
+        .expect("api declarations and api headed regions should parse");
+
+        assert_eq!(parsed.api_decls.len(), 1);
+        assert_eq!(parsed.api_decls[0].name, "GetProcessInfo");
+        assert_eq!(
+            parsed.api_decls[0].request_type.render(),
+            "host.api.ProcessInfoRequest"
+        );
+        assert_eq!(
+            parsed.api_decls[0].response_type.render(),
+            "host.api.ProcessInfoResponse"
+        );
+        assert_eq!(
+            parsed.api_decls[0].backend_target_kind,
+            arcana_cabi::ArcanaCabiApiBackendTargetKind::ForeignSymbol
+        );
+        assert_eq!(
+            parsed.api_decls[0].fields[1].lane_kind,
+            arcana_cabi::ArcanaCabiApiLaneKind::TypedPointeeEdit
+        );
+        assert_eq!(
+            parsed.api_decls[0].fields[2].binding_slot,
+            Some(arcana_cabi::ArcanaCabiApiBindingSlot::Return)
+        );
+
+        let StatementKind::Let { value, .. } = &parsed.symbols[0].statements[0].kind else {
+            panic!("expected let binding");
+        };
+        let Expr::RecordRegion(region) = value else {
+            panic!("expected record region");
+        };
+        assert_eq!(region.kind, NominalFieldRegionKind::Api);
     }
 
     #[test]

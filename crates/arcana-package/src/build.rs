@@ -1005,6 +1005,7 @@ fn link_ir_packages(
     let mut package_direct_dep_ids = root.package_direct_dep_ids.clone();
     let mut routines = root.routines.clone();
     let mut native_callbacks = root.native_callbacks.clone();
+    let mut api_decls = root.api_decls.clone();
     let mut shackle_decls = root.shackle_decls.clone();
     let mut owners = root.owners.clone();
 
@@ -1015,6 +1016,7 @@ fn link_ir_packages(
         dependency_rows.extend(package.dependency_rows);
         routines.extend(package.routines);
         native_callbacks.extend(package.native_callbacks);
+        api_decls.extend(package.api_decls);
         shackle_decls.extend(package.shackle_decls);
         owners.extend(package.owners);
     }
@@ -1055,6 +1057,13 @@ fn link_ir_packages(
             .then_with(|| left.kind.cmp(&right.kind))
             .then_with(|| left.name.cmp(&right.name))
     });
+    api_decls.sort_by(|left, right| {
+        left.package_id
+            .cmp(&right.package_id)
+            .then_with(|| left.module_id.cmp(&right.module_id))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.backend_target.cmp(&right.backend_target))
+    });
 
     let mut linked_package = IrPackage {
         package_id: root.package_id,
@@ -1074,6 +1083,7 @@ fn link_ir_packages(
         entrypoints: root.entrypoints,
         routines,
         native_callbacks,
+        api_decls,
         shackle_decls,
         owners,
     };
@@ -1751,6 +1761,7 @@ mod tests {
                 entrypoints: Vec::new(),
                 routines: Vec::new(),
                 native_callbacks: Vec::new(),
+                api_decls: Vec::new(),
                 shackle_decls: Vec::new(),
                 binding_layouts: Vec::new(),
                 owners: Vec::new(),

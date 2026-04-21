@@ -1,4 +1,6 @@
-use arcana_cabi::ArcanaCabiBindingLayout;
+use arcana_cabi::{
+    ArcanaCabiApiBackendTargetKind, ArcanaCabiApiFieldContract, ArcanaCabiBindingLayout,
+};
 use arcana_ir::{
     ExecAvailabilityAttachment, ExecCleanupFooter, ExecExpr, ExecStmt, IrForewordMetadata,
     IrForewordRegistrationRow, IrRoutineParam, IrRoutineType,
@@ -120,6 +122,21 @@ pub struct AotShackleDeclArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotApiDeclArtifact {
+    pub package_id: String,
+    pub module_id: String,
+    pub exported: bool,
+    pub name: String,
+    pub request_type: IrRoutineType,
+    pub response_type: IrRoutineType,
+    pub backend_target_kind: ArcanaCabiApiBackendTargetKind,
+    pub backend_target: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ArcanaCabiApiFieldContract>,
+    pub surface_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotOwnerObjectArtifact {
     pub type_path: Vec<String>,
     pub local_name: String,
@@ -177,6 +194,8 @@ pub struct AotPackageArtifact {
     pub routines: Vec<AotRoutineArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_callbacks: Vec<AotNativeCallbackArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_decls: Vec<AotApiDeclArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shackle_decls: Vec<AotShackleDeclArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

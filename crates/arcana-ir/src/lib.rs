@@ -12,6 +12,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use arcana_cabi::{
+    ArcanaCabiApiBackendTargetKind, ArcanaCabiApiFieldContract, ArcanaCabiApiFieldMode,
     ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
     ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
 };
@@ -259,6 +260,20 @@ pub struct IrShackleDecl {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrApiDecl {
+    pub package_id: String,
+    pub module_id: String,
+    pub exported: bool,
+    pub name: String,
+    pub request_type: IrRoutineType,
+    pub response_type: IrRoutineType,
+    pub backend_target_kind: ArcanaCabiApiBackendTargetKind,
+    pub backend_target: String,
+    pub fields: Vec<ArcanaCabiApiFieldContract>,
+    pub surface_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrShackleImportTarget {
     pub library: String,
     pub symbol: String,
@@ -333,6 +348,7 @@ pub struct IrPackage {
     pub entrypoints: Vec<IrEntrypoint>,
     pub routines: Vec<IrRoutine>,
     pub native_callbacks: Vec<IrNativeCallbackDecl>,
+    pub api_decls: Vec<IrApiDecl>,
     pub shackle_decls: Vec<IrShackleDecl>,
     pub owners: Vec<IrOwnerDecl>,
 }
@@ -3541,6 +3557,75 @@ fn canonicalize_scope_hir_type(scope: &ResolvedRenderScope<'_>, ty: &HirType) ->
 
 fn canonical_scope_hir_type_key(scope: &ResolvedRenderScope<'_>, ty: &HirType) -> Option<String> {
     Some(canonicalize_scope_hir_type(scope, ty)?.render())
+}
+
+fn resolve_api_contract_nominal_fields_for_type(
+    scope: &ResolvedRenderScope<'_>,
+    ty: &HirType,
+) -> Option<BTreeMap<String, HirType>> {
+    resolve_nominal_fields_for_hir_type(scope, ty, resolve_record_target_fields_for_scope)
+        .or_else(|| {
+            resolve_nominal_fields_for_hir_type(scope, ty, resolve_struct_target_fields_for_scope)
+        })
+        .or_else(|| {
+            resolve_nominal_fields_for_hir_type(scope, ty, resolve_union_target_fields_for_scope)
+        })
+}
+
+fn resolve_api_field_contracts_for_decl(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    decl: &arcana_hir::HirApiDecl,
+) -> Result<Vec<ArcanaCabiApiFieldContract>, String> {
+    let scope = ResolvedRenderScope::new(workspace, resolved_module, None, &[]);
+    let request_fields = resolve_api_contract_nominal_fields_for_type(&scope, &decl.request_type);
+    let response_fields = resolve_api_contract_nominal_fields_for_type(&scope, &decl.response_type);
+    decl.fields
+        .iter()
+        .map(|field| {
+            let mut enriched = field.clone();
+            if matches!(
+                field.mode,
+                ArcanaCabiApiFieldMode::In | ArcanaCabiApiFieldMode::InWithWriteBack
+            ) {
+                enriched.input_type = request_fields
+                    .as_ref()
+                    .and_then(|fields| fields.get(&field.name))
+                    .and_then(|ty| canonical_scope_hir_type_key(&scope, ty));
+                if enriched.input_type.is_none() {
+                    return Err(format!(
+                        "api `{}` request contract `{}` is missing field `{}`",
+                        decl.name,
+                        decl.request_type.render(),
+                        field.name
+                    ));
+                }
+            }
+            if matches!(
+                field.mode,
+                ArcanaCabiApiFieldMode::Out | ArcanaCabiApiFieldMode::InWithWriteBack
+            ) {
+                enriched.output_type = response_fields
+                    .as_ref()
+                    .and_then(|fields| fields.get(&field.name))
+                    .and_then(|ty| canonical_scope_hir_type_key(&scope, ty))
+                    .or_else(|| {
+                        matches!(field.mode, ArcanaCabiApiFieldMode::InWithWriteBack)
+                            .then(|| enriched.input_type.clone())
+                            .flatten()
+                    });
+                if enriched.output_type.is_none() {
+                    return Err(format!(
+                        "api `{}` response contract `{}` is missing field `{}`",
+                        decl.name,
+                        decl.response_type.render(),
+                        field.name
+                    ));
+                }
+            }
+            Ok(enriched)
+        })
+        .collect()
 }
 
 fn infer_callable_struct_packed_args_type_for_scope(
@@ -7268,6 +7353,24 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                 })
         })
         .collect::<Vec<_>>();
+    let api_decls = package
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module.api_decls.iter().map(|decl| IrApiDecl {
+                package_id: package.package_name.clone(),
+                module_id: module.module_id.clone(),
+                exported: decl.exported,
+                name: decl.name.clone(),
+                request_type: lower_symbol_routine_type(&decl.request_type),
+                response_type: lower_symbol_routine_type(&decl.response_type),
+                backend_target_kind: decl.backend_target_kind,
+                backend_target: decl.backend_target.clone(),
+                fields: decl.fields.clone(),
+                surface_text: decl.surface_text.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
     let shackle_decls = package
         .modules
         .iter()
@@ -7334,6 +7437,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         entrypoints,
         routines,
         native_callbacks,
+        api_decls,
         shackle_decls,
         owners,
     };
@@ -7365,6 +7469,9 @@ fn retarget_package_identity(package: &mut IrPackage, package_id: &str) {
     }
     for callback in &mut package.native_callbacks {
         callback.package_id = package_id.to_string();
+    }
+    for decl in &mut package.api_decls {
+        decl.package_id = package_id.to_string();
     }
     for decl in &mut package.shackle_decls {
         decl.package_id = package_id.to_string();
@@ -7541,6 +7648,49 @@ pub fn lower_workspace_package_with_resolution(
                 .collect::<Result<Vec<_>, String>>()
         })
         .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    lowered.api_decls = package
+        .summary
+        .modules
+        .iter()
+        .map(|module| {
+            let Some(resolved_module) = resolved_package.module(&module.module_id) else {
+                return Ok(Vec::new());
+            };
+            module
+                .api_decls
+                .iter()
+                .map(|decl| {
+                    Ok(IrApiDecl {
+                        package_id: package.package_id.clone(),
+                        module_id: module.module_id.clone(),
+                        exported: decl.exported,
+                        name: decl.name.clone(),
+                        request_type: lower_resolved_routine_type(
+                            workspace,
+                            resolved_module,
+                            &decl.request_type,
+                        ),
+                        response_type: lower_resolved_routine_type(
+                            workspace,
+                            resolved_module,
+                            &decl.response_type,
+                        ),
+                        backend_target_kind: decl.backend_target_kind,
+                        backend_target: decl.backend_target.clone(),
+                        fields: resolve_api_field_contracts_for_decl(
+                            workspace,
+                            resolved_module,
+                            decl,
+                        )?,
+                        surface_text: decl.surface_text.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .collect::<Result<Vec<Vec<_>>, String>>()?
         .into_iter()
         .flatten()
         .collect();
@@ -9534,6 +9684,79 @@ mod tests {
             callback_layout.kind,
             ArcanaCabiBindingLayoutKind::Callback { .. }
         ));
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_carries_api_decls() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![lower_module_text(
+                "app.api",
+                concat!(
+                    "export struct ProcessInfoRequest:\n",
+                    "    process: Int\n",
+                    "    info: Int\n",
+                    "export struct ProcessInfoResponse:\n",
+                    "    info: Int\n",
+                    "export api GetProcessInfo:\n",
+                    "    request: app.api.ProcessInfoRequest\n",
+                    "    response: app.api.ProcessInfoResponse\n",
+                    "    backend: foreign kernel32.GetProcessInformation\n",
+                    "    field process: opaque-handle mode=in\n",
+                    "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+                ),
+            )
+            .expect("api module should lower")],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app.api".to_string(),
+                Path::new("C:/repo/app/src/api.arc").to_path_buf(),
+            )]),
+            BTreeMap::from([
+                ("app".to_string(), "app.api".to_string()),
+                ("api".to_string(), "app.api".to_string()),
+            ]),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        assert_eq!(ir.api_decls.len(), 1);
+        assert_eq!(ir.api_decls[0].name, "GetProcessInfo");
+        assert_eq!(
+            ir.api_decls[0].request_type.render(),
+            "app.api.ProcessInfoRequest"
+        );
+        assert_eq!(
+            ir.api_decls[0].backend_target_kind,
+            arcana_cabi::ArcanaCabiApiBackendTargetKind::ForeignSymbol
+        );
+        assert_eq!(ir.api_decls[0].fields.len(), 2);
+        assert_eq!(
+            ir.api_decls[0].fields[1].lane_kind,
+            arcana_cabi::ArcanaCabiApiLaneKind::TypedPointeeEdit
+        );
+        assert_eq!(ir.api_decls[0].fields[0].input_type.as_deref(), Some("Int"));
+        assert_eq!(ir.api_decls[0].fields[1].input_type.as_deref(), Some("Int"));
+        assert_eq!(
+            ir.api_decls[0].fields[1].output_type.as_deref(),
+            Some("Int")
+        );
     }
 
     #[test]

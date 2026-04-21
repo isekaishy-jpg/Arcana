@@ -330,6 +330,76 @@ pub(crate) fn render_native_callback_fingerprint(
     )
 }
 
+pub(crate) fn render_api_decl_fingerprint(decl: &super::HirApiDecl) -> String {
+    format!(
+        concat!(
+            "api(",
+            "name={}|exported={}|request={}|response={}|backend_kind={}|backend_target={}|fields=[{}])"
+        ),
+        quote_fingerprint_text(&decl.name),
+        decl.exported,
+        quote_fingerprint_text(decl.request_type.render()),
+        quote_fingerprint_text(decl.response_type.render()),
+        decl.backend_target_kind.as_str(),
+        quote_fingerprint_text(&decl.backend_target),
+        decl.fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "field(name={}|mode={}|lane={}|slot={}|input={}|output={}|callback={}|transfer={}|owned={}|release={}|release_target={}|companions=[{}]|partial={})",
+                    quote_fingerprint_text(&field.name),
+                    field.mode.as_str(),
+                    field.lane_kind.as_str(),
+                    field
+                        .binding_slot
+                        .map(|slot| slot.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .input_type
+                        .as_ref()
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .output_type
+                        .as_ref()
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .callback_compat
+                        .as_ref()
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .transfer_mode
+                        .map(|mode| mode.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .owned_result_kind
+                        .map(|kind| kind.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .release_family
+                        .map(|family| family.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .release_target
+                        .as_ref()
+                        .map(quote_fingerprint_text)
+                        .unwrap_or_else(|| "none".to_string()),
+                    field
+                        .companion_fields
+                        .iter()
+                        .map(quote_fingerprint_text)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    field.partial_failure_cleanup
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
 pub(crate) fn render_shackle_fingerprint(decl: &super::HirShackleDecl) -> String {
     format!(
         concat!(

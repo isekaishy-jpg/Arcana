@@ -4,9 +4,9 @@ use arcana_ir::{
 };
 
 use crate::artifact::{
-    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
-    AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact, AotShackleDeclArtifact,
+    AOT_INTERNAL_FORMAT, AotApiDeclArtifact, AotArtifact, AotEntrypointArtifact,
+    AotNativeCallbackArtifact, AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact,
+    AotPackageArtifact, AotPackageModuleArtifact, AotRoutineArtifact, AotShackleDeclArtifact,
 };
 use crate::native_abi::{collect_binding_layouts, populate_typed_shackle_metadata};
 
@@ -115,6 +115,21 @@ fn compile_shackle_decl(decl: &arcana_ir::IrShackleDecl) -> AotShackleDeclArtifa
     }
 }
 
+fn compile_api_decl(decl: &arcana_ir::IrApiDecl) -> AotApiDeclArtifact {
+    AotApiDeclArtifact {
+        package_id: decl.package_id.clone(),
+        module_id: decl.module_id.clone(),
+        exported: decl.exported,
+        name: decl.name.clone(),
+        request_type: decl.request_type.clone(),
+        response_type: decl.response_type.clone(),
+        backend_target_kind: decl.backend_target_kind,
+        backend_target: decl.backend_target.clone(),
+        fields: decl.fields.clone(),
+        surface_text: decl.surface_text.clone(),
+    }
+}
+
 fn compile_owner_object(object: &IrOwnerObject) -> AotOwnerObjectArtifact {
     AotOwnerObjectArtifact {
         type_path: object.type_path.clone(),
@@ -152,6 +167,11 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
         .iter()
         .map(compile_shackle_decl)
         .collect::<Vec<_>>();
+    let api_decls = package
+        .api_decls
+        .iter()
+        .map(compile_api_decl)
+        .collect::<Vec<_>>();
     let mut artifact = AotPackageArtifact {
         format: AOT_INTERNAL_FORMAT.to_string(),
         package_id: package.package_id.clone(),
@@ -175,6 +195,7 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
             .iter()
             .map(compile_native_callback)
             .collect(),
+        api_decls,
         shackle_decls,
         binding_layouts: Vec::new(),
         owners: package.owners.iter().map(compile_owner).collect(),

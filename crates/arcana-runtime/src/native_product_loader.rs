@@ -4,22 +4,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_cabi::{
-    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,
-    ArcanaCabiBindingCallback, ArcanaCabiBindingCallbackEntryV1, ArcanaCabiBindingImport,
-    ArcanaCabiBindingImportEntryV1, ArcanaCabiBindingImportFn, ArcanaCabiBindingLayout,
-    ArcanaCabiBindingLayoutEntryV1, ArcanaCabiBindingMappedViewLenBytesFn,
-    ArcanaCabiBindingMappedViewOpsV1, ArcanaCabiBindingMappedViewReadByteFn,
-    ArcanaCabiBindingMappedViewWriteByteFn, ArcanaCabiBindingOpsV1, ArcanaCabiBindingParam,
-    ArcanaCabiBindingRegisterCallbackFn, ArcanaCabiBindingSignature,
-    ArcanaCabiBindingSignatureKind, ArcanaCabiBindingType, ArcanaCabiBindingUnregisterCallbackFn,
-    ArcanaCabiBindingValueV1, ArcanaCabiChildOpsV1, ArcanaCabiChildRunEntrypointFn,
-    ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn, ArcanaCabiInstanceOpsV1,
-    ArcanaCabiLastErrorAllocFn, ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn,
-    ArcanaCabiParamSourceMode, ArcanaCabiPassMode, ArcanaCabiPluginDescribeInstanceFn,
-    ArcanaCabiPluginOpsV1, ArcanaCabiPluginUseInstanceFn, ArcanaCabiProductApiV1,
-    ArcanaCabiProductRole, binding_write_back_slots, compare_binding_layouts,
-    compare_binding_signatures, release_binding_output_value, validate_binding_callbacks,
-    validate_binding_imports, validate_binding_layouts, validate_binding_write_backs,
+    ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiBindingCallback,
+    ArcanaCabiBindingCallbackEntryV1, ArcanaCabiBindingImport, ArcanaCabiBindingImportEntryV1,
+    ArcanaCabiBindingImportFn, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutEntryV1,
+    ArcanaCabiBindingMappedViewLenBytesFn, ArcanaCabiBindingMappedViewOpsV1,
+    ArcanaCabiBindingMappedViewReadByteFn, ArcanaCabiBindingMappedViewWriteByteFn,
+    ArcanaCabiBindingOpsV1, ArcanaCabiBindingParam, ArcanaCabiBindingRegisterCallbackFn,
+    ArcanaCabiBindingSignature, ArcanaCabiBindingSignatureKind, ArcanaCabiBindingType,
+    ArcanaCabiBindingUnregisterCallbackFn, ArcanaCabiBindingValueV1, ArcanaCabiChildOpsV1,
+    ArcanaCabiChildRunEntrypointFn, ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn,
+    ArcanaCabiInstanceOpsV1, ArcanaCabiLastErrorAllocFn, ArcanaCabiOwnedBytesFreeFn,
+    ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode, ArcanaCabiPassMode,
+    ArcanaCabiPluginDescribeInstanceFn, ArcanaCabiPluginOpsV1, ArcanaCabiPluginUseInstanceFn,
+    ArcanaCabiProductApiV1, ArcanaCabiProductRole, binding_write_back_slots,
+    compare_binding_layouts, compare_binding_signatures, contract_version_for_id,
+    release_binding_output_value, validate_binding_callbacks, validate_binding_imports,
+    validate_binding_layouts, validate_binding_write_backs,
 };
 use libloading::Library;
 use serde::Deserialize;
@@ -1267,15 +1267,17 @@ fn load_bundle_native_products_from_text(
                     ));
                 }
             };
+            let contract_id = product.contract_id;
+            let contract_version = product
+                .contract_version
+                .unwrap_or_else(|| contract_version_for_id(&contract_id));
             Ok(RuntimeNativeProductInfo {
                 package_id,
                 package_name,
                 product_name: product.product_name,
                 role,
-                contract_id: product.contract_id,
-                contract_version: product
-                    .contract_version
-                    .unwrap_or(ARCANA_CABI_CONTRACT_VERSION_V1),
+                contract_id,
+                contract_version,
                 file: product.file,
             })
         })

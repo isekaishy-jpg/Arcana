@@ -1,14 +1,16 @@
 use crate::artifact::{
-    AotNativeCallbackArtifact, AotPackageArtifact, AotRoutineArtifact, AotShackleDeclArtifact,
-    AotShackleImportTargetArtifact, AotShackleThunkTargetArtifact,
+    AotApiDeclArtifact, AotNativeCallbackArtifact, AotPackageArtifact, AotRoutineArtifact,
+    AotShackleDeclArtifact, AotShackleImportTargetArtifact, AotShackleThunkTargetArtifact,
 };
 use arcana_cabi::{
-    ArcanaCabiBindingCallback, ArcanaCabiBindingImport, ArcanaCabiBindingLayout,
-    ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam,
-    ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType, ArcanaCabiBindingType,
-    ArcanaCabiBindingViewType, ArcanaCabiExport, ArcanaCabiExportParam, ArcanaCabiType,
-    ArcanaCabiViewFamily, validate_binding_callbacks, validate_binding_imports,
-    validate_binding_layouts,
+    ArcanaCabiApiBackendTargetKind, ArcanaCabiApiFieldMode, ArcanaCabiBindingCallback,
+    ArcanaCabiBindingImport, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField,
+    ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam, ArcanaCabiBindingRawType,
+    ArcanaCabiBindingScalarType, ArcanaCabiBindingType, ArcanaCabiBindingViewType,
+    ArcanaCabiExport, ArcanaCabiExportParam, ArcanaCabiParamSourceMode, ArcanaCabiType,
+    ArcanaCabiViewFamily, resolve_api_binding_resolution, validate_api_contract_fields,
+    validate_binding_callbacks, validate_binding_imports, validate_binding_layouts,
+    validate_binding_transport_type,
 };
 use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
 use std::collections::{BTreeMap, BTreeSet};
@@ -103,7 +105,7 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
 pub fn collect_native_binding_imports(
     artifact: &AotPackageArtifact,
 ) -> Result<Vec<NativeBindingImport>, String> {
-    let imports = artifact
+    let mut imports = artifact
         .routines
         .iter()
         .filter(|routine| routine.package_id == artifact.package_id)
@@ -131,8 +133,143 @@ pub fn collect_native_binding_imports(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    imports.extend(collect_native_api_binding_imports(artifact)?);
     validate_binding_imports(&imports)?;
     Ok(imports)
+}
+
+fn collect_native_api_binding_imports(
+    artifact: &AotPackageArtifact,
+) -> Result<Vec<NativeBindingImport>, String> {
+    artifact
+        .api_decls
+        .iter()
+        .filter(|decl| decl.package_id == artifact.package_id)
+        .filter(|decl| {
+            matches!(
+                decl.backend_target_kind,
+                ArcanaCabiApiBackendTargetKind::ForeignSymbol
+                    | ArcanaCabiApiBackendTargetKind::EmbeddedCShim
+            )
+        })
+        .map(|decl| native_binding_import_from_api_decl(&artifact.package_id, decl))
+        .collect()
+}
+
+fn native_binding_import_from_api_decl(
+    package_id: &str,
+    decl: &AotApiDeclArtifact,
+) -> Result<NativeBindingImport, String> {
+    validate_api_contract_fields(&decl.name, &decl.fields)?;
+    let resolution = resolve_api_binding_resolution(&decl.name, &decl.fields)?;
+    let mut params = Vec::new();
+    for field_index in &resolution.param_field_indices {
+        let field = &decl.fields[*field_index];
+        match field.mode {
+            ArcanaCabiApiFieldMode::In | ArcanaCabiApiFieldMode::InWithWriteBack => {
+                let input_text = field.input_type.as_deref().ok_or_else(|| {
+                    format!(
+                        "api `{}` field `{}` is missing an input transport type",
+                        decl.name, field.name
+                    )
+                })?;
+                let input_type = ArcanaCabiBindingType::parse(input_text).map_err(|err| {
+                    format!(
+                        "api `{}` field `{}` input type `{input_text}` is not binding-transportable: {err}",
+                        decl.name, field.name
+                    )
+                })?;
+                validate_binding_transport_type(&input_type).map_err(|err| {
+                    format!(
+                        "api `{}` field `{}` input type `{input_text}` is not binding-transportable: {err}",
+                        decl.name, field.name
+                    )
+                })?;
+                if matches!(field.mode, ArcanaCabiApiFieldMode::InWithWriteBack)
+                    && field.output_type.as_deref() != Some(input_text)
+                {
+                    return Err(format!(
+                        "api `{}` field `{}` uses `in-with-write-back` but its output type `{}` does not match input type `{input_text}`",
+                        decl.name,
+                        field.name,
+                        field.output_type.as_deref().unwrap_or("<missing>")
+                    ));
+                }
+                let source_mode = match field.mode {
+                    ArcanaCabiApiFieldMode::In => ArcanaCabiParamSourceMode::Read,
+                    ArcanaCabiApiFieldMode::InWithWriteBack => ArcanaCabiParamSourceMode::Edit,
+                    ArcanaCabiApiFieldMode::Out => unreachable!(),
+                };
+                params.push(ArcanaCabiBindingParam::binding(
+                    field.name.clone(),
+                    source_mode,
+                    input_type,
+                ));
+            }
+            ArcanaCabiApiFieldMode::Out => {
+                let output_text = field.output_type.as_deref().ok_or_else(|| {
+                    format!(
+                        "api `{}` field `{}` is missing an output transport type",
+                        decl.name, field.name
+                    )
+                })?;
+                let output_type = ArcanaCabiBindingType::parse(output_text).map_err(|err| {
+                    format!(
+                        "api `{}` field `{}` output type `{output_text}` is not binding-transportable: {err}",
+                        decl.name, field.name
+                    )
+                })?;
+                validate_binding_transport_type(&output_type).map_err(|err| {
+                    format!(
+                        "api `{}` field `{}` output type `{output_text}` is not binding-transportable: {err}",
+                        decl.name, field.name
+                    )
+                })?;
+                if output_type.supports_in_place_edit() {
+                    return Err(format!(
+                        "api `{}` field `{}` cannot use a synthetic out-param slot with in-place transport type `{output_text}`",
+                        decl.name, field.name
+                    ));
+                }
+                params.push(ArcanaCabiBindingParam::binding(
+                    field.name.clone(),
+                    ArcanaCabiParamSourceMode::Edit,
+                    output_type,
+                ));
+            }
+        }
+    }
+    let return_type = match resolution.return_field_index {
+        None => ArcanaCabiBindingType::Unit,
+        Some(field_index) => {
+            let field = &decl.fields[field_index];
+            let output_text = field.output_type.as_deref().ok_or_else(|| {
+                format!(
+                    "api `{}` field `{}` is missing an output transport type",
+                    decl.name, field.name
+                )
+            })?;
+            let output_type = ArcanaCabiBindingType::parse(output_text).map_err(|err| {
+                format!(
+                    "api `{}` field `{}` output type `{output_text}` is not binding-transportable: {err}",
+                    decl.name, field.name
+                )
+            })?;
+            validate_binding_transport_type(&output_type).map_err(|err| {
+                format!(
+                    "api `{}` field `{}` output type `{output_text}` is not binding-transportable: {err}",
+                    decl.name, field.name
+                )
+            })?;
+            output_type
+        }
+    };
+    Ok(NativeBindingImport {
+        name: decl.backend_target.clone(),
+        symbol_name: default_binding_import_symbol_name(package_id, &decl.backend_target),
+        return_type,
+        params,
+    })
 }
 
 pub fn collect_native_binding_callbacks(
@@ -1359,10 +1496,16 @@ fn default_binding_import_symbol_name(package_id: &str, binding_name: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_binding_layouts, populate_typed_shackle_metadata};
+    use super::{
+        collect_binding_layouts, collect_native_binding_imports, populate_typed_shackle_metadata,
+    };
     use crate::artifact::{
-        AotNativeCallbackArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-        AotRoutineArtifact, AotShackleDeclArtifact,
+        AotApiDeclArtifact, AotNativeCallbackArtifact, AotPackageArtifact,
+        AotPackageModuleArtifact, AotRoutineArtifact, AotShackleDeclArtifact,
+    };
+    use arcana_cabi::{
+        ArcanaCabiApiBackendTargetKind, ArcanaCabiApiFieldContract, ArcanaCabiApiFieldMode,
+        ArcanaCabiApiLaneKind, ArcanaCabiParamSourceMode,
     };
     use arcana_ir::{IrRoutineParam, parse_routine_type_text};
     use std::collections::BTreeMap;
@@ -1387,6 +1530,7 @@ mod tests {
             entrypoints: Vec::new(),
             routines: Vec::new(),
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: Vec::new(),
             owners: Vec::new(),
@@ -1411,6 +1555,159 @@ mod tests {
             name: name.to_string(),
             ty: parse_routine_type_text(ty).expect("type should parse"),
         }
+    }
+
+    #[test]
+    fn collect_native_binding_imports_includes_binding_backed_api_decls() {
+        let mut artifact = empty_artifact();
+        artifact.api_decls.push(AotApiDeclArtifact {
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.raw".to_string(),
+            exported: true,
+            name: "GetProcessInfo".to_string(),
+            request_type: parse_routine_type_text("hostapi.raw.Request").expect("request type"),
+            response_type: parse_routine_type_text("hostapi.raw.Response").expect("response type"),
+            backend_target_kind: ArcanaCabiApiBackendTargetKind::ForeignSymbol,
+            backend_target: "hostapi.raw.kernel32.GetProcessInfo".to_string(),
+            fields: vec![
+                ArcanaCabiApiFieldContract {
+                    name: "process".to_string(),
+                    mode: ArcanaCabiApiFieldMode::In,
+                    lane_kind: ArcanaCabiApiLaneKind::OpaqueHandle,
+                    binding_slot: None,
+                    input_type: Some("hostapi.raw.HANDLE".to_string()),
+                    output_type: None,
+                    callback_compat: None,
+                    transfer_mode: None,
+                    owned_result_kind: None,
+                    release_family: None,
+                    release_target: None,
+                    companion_fields: Vec::new(),
+                    partial_failure_cleanup: false,
+                },
+                ArcanaCabiApiFieldContract {
+                    name: "info".to_string(),
+                    mode: ArcanaCabiApiFieldMode::InWithWriteBack,
+                    lane_kind: ArcanaCabiApiLaneKind::TypedPointeeEdit,
+                    binding_slot: None,
+                    input_type: Some("hostapi.raw.PROCESS_INFO".to_string()),
+                    output_type: Some("hostapi.raw.PROCESS_INFO".to_string()),
+                    callback_compat: None,
+                    transfer_mode: None,
+                    owned_result_kind: None,
+                    release_family: None,
+                    release_target: None,
+                    companion_fields: Vec::new(),
+                    partial_failure_cleanup: false,
+                },
+                ArcanaCabiApiFieldContract {
+                    name: "status".to_string(),
+                    mode: ArcanaCabiApiFieldMode::Out,
+                    lane_kind: ArcanaCabiApiLaneKind::Value,
+                    binding_slot: None,
+                    input_type: None,
+                    output_type: Some("Int".to_string()),
+                    callback_compat: None,
+                    transfer_mode: None,
+                    owned_result_kind: None,
+                    release_family: None,
+                    release_target: None,
+                    companion_fields: Vec::new(),
+                    partial_failure_cleanup: false,
+                },
+            ],
+            surface_text: "export api GetProcessInfo".to_string(),
+        });
+
+        let imports = collect_native_binding_imports(&artifact).expect("imports should lower");
+        let import = imports
+            .iter()
+            .find(|import| import.name == "hostapi.raw.kernel32.GetProcessInfo")
+            .expect("api binding import should be present");
+        assert_eq!(import.return_type.render(), "Int");
+        assert_eq!(import.params.len(), 2);
+        assert_eq!(
+            import.params[0].source_mode,
+            ArcanaCabiParamSourceMode::Read
+        );
+        assert_eq!(
+            import.params[1].source_mode,
+            ArcanaCabiParamSourceMode::Edit
+        );
+        assert_eq!(
+            import.params[1]
+                .write_back_type
+                .as_ref()
+                .map(|ty| ty.render()),
+            Some("hostapi.raw.PROCESS_INFO".to_string())
+        );
+    }
+
+    #[test]
+    fn collect_native_binding_imports_supports_multi_out_api_slot_mapping() {
+        let mut artifact = empty_artifact();
+        artifact.api_decls.push(AotApiDeclArtifact {
+            package_id: "hostapi".to_string(),
+            module_id: "hostapi.api".to_string(),
+            exported: true,
+            name: "Query".to_string(),
+            request_type: parse_routine_type_text("hostapi.api.QueryRequest")
+                .expect("request type"),
+            response_type: parse_routine_type_text("hostapi.api.QueryResponse")
+                .expect("response type"),
+            backend_target_kind: ArcanaCabiApiBackendTargetKind::EmbeddedCShim,
+            backend_target: "api.query".to_string(),
+            fields: vec![
+                ArcanaCabiApiFieldContract {
+                    name: "status".to_string(),
+                    mode: ArcanaCabiApiFieldMode::Out,
+                    lane_kind: ArcanaCabiApiLaneKind::Value,
+                    binding_slot: Some(arcana_cabi::ArcanaCabiApiBindingSlot::Return),
+                    input_type: None,
+                    output_type: Some("Int".to_string()),
+                    callback_compat: None,
+                    transfer_mode: None,
+                    owned_result_kind: None,
+                    release_family: None,
+                    release_target: None,
+                    companion_fields: Vec::new(),
+                    partial_failure_cleanup: false,
+                },
+                ArcanaCabiApiFieldContract {
+                    name: "pid".to_string(),
+                    mode: ArcanaCabiApiFieldMode::Out,
+                    lane_kind: ArcanaCabiApiLaneKind::Value,
+                    binding_slot: Some(arcana_cabi::ArcanaCabiApiBindingSlot::Param),
+                    input_type: None,
+                    output_type: Some("Int".to_string()),
+                    callback_compat: None,
+                    transfer_mode: None,
+                    owned_result_kind: None,
+                    release_family: None,
+                    release_target: None,
+                    companion_fields: Vec::new(),
+                    partial_failure_cleanup: false,
+                },
+            ],
+            surface_text: "export api Query".to_string(),
+        });
+
+        let imports = collect_native_binding_imports(&artifact).expect("imports should lower");
+        let import = imports
+            .iter()
+            .find(|import| import.name == "api.query")
+            .expect("api binding import should be present");
+        assert_eq!(import.return_type.render(), "Int");
+        assert_eq!(import.params.len(), 1);
+        assert_eq!(import.params[0].name, "pid");
+        assert_eq!(import.params[0].input_type.render(), "Int");
+        assert_eq!(
+            import.params[0]
+                .write_back_type
+                .as_ref()
+                .map(|ty| ty.render()),
+            Some("Int".to_string())
+        );
     }
 
     #[test]

@@ -9,5 +9,5 @@ kind = "dll"
 role = "binding"
 producer = "arcana-source"
 file = "arcwinapi.dll"
-contract = "arcana.cabi.binding.v1"
+contract = "arcana.cabi.binding.v2"
 sidecars = []

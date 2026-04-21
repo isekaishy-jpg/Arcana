@@ -18,9 +18,9 @@ use arcana_aot::{
 };
 #[cfg(windows)]
 use arcana_cabi::{
-    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiBindingOpsV1,
-    ArcanaCabiChildOpsV1, ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1,
-    ArcanaCabiProductApiV1,
+    ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiBindingOpsV1, ArcanaCabiChildOpsV1,
+    ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1, ArcanaCabiProductApiV1,
+    contract_version_for_id,
 };
 use arcana_cabi::{ArcanaCabiBindingLayout, ArcanaCabiProductRole};
 use arcana_hir::resolve_workspace;
@@ -886,7 +886,7 @@ fn collect_native_dependency_product_selections(
                 product_name: binding_product.name.clone(),
                 role: ArcanaCabiProductRole::Binding,
                 contract_id: binding_product.contract.clone(),
-                contract_version: 1,
+                contract_version: contract_version_for_id(&binding_product.contract),
                 producer: binding_product.producer.as_str().to_string(),
                 sidecars: binding_product.sidecars.clone(),
                 file: binding_product.file.clone(),
@@ -933,7 +933,7 @@ fn collect_native_dependency_product_selections(
                         product_name: child.to_string(),
                         role: ArcanaCabiProductRole::Child,
                         contract_id: child_product.contract.clone(),
-                        contract_version: 1,
+                        contract_version: contract_version_for_id(&child_product.contract),
                         producer: child_product.producer.as_str().to_string(),
                         sidecars: child_product.sidecars.clone(),
                         file: child_product.file.clone(),
@@ -973,7 +973,7 @@ fn collect_native_dependency_product_selections(
                         product_name: plugin.clone(),
                         role: ArcanaCabiProductRole::Plugin,
                         contract_id: plugin_product.contract.clone(),
-                        contract_version: 1,
+                        contract_version: contract_version_for_id(&plugin_product.contract),
                         producer: plugin_product.producer.as_str().to_string(),
                         sidecars: plugin_product.sidecars.clone(),
                         file: plugin_product.file.clone(),
@@ -1417,7 +1417,7 @@ fn distribution_root_native_product(
         product_name: product.name.clone(),
         role: product.role,
         contract_id: product.contract.clone(),
-        contract_version: ARCANA_CABI_CONTRACT_VERSION_V1,
+        contract_version: contract_version_for_id(&product.contract),
         producer: product.producer.as_str().to_string(),
         sidecars: product.sidecars.clone(),
         file: product.file.clone(),
@@ -2593,10 +2593,11 @@ fn validate_native_product_descriptor_from_staged_root(
             contract_id
         ));
     }
-    if api.contract_version != ARCANA_CABI_CONTRACT_VERSION_V1 {
+    let expected_contract_version = contract_version_for_id(&contract_id);
+    if api.contract_version != expected_contract_version {
         return Err(format!(
             "native product `{}` on `{}` reported contract version `{}` but package validation expects `{}`",
-            product.name, member.name, api.contract_version, ARCANA_CABI_CONTRACT_VERSION_V1
+            product.name, member.name, api.contract_version, expected_contract_version
         ));
     }
     if api.role_ops.is_null() {

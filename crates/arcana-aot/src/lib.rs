@@ -16,10 +16,10 @@ mod windows_bundle;
 mod windows_dll;
 
 pub use artifact::{
-    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
-    AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact, AotShackleDeclArtifact,
-    AotShackleImportTargetArtifact, AotShackleThunkTargetArtifact,
+    AOT_INTERNAL_FORMAT, AotApiDeclArtifact, AotArtifact, AotEntrypointArtifact,
+    AotNativeCallbackArtifact, AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact,
+    AotPackageArtifact, AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact,
+    AotShackleDeclArtifact, AotShackleImportTargetArtifact, AotShackleThunkTargetArtifact,
 };
 pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
@@ -233,6 +233,7 @@ mod tests {
                 statements: Vec::new(),
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: Vec::new(),
             owners: Vec::new(),
@@ -344,12 +345,94 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         });
         assert_eq!(artifact.format, AOT_INTERNAL_FORMAT);
         assert_eq!(artifact.module_count, 2);
         assert_eq!(artifact.modules[0].module_id, "winspell");
+    }
+
+    #[test]
+    fn compile_package_carries_api_decls() {
+        let artifact = compile_package(&IrPackage {
+            package_id: "hostapi".to_string(),
+            package_name: "hostapi".to_string(),
+            root_module_id: "hostapi".to_string(),
+            direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "hostapi".to_string(),
+                "hostapi".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "hostapi".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("hostapi"),
+                module_id: "hostapi".to_string(),
+                symbol_count: 0,
+                item_count: 1,
+                line_count: 1,
+                non_empty_line_count: 1,
+                directive_rows: Vec::new(),
+                lang_item_rows: Vec::new(),
+                exported_surface_rows: vec!["export:api:api(GetProcessInfo)".to_string()],
+            }],
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: vec![
+                "module=hostapi:export:api:api(GetProcessInfo)".to_string(),
+            ],
+            runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
+            entrypoints: Vec::new(),
+            routines: Vec::new(),
+            native_callbacks: Vec::new(),
+            api_decls: vec![arcana_ir::IrApiDecl {
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi".to_string(),
+                exported: true,
+                name: "GetProcessInfo".to_string(),
+                request_type: test_return_type("fn main() -> hostapi.api.ProcessInfoRequest:")
+                    .expect("request type should exist"),
+                response_type: test_return_type("fn main() -> hostapi.api.ProcessInfoResponse:")
+                    .expect("response type should exist"),
+                backend_target_kind: arcana_cabi::ArcanaCabiApiBackendTargetKind::ForeignSymbol,
+                backend_target: "kernel32.GetProcessInformation".to_string(),
+                fields: vec![arcana_cabi::ArcanaCabiApiFieldContract {
+                    name: "process".to_string(),
+                    mode: arcana_cabi::ArcanaCabiApiFieldMode::In,
+                    lane_kind: arcana_cabi::ArcanaCabiApiLaneKind::OpaqueHandle,
+                    binding_slot: None,
+                    input_type: Some("Int".to_string()),
+                    output_type: None,
+                    callback_compat: None,
+                    transfer_mode: None,
+                    owned_result_kind: None,
+                    release_family: None,
+                    release_target: None,
+                    companion_fields: Vec::new(),
+                    partial_failure_cleanup: false,
+                }],
+                surface_text: "api GetProcessInfo".to_string(),
+            }],
+            shackle_decls: Vec::new(),
+            owners: Vec::new(),
+        });
+
+        assert_eq!(artifact.api_decls.len(), 1);
+        assert_eq!(artifact.api_decls[0].name, "GetProcessInfo");
+        assert_eq!(
+            artifact.api_decls[0].backend_target_kind,
+            arcana_cabi::ArcanaCabiApiBackendTargetKind::ForeignSymbol
+        );
     }
 
     #[test]
@@ -414,6 +497,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -501,6 +585,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -653,6 +738,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -712,6 +798,7 @@ mod tests {
             entrypoints: Vec::new(),
             routines: Vec::new(),
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -790,6 +877,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -935,6 +1023,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -1040,6 +1129,7 @@ mod tests {
                 ],
                 target_routine_key: Some("hostapi.callbacks#fn-0".to_string()),
             }],
+            api_decls: Vec::new(),
             shackle_decls: vec![
                 AotShackleDeclArtifact {
                     package_id: "hostapi".to_string(),
@@ -1173,8 +1263,8 @@ mod tests {
             native_product: Some(AotNativeProduct {
                 name: "hostapi".to_string(),
                 role: ArcanaCabiProductRole::Binding,
-                contract_id: "arcana.cabi.binding.v1".to_string(),
-                contract_version: 1,
+                contract_id: "arcana.cabi.binding.v2".to_string(),
+                contract_version: 2,
             }),
             artifact,
             artifact_text: String::new(),
@@ -1288,6 +1378,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: Vec::new(),
             owners: Vec::new(),
@@ -1390,6 +1481,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
@@ -1499,6 +1591,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: Vec::new(),
             owners: Vec::new(),
@@ -1581,6 +1674,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         });
@@ -1675,6 +1769,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: Vec::new(),
             owners: Vec::new(),
@@ -1764,6 +1859,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             owners: Vec::new(),
         });
@@ -1828,6 +1924,7 @@ mod tests {
                 statements: Vec::new(),
             }],
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: Vec::new(),
             owners: Vec::new(),

@@ -3806,6 +3806,7 @@ mod raw_binding_tests {
             entrypoints: Vec::new(),
             routines: Vec::new(),
             native_callbacks: Vec::new(),
+            api_decls: Vec::new(),
             shackle_decls: Vec::new(),
             binding_layouts: layouts.clone(),
             owners: Vec::new(),

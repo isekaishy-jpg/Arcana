@@ -2,6 +2,7 @@
 pub enum HeadedRegionHead {
     Recycle,
     Bind,
+    Api,
     Array,
     Record,
     Struct,
@@ -15,6 +16,7 @@ impl HeadedRegionHead {
         match self {
             Self::Recycle => "recycle",
             Self::Bind => "bind",
+            Self::Api => "api",
             Self::Array => "array",
             Self::Record => "record",
             Self::Struct => "struct",
@@ -28,6 +30,7 @@ impl HeadedRegionHead {
         match text {
             "recycle" => Some(Self::Recycle),
             "bind" => Some(Self::Bind),
+            "api" => Some(Self::Api),
             "array" => Some(Self::Array),
             "record" => Some(Self::Record),
             "struct" => Some(Self::Struct),
@@ -39,13 +42,13 @@ impl HeadedRegionHead {
     }
 
     pub const fn is_record_like(self) -> bool {
-        matches!(self, Self::Record | Self::Struct | Self::Union)
+        matches!(self, Self::Api | Self::Record | Self::Struct | Self::Union)
     }
 
     pub const fn supports_expression_yield(self) -> bool {
         matches!(
             self,
-            Self::Construct | Self::Array | Self::Record | Self::Struct | Self::Union
+            Self::Construct | Self::Array | Self::Api | Self::Record | Self::Struct | Self::Union
         )
     }
 }

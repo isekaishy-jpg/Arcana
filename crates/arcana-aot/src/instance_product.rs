@@ -10,8 +10,8 @@ use crate::native_abi::{
     parse_native_binding_return_type,
 };
 use arcana_cabi::{
-    ArcanaCabiBindingLayout, ArcanaCabiBindingParam, ArcanaCabiBindingType,
-    ArcanaCabiBindingViewType, ArcanaCabiProductRole,
+    ARCANA_CABI_BINDING_V2_CONTRACT_ID, ArcanaCabiBindingLayout, ArcanaCabiBindingParam,
+    ArcanaCabiBindingType, ArcanaCabiBindingViewType, ArcanaCabiProductRole,
 };
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -412,11 +412,23 @@ fn render_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Result<Strin
     }
 }
 
+fn instance_product_contract_version_const(spec: &AotInstanceProductSpec) -> &'static str {
+    if spec.role == ArcanaCabiProductRole::Binding
+        && spec.contract_id == ARCANA_CABI_BINDING_V2_CONTRACT_ID
+    {
+        "ARCANA_CABI_CONTRACT_VERSION_V2"
+    } else {
+        "ARCANA_CABI_CONTRACT_VERSION_V1"
+    }
+}
+
 fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
     let package_name = format!("{}\0", spec.package_name);
     let product_name = format!("{}\0", spec.product_name);
     let role = format!("{}\0", spec.role.as_str());
     let contract = format!("{}\0", spec.contract_id);
+    let contract_version_import =
+        format!("    {},\n", instance_product_contract_version_const(spec));
     let owned_str_import = if spec.role == ArcanaCabiProductRole::Binding {
         "    ArcanaCabiOwnedStrFreeFn,\n"
     } else {
@@ -437,7 +449,7 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
             "use std::ffi::{{c_char, c_void}};\n",
             "use std::ptr;\n\n",
             "use arcana_cabi::{{\n",
-            "    ARCANA_CABI_CONTRACT_VERSION_V1,\n",
+            "{}",
             "    ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,\n",
             "    ArcanaCabiCreateInstanceFn,\n",
             "    ArcanaCabiDestroyInstanceFn,\n",
@@ -477,6 +489,7 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
             "}}\n\n",
             "{}",
         ),
+        contract_version_import,
         owned_str_import,
         render_rust_string_literal(&package_name),
         render_rust_string_literal(&product_name),
@@ -733,15 +746,17 @@ fn render_binding_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Resu
         ));
     }
 
-    let mut out = render_generated_binding_preamble(
-        &package_name,
-        &product_name,
-        &role,
-        &contract,
-        mapped_view_support.is_some(),
-        !has_state_init,
-        !has_state_drop,
-    );
+    let preamble = GeneratedBindingPreamble {
+        package_name: &package_name,
+        product_name: &product_name,
+        role: &role,
+        contract: &contract,
+        contract_version_const: instance_product_contract_version_const(spec),
+        has_mapped_view_ops: mapped_view_support.is_some(),
+        needs_default_state_init: !has_state_init,
+        needs_default_state_drop: !has_state_drop,
+    };
+    let mut out = render_generated_binding_preamble(&preamble);
     out.push_str(&render_shackle_support_items(spec)?);
     out.push_str(&render_binding_runtime_support(
         !has_state_init,
@@ -754,6 +769,7 @@ fn render_binding_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Resu
         mapped_view_support,
     )?);
     out.push_str(&render_generated_binding_descriptor(
+        spec,
         mapped_view_support.is_some(),
     ));
     Ok(out)
@@ -1499,16 +1515,20 @@ fn render_binding_view_element_size_expr(
     }
 }
 
-fn render_generated_binding_preamble(
-    package_name: &str,
-    product_name: &str,
-    role: &str,
-    contract: &str,
+struct GeneratedBindingPreamble<'a> {
+    package_name: &'a str,
+    product_name: &'a str,
+    role: &'a str,
+    contract: &'a str,
+    contract_version_const: &'a str,
     has_mapped_view_ops: bool,
     needs_default_state_init: bool,
     needs_default_state_drop: bool,
-) -> String {
-    let mapped_view_imports = if has_mapped_view_ops {
+}
+
+fn render_generated_binding_preamble(preamble: &GeneratedBindingPreamble<'_>) -> String {
+    let contract_version_import = format!("    {},\n", preamble.contract_version_const);
+    let mapped_view_imports = if preamble.has_mapped_view_ops {
         concat!(
             "    ArcanaCabiBindingMappedViewLenBytesFn,\n",
             "    ArcanaCabiBindingMappedViewOpsV1,\n",
@@ -1527,7 +1547,7 @@ fn render_generated_binding_preamble(
             "use std::ffi::{{c_char, c_void, CStr}};\n",
             "use std::ptr;\n\n",
             "use arcana_cabi::{{\n",
-            "    ARCANA_CABI_CONTRACT_VERSION_V1,\n",
+            "{}",
             "    ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,\n",
             "    ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,\n",
             "    ARCANA_CABI_VIEW_FLAG_UTF8,\n",
@@ -1567,31 +1587,32 @@ fn render_generated_binding_preamble(
             "    static LAST_ERROR: RefCell<Vec<u8>> = const {{ RefCell::new(Vec::new()) }};\n",
             "}}\n\n",
         ),
+        contract_version_import,
         mapped_view_imports,
     ));
     out.push_str(&format!(
         "static PACKAGE_NAME: &str = {};\n",
-        render_rust_string_literal(package_name)
+        render_rust_string_literal(preamble.package_name)
     ));
     out.push_str(&format!(
         "static PRODUCT_NAME: &str = {};\n",
-        render_rust_string_literal(product_name)
+        render_rust_string_literal(preamble.product_name)
     ));
     out.push_str(&format!(
         "static ROLE_NAME: &str = {};\n",
-        render_rust_string_literal(role)
+        render_rust_string_literal(preamble.role)
     ));
     out.push_str(&format!(
         "static CONTRACT_ID: &str = {};\n\n",
-        render_rust_string_literal(contract)
+        render_rust_string_literal(preamble.contract)
     ));
-    if needs_default_state_init {
+    if preamble.needs_default_state_init {
         out.push_str("type PackageState = ();\n\n");
         out.push_str(
             "fn package_state_init() -> Result<PackageState, String> {\n    Ok(())\n}\n\n",
         );
     }
-    if needs_default_state_drop {
+    if preamble.needs_default_state_drop {
         out.push_str("fn package_state_drop(_state: &mut PackageState) {}\n\n");
     }
     out
@@ -2228,12 +2249,16 @@ fn render_binding_runtime_support(
     .to_string()
 }
 
-fn render_generated_binding_descriptor(has_mapped_view_ops: bool) -> String {
+fn render_generated_binding_descriptor(
+    spec: &AotInstanceProductSpec,
+    has_mapped_view_ops: bool,
+) -> String {
     let mapped_view_ops = if has_mapped_view_ops {
         "&BINDING_MAPPED_VIEW_OPS as *const ArcanaCabiBindingMappedViewOpsV1"
     } else {
         "ptr::null()"
     };
+    let contract_version = instance_product_contract_version_const(spec);
     format!(
         concat!(
             "static BINDING_OPS: ArcanaCabiBindingOpsV1 = ArcanaCabiBindingOpsV1 {{\n",
@@ -2264,19 +2289,20 @@ fn render_generated_binding_descriptor(has_mapped_view_ops: bool) -> String {
             "    product_name: PRODUCT_NAME.as_ptr() as *const c_char,\n",
             "    role: ROLE_NAME.as_ptr() as *const c_char,\n",
             "    contract_id: CONTRACT_ID.as_ptr() as *const c_char,\n",
-            "    contract_version: ARCANA_CABI_CONTRACT_VERSION_V1,\n",
+            "    contract_version: {contract_version},\n",
             "    role_ops: &BINDING_OPS as *const ArcanaCabiBindingOpsV1 as *const c_void,\n",
             "    reserved0: ptr::null(),\n",
             "    reserved1: ptr::null(),\n",
             "}};\n\n",
             "const _: &str = ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL;\n",
-            "const _: u32 = ARCANA_CABI_CONTRACT_VERSION_V1;\n\n",
+            "const _: u32 = {contract_version};\n\n",
             "#[unsafe(no_mangle)]\n",
             "pub extern \"system\" fn arcana_cabi_get_product_api_v1() -> *const ArcanaCabiProductApiV1 {{\n",
             "    &PRODUCT_API\n",
             "}}\n"
         ),
         mapped_view_ops = mapped_view_ops,
+        contract_version = contract_version,
     )
 }
 
@@ -3164,7 +3190,7 @@ mod tests {
     use crate::artifact::AotShackleDeclArtifact;
     use crate::native_abi::{NativeBindingCallback, NativeBindingImport};
     use arcana_cabi::{
-        ARCANA_CABI_BINDING_CONTRACT_ID, ARCANA_CABI_CHILD_CONTRACT_ID,
+        ARCANA_CABI_BINDING_V2_CONTRACT_ID, ARCANA_CABI_CHILD_CONTRACT_ID,
         ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiBindingLayout,
         ArcanaCabiBindingLayoutEnumVariant, ArcanaCabiBindingLayoutField,
         ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
@@ -3210,7 +3236,7 @@ mod tests {
             package_name: "hostapi".to_string(),
             product_name: "default".to_string(),
             role: ArcanaCabiProductRole::Binding,
-            contract_id: ARCANA_CABI_BINDING_CONTRACT_ID.to_string(),
+            contract_id: ARCANA_CABI_BINDING_V2_CONTRACT_ID.to_string(),
             output_file_name: "hostapi.dll".to_string(),
             package_image_text: None,
             binding_imports: vec![NativeBindingImport {
@@ -3339,6 +3365,7 @@ mod tests {
         assert!(lib_rs.contains("arcana_binding_import_hostapi_fs_stream_name"));
         assert!(lib_rs.contains("binding_callback_name_is_declared"));
         assert!(lib_rs.contains("struct BindingInputValue"));
+        assert!(lib_rs.contains("ARCANA_CABI_CONTRACT_VERSION_V2"));
         assert!(lib_rs.contains("fn binding_input_layout<T: Copy>(value: T) -> BindingInputValue"));
         assert!(
             lib_rs.contains(

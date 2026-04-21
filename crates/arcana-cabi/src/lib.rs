@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{c_char, c_void};
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,23 @@ pub const ARCANA_CABI_EXPORT_CONTRACT_ID: &str = "arcana.cabi.export.v1";
 pub const ARCANA_CABI_CHILD_CONTRACT_ID: &str = "arcana.cabi.child.v1";
 pub const ARCANA_CABI_PLUGIN_CONTRACT_ID: &str = "arcana.cabi.plugin.v1";
 pub const ARCANA_CABI_BINDING_CONTRACT_ID: &str = "arcana.cabi.binding.v1";
+pub const ARCANA_CABI_BINDING_V2_CONTRACT_ID: &str = "arcana.cabi.binding.v2";
 pub const ARCANA_CABI_CONTRACT_VERSION_V1: u32 = 1;
+pub const ARCANA_CABI_CONTRACT_VERSION_V2: u32 = 2;
+
+pub fn is_binding_contract_id(contract_id: &str) -> bool {
+    matches!(
+        contract_id,
+        ARCANA_CABI_BINDING_CONTRACT_ID | ARCANA_CABI_BINDING_V2_CONTRACT_ID
+    )
+}
+
+pub fn contract_version_for_id(contract_id: &str) -> u32 {
+    match contract_id {
+        ARCANA_CABI_BINDING_V2_CONTRACT_ID => ARCANA_CABI_CONTRACT_VERSION_V2,
+        _ => ARCANA_CABI_CONTRACT_VERSION_V1,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -104,6 +120,516 @@ impl ArcanaCabiPassMode {
             other => Err(format!("unsupported native pass mode `{other}`")),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiBackendTargetKind {
+    Arcana,
+    ForeignSymbol,
+    EmbeddedCShim,
+}
+
+impl ArcanaCabiApiBackendTargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Arcana => "arcana",
+            Self::ForeignSymbol => "foreign-symbol",
+            Self::EmbeddedCShim => "embedded-c-shim",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "arcana" => Ok(Self::Arcana),
+            "foreign" | "foreign-symbol" => Ok(Self::ForeignSymbol),
+            "embedded-c" | "embedded-c-shim" => Ok(Self::EmbeddedCShim),
+            other => Err(format!("unsupported api backend target kind `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiFieldMode {
+    In,
+    InWithWriteBack,
+    Out,
+}
+
+impl ArcanaCabiApiFieldMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::InWithWriteBack => "in-with-write-back",
+            Self::Out => "out",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "in" => Ok(Self::In),
+            "in-with-write-back" => Ok(Self::InWithWriteBack),
+            "out" => Ok(Self::Out),
+            other => Err(format!("unsupported api field mode `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiBindingSlot {
+    Return,
+    Param,
+}
+
+impl ArcanaCabiApiBindingSlot {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Return => "return",
+            Self::Param => "param",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "return" => Ok(Self::Return),
+            "param" => Ok(Self::Param),
+            other => Err(format!("unsupported api binding slot `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiLaneKind {
+    Value,
+    OpaqueHandle,
+    TypedPointeeRead,
+    TypedPointeeEdit,
+    MemoryBufferRead,
+    MemoryBufferEdit,
+    CallbackToken,
+    OwnedTransfer,
+}
+
+impl ArcanaCabiApiLaneKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Value => "value",
+            Self::OpaqueHandle => "opaque-handle",
+            Self::TypedPointeeRead => "typed-pointee-read",
+            Self::TypedPointeeEdit => "typed-pointee-edit",
+            Self::MemoryBufferRead => "memory-buffer-read",
+            Self::MemoryBufferEdit => "memory-buffer-edit",
+            Self::CallbackToken => "callback-token",
+            Self::OwnedTransfer => "owned-transfer",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "value" => Ok(Self::Value),
+            "opaque-handle" => Ok(Self::OpaqueHandle),
+            "typed-pointee-read" => Ok(Self::TypedPointeeRead),
+            "typed-pointee-edit" => Ok(Self::TypedPointeeEdit),
+            "memory-buffer-read" => Ok(Self::MemoryBufferRead),
+            "memory-buffer-edit" => Ok(Self::MemoryBufferEdit),
+            "callback-token" => Ok(Self::CallbackToken),
+            "owned-transfer" => Ok(Self::OwnedTransfer),
+            other => Err(format!("unsupported api lane kind `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiTransferMode {
+    Borrowed,
+    CallerEdited,
+    CalleeOwned,
+}
+
+impl ArcanaCabiApiTransferMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Borrowed => "borrowed",
+            Self::CallerEdited => "caller-edited",
+            Self::CalleeOwned => "callee-owned",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "borrowed" => Ok(Self::Borrowed),
+            "caller-edited" => Ok(Self::CallerEdited),
+            "callee-owned" => Ok(Self::CalleeOwned),
+            other => Err(format!("unsupported api transfer mode `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiOwnedResultKind {
+    Opaque,
+    String,
+    Buffer,
+    Array,
+    Interface,
+}
+
+impl ArcanaCabiApiOwnedResultKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Opaque => "opaque",
+            Self::String => "string",
+            Self::Buffer => "buffer",
+            Self::Array => "array",
+            Self::Interface => "interface",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "opaque" => Ok(Self::Opaque),
+            "string" => Ok(Self::String),
+            "buffer" => Ok(Self::Buffer),
+            "array" => Ok(Self::Array),
+            "interface" => Ok(Self::Interface),
+            other => Err(format!("unsupported api owned result kind `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArcanaCabiApiReleaseFamily {
+    Release,
+    CoTaskMemFree,
+    LocalFree,
+    Custom,
+    Unsupported,
+}
+
+impl ArcanaCabiApiReleaseFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::CoTaskMemFree => "co-task-mem-free",
+            Self::LocalFree => "local-free",
+            Self::Custom => "custom",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "release" => Ok(Self::Release),
+            "co-task-mem-free" => Ok(Self::CoTaskMemFree),
+            "local-free" => Ok(Self::LocalFree),
+            "custom" => Ok(Self::Custom),
+            "unsupported" => Ok(Self::Unsupported),
+            other => Err(format!("unsupported api release family `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ArcanaCabiApiFieldContract {
+    pub name: String,
+    pub mode: ArcanaCabiApiFieldMode,
+    pub lane_kind: ArcanaCabiApiLaneKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_slot: Option<ArcanaCabiApiBindingSlot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_compat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_mode: Option<ArcanaCabiApiTransferMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_result_kind: Option<ArcanaCabiApiOwnedResultKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_family: Option<ArcanaCabiApiReleaseFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companion_fields: Vec<String>,
+    #[serde(default)]
+    pub partial_failure_cleanup: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArcanaCabiApiBindingResolution {
+    pub param_field_indices: Vec<usize>,
+    pub return_field_index: Option<usize>,
+}
+
+pub fn resolve_api_binding_resolution(
+    api_name: &str,
+    fields: &[ArcanaCabiApiFieldContract],
+) -> Result<ArcanaCabiApiBindingResolution, String> {
+    let explicit_return_indices = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            matches!(field.mode, ArcanaCabiApiFieldMode::Out)
+                && field.binding_slot == Some(ArcanaCabiApiBindingSlot::Return)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let unresolved_out_indices = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            matches!(field.mode, ArcanaCabiApiFieldMode::Out) && field.binding_slot.is_none()
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let return_field_index = match explicit_return_indices.as_slice() {
+        [] => match unresolved_out_indices.as_slice() {
+            [] => None,
+            [index] => Some(*index),
+            _ => {
+                return Err(format!(
+                    "api `{api_name}` has multiple pure `out` fields and needs explicit `slot=return|param` metadata"
+                ));
+            }
+        },
+        [index] => Some(*index),
+        _ => {
+            return Err(format!(
+                "api `{api_name}` has multiple `out` fields marked `slot=return`"
+            ));
+        }
+    };
+    let mut param_field_indices = Vec::new();
+    for (index, field) in fields.iter().enumerate() {
+        if matches!(field.mode, ArcanaCabiApiFieldMode::Out) && return_field_index == Some(index) {
+            continue;
+        }
+        match field.mode {
+            ArcanaCabiApiFieldMode::In | ArcanaCabiApiFieldMode::InWithWriteBack => {
+                param_field_indices.push(index);
+            }
+            ArcanaCabiApiFieldMode::Out => param_field_indices.push(index),
+        }
+    }
+    Ok(ArcanaCabiApiBindingResolution {
+        param_field_indices,
+        return_field_index,
+    })
+}
+
+pub fn validate_api_contract_metadata(
+    api_name: &str,
+    fields: &[ArcanaCabiApiFieldContract],
+) -> Result<(), String> {
+    let mut seen_names = BTreeSet::new();
+    for field in fields {
+        if field.name.trim().is_empty() {
+            return Err(format!("api `{api_name}` has an empty field name"));
+        }
+        if !seen_names.insert(field.name.as_str()) {
+            return Err(format!(
+                "api `{api_name}` defines duplicate field `{}`",
+                field.name
+            ));
+        }
+        if field.binding_slot.is_some() && !matches!(field.mode, ArcanaCabiApiFieldMode::Out) {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses `slot=...`, but only pure `out` fields may declare a binding slot",
+                field.name
+            ));
+        }
+        if matches!(field.lane_kind, ArcanaCabiApiLaneKind::CallbackToken)
+            && field.callback_compat.is_none()
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses `callback-token` but is missing callback compatibility metadata",
+                field.name
+            ));
+        }
+        if !matches!(field.lane_kind, ArcanaCabiApiLaneKind::CallbackToken)
+            && field.callback_compat.is_some()
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` declares callback compatibility metadata without using the `callback-token` lane",
+                field.name
+            ));
+        }
+        match field.transfer_mode {
+            Some(ArcanaCabiApiTransferMode::Borrowed)
+                if !matches!(field.mode, ArcanaCabiApiFieldMode::In) =>
+            {
+                return Err(format!(
+                    "api `{api_name}` field `{}` marks transfer `borrowed`, but borrowed transfer only applies to `in` fields",
+                    field.name
+                ));
+            }
+            Some(ArcanaCabiApiTransferMode::CallerEdited)
+                if !matches!(field.mode, ArcanaCabiApiFieldMode::InWithWriteBack) =>
+            {
+                return Err(format!(
+                    "api `{api_name}` field `{}` marks transfer `caller-edited`, but caller-edited transfer only applies to `in-with-write-back` fields",
+                    field.name
+                ));
+            }
+            Some(ArcanaCabiApiTransferMode::CalleeOwned)
+                if !matches!(field.mode, ArcanaCabiApiFieldMode::Out) =>
+            {
+                return Err(format!(
+                    "api `{api_name}` field `{}` marks transfer `callee-owned`, but callee-owned transfer only applies to pure `out` fields",
+                    field.name
+                ));
+            }
+            _ => {}
+        }
+        let uses_owned_transfer_metadata = field.owned_result_kind.is_some()
+            || field.release_family.is_some()
+            || field.release_target.is_some()
+            || !field.companion_fields.is_empty()
+            || field.partial_failure_cleanup;
+        if uses_owned_transfer_metadata
+            && field.transfer_mode != Some(ArcanaCabiApiTransferMode::CalleeOwned)
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` declares owned-transfer metadata without `transfer=callee-owned`",
+                field.name
+            ));
+        }
+        if field.transfer_mode == Some(ArcanaCabiApiTransferMode::CalleeOwned)
+            && !matches!(field.lane_kind, ArcanaCabiApiLaneKind::OwnedTransfer)
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses `transfer=callee-owned`, but callee-owned results must use the `owned-transfer` lane",
+                field.name
+            ));
+        }
+        if matches!(field.lane_kind, ArcanaCabiApiLaneKind::OwnedTransfer)
+            && field.transfer_mode != Some(ArcanaCabiApiTransferMode::CalleeOwned)
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses the `owned-transfer` lane without `transfer=callee-owned`",
+                field.name
+            ));
+        }
+        if field.transfer_mode == Some(ArcanaCabiApiTransferMode::CalleeOwned)
+            && field.owned_result_kind.is_none()
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses `transfer=callee-owned` but is missing an owned result kind",
+                field.name
+            ));
+        }
+        if field.transfer_mode == Some(ArcanaCabiApiTransferMode::CalleeOwned)
+            && field.release_family.is_none()
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses `transfer=callee-owned` but is missing a release family",
+                field.name
+            ));
+        }
+        if field.release_family == Some(ArcanaCabiApiReleaseFamily::Custom)
+            && field
+                .release_target
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` uses `release=custom` but is missing a release target",
+                field.name
+            ));
+        }
+        if field.release_family != Some(ArcanaCabiApiReleaseFamily::Custom)
+            && field.release_target.is_some()
+        {
+            return Err(format!(
+                "api `{api_name}` field `{}` declares a release target without `release=custom`",
+                field.name
+            ));
+        }
+        let mut seen_companions = BTreeSet::new();
+        for companion in &field.companion_fields {
+            if companion == &field.name {
+                return Err(format!(
+                    "api `{api_name}` field `{}` cannot list itself as a companion field",
+                    field.name
+                ));
+            }
+            if !seen_companions.insert(companion.as_str()) {
+                return Err(format!(
+                    "api `{api_name}` field `{}` lists duplicate companion field `{companion}`",
+                    field.name
+                ));
+            }
+            if !fields.iter().any(|candidate| candidate.name == *companion) {
+                return Err(format!(
+                    "api `{api_name}` field `{}` references unknown companion field `{companion}`",
+                    field.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_api_contract_fields(
+    api_name: &str,
+    fields: &[ArcanaCabiApiFieldContract],
+) -> Result<(), String> {
+    validate_api_contract_metadata(api_name, fields)?;
+    for field in fields {
+        match field.mode {
+            ArcanaCabiApiFieldMode::In => {
+                if field.input_type.is_none() {
+                    return Err(format!(
+                        "api `{api_name}` field `{}` is missing an input transport type",
+                        field.name
+                    ));
+                }
+            }
+            ArcanaCabiApiFieldMode::InWithWriteBack => {
+                if field.input_type.is_none() {
+                    return Err(format!(
+                        "api `{api_name}` field `{}` is missing an input transport type",
+                        field.name
+                    ));
+                }
+                if field.output_type.is_none() {
+                    return Err(format!(
+                        "api `{api_name}` field `{}` uses `in-with-write-back` but is missing an output transport type",
+                        field.name
+                    ));
+                }
+            }
+            ArcanaCabiApiFieldMode::Out => {
+                if field.output_type.is_none() {
+                    return Err(format!(
+                        "api `{api_name}` field `{}` is missing an output transport type",
+                        field.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ArcanaCabiApiContract {
+    pub name: String,
+    pub request_type: String,
+    pub response_type: String,
+    pub backend_target_kind: ArcanaCabiApiBackendTargetKind,
+    pub backend_target: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ArcanaCabiApiFieldContract>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub surface_text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -2315,7 +2841,9 @@ fn binding_signatures_by_name(
 #[cfg(test)]
 mod tests {
     use super::{
-        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS, ARCANA_CABI_VIEW_FLAG_UTF8, ArcanaCabiBindingCallback,
+        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS, ARCANA_CABI_VIEW_FLAG_UTF8, ArcanaCabiApiFieldContract,
+        ArcanaCabiApiFieldMode, ArcanaCabiApiLaneKind, ArcanaCabiApiOwnedResultKind,
+        ArcanaCabiApiReleaseFamily, ArcanaCabiApiTransferMode, ArcanaCabiBindingCallback,
         ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
         ArcanaCabiBindingParam, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
         ArcanaCabiBindingSignature, ArcanaCabiBindingSignatureKind, ArcanaCabiBindingType,
@@ -2329,8 +2857,9 @@ mod tests {
         read_binding_output_layout_arg, read_binding_output_layout_bytes_arg,
         read_binding_output_utf8_arg, read_binding_output_utf16_arg, read_binding_output_view_arg,
         release_binding_output_value, render_c_descriptor_type_defs, render_c_value_type_defs,
-        validate_binding_callbacks, validate_binding_layouts, validate_binding_param,
-        validate_binding_transport_type, validate_binding_write_backs, view_total_bytes,
+        validate_api_contract_fields, validate_binding_callbacks, validate_binding_layouts,
+        validate_binding_param, validate_binding_transport_type, validate_binding_write_backs,
+        view_total_bytes,
     };
 
     unsafe extern "system" fn test_free_owned_bytes(ptr: *mut u8, len: usize) {
@@ -3027,5 +3556,110 @@ mod tests {
         }];
         let err = validate_binding_layouts(&layouts).expect_err("oversized bitfields should fail");
         assert!(err.contains("exceeds its storage unit"), "{err}");
+    }
+
+    #[test]
+    fn validate_api_contract_fields_accepts_complete_owned_transfer_metadata() {
+        let fields = vec![
+            ArcanaCabiApiFieldContract {
+                name: "process".to_string(),
+                mode: ArcanaCabiApiFieldMode::In,
+                lane_kind: ArcanaCabiApiLaneKind::OpaqueHandle,
+                binding_slot: None,
+                input_type: Some("hostapi.raw.HANDLE".to_string()),
+                output_type: None,
+                callback_compat: None,
+                transfer_mode: Some(ArcanaCabiApiTransferMode::Borrowed),
+                owned_result_kind: None,
+                release_family: None,
+                release_target: None,
+                companion_fields: Vec::new(),
+                partial_failure_cleanup: false,
+            },
+            ArcanaCabiApiFieldContract {
+                name: "name".to_string(),
+                mode: ArcanaCabiApiFieldMode::Out,
+                lane_kind: ArcanaCabiApiLaneKind::OwnedTransfer,
+                binding_slot: None,
+                input_type: None,
+                output_type: Some("Str".to_string()),
+                callback_compat: None,
+                transfer_mode: Some(ArcanaCabiApiTransferMode::CalleeOwned),
+                owned_result_kind: Some(ArcanaCabiApiOwnedResultKind::String),
+                release_family: Some(ArcanaCabiApiReleaseFamily::Custom),
+                release_target: Some("__binding.owned_str_free".to_string()),
+                companion_fields: vec!["name_len".to_string()],
+                partial_failure_cleanup: true,
+            },
+            ArcanaCabiApiFieldContract {
+                name: "name_len".to_string(),
+                mode: ArcanaCabiApiFieldMode::Out,
+                lane_kind: ArcanaCabiApiLaneKind::Value,
+                binding_slot: None,
+                input_type: None,
+                output_type: Some("Int".to_string()),
+                callback_compat: None,
+                transfer_mode: None,
+                owned_result_kind: None,
+                release_family: None,
+                release_target: None,
+                companion_fields: Vec::new(),
+                partial_failure_cleanup: false,
+            },
+        ];
+
+        validate_api_contract_fields("Greeting", &fields)
+            .expect("owned transfer metadata should validate");
+    }
+
+    #[test]
+    fn validate_api_contract_fields_rejects_incomplete_owned_transfer_metadata() {
+        let err = validate_api_contract_fields(
+            "Greeting",
+            &[ArcanaCabiApiFieldContract {
+                name: "greeting".to_string(),
+                mode: ArcanaCabiApiFieldMode::Out,
+                lane_kind: ArcanaCabiApiLaneKind::OwnedTransfer,
+                binding_slot: None,
+                input_type: None,
+                output_type: Some("Str".to_string()),
+                callback_compat: None,
+                transfer_mode: Some(ArcanaCabiApiTransferMode::CalleeOwned),
+                owned_result_kind: Some(ArcanaCabiApiOwnedResultKind::String),
+                release_family: None,
+                release_target: None,
+                companion_fields: Vec::new(),
+                partial_failure_cleanup: false,
+            }],
+        )
+        .expect_err("missing release metadata should fail");
+        assert!(err.contains("missing a release family"), "{err}");
+    }
+
+    #[test]
+    fn validate_api_contract_fields_rejects_unknown_companion_field() {
+        let err = validate_api_contract_fields(
+            "Query",
+            &[ArcanaCabiApiFieldContract {
+                name: "buffer".to_string(),
+                mode: ArcanaCabiApiFieldMode::Out,
+                lane_kind: ArcanaCabiApiLaneKind::OwnedTransfer,
+                binding_slot: None,
+                input_type: None,
+                output_type: Some("Bytes".to_string()),
+                callback_compat: None,
+                transfer_mode: Some(ArcanaCabiApiTransferMode::CalleeOwned),
+                owned_result_kind: Some(ArcanaCabiApiOwnedResultKind::Buffer),
+                release_family: Some(ArcanaCabiApiReleaseFamily::Custom),
+                release_target: Some("__binding.owned_bytes_free".to_string()),
+                companion_fields: vec!["missing_count".to_string()],
+                partial_failure_cleanup: false,
+            }],
+        )
+        .expect_err("unknown companion field should fail");
+        assert!(
+            err.contains("unknown companion field `missing_count`"),
+            "{err}"
+        );
     }
 }

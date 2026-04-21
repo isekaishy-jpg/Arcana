@@ -145,6 +145,14 @@ fn shackle_decl_visible_from_package_boundary(
     current_package_id == target_package_id || decl.exported
 }
 
+fn api_decl_visible_from_package_boundary(
+    current_package_id: &str,
+    target_package_id: &str,
+    decl: &HirApiDecl,
+) -> bool {
+    current_package_id == target_package_id || decl.exported
+}
+
 fn first_visible_shackle_decl_in_module_for_package<'a>(
     workspace: &'a HirWorkspaceSummary,
     current_package_id: &str,
@@ -175,6 +183,36 @@ fn first_visible_shackle_decl_in_module_for_package<'a>(
         })
 }
 
+fn first_visible_api_decl_in_module_for_package<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    current_package_id: &str,
+    package_id: &str,
+    module_id: &str,
+    decl_name: &str,
+) -> Option<HirResolvedApiDeclRef<'a>> {
+    let package = workspace.package_by_id(package_id)?;
+    let module = package.module(module_id)?;
+    module
+        .api_decls
+        .iter()
+        .enumerate()
+        .find(|(_, decl)| {
+            decl.name == decl_name
+                && api_decl_visible_from_package_boundary(
+                    current_package_id,
+                    &package.package_id,
+                    decl,
+                )
+        })
+        .map(|(decl_index, decl)| HirResolvedApiDeclRef {
+            package_id: &package.package_id,
+            package_name: &package.summary.package_name,
+            module_id: &module.module_id,
+            decl_index,
+            decl,
+        })
+}
+
 fn lookup_package_shackle_decl_path_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
     current_package_id: &str,
@@ -191,6 +229,30 @@ fn lookup_package_shackle_decl_path_filtered<'a>(
         package.resolve_relative_module(module_path)
     }?;
     first_visible_shackle_decl_in_module_for_package(
+        workspace,
+        current_package_id,
+        &package.package_id,
+        &module.module_id,
+        decl_name,
+    )
+}
+
+fn lookup_package_api_decl_path_filtered<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    current_package_id: &str,
+    package: &'a HirWorkspacePackage,
+    path: &[String],
+) -> Option<HirResolvedApiDeclRef<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+    let (decl_name, module_path) = path.split_last()?;
+    let module = if module_path.is_empty() {
+        package.module(&package.summary.package_name)
+    } else {
+        package.resolve_relative_module(module_path)
+    }?;
+    first_visible_api_decl_in_module_for_package(
         workspace,
         current_package_id,
         &package.package_id,
@@ -532,6 +594,30 @@ pub fn lookup_shackle_decl_path<'a>(
             path,
         )
     })
+}
+
+pub fn lookup_api_decl_path<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    resolved_module: &'a HirResolvedModule,
+    path: &[String],
+) -> Option<HirResolvedApiDeclRef<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+    let current_package = current_workspace_package_for_module(workspace, resolved_module)?;
+    let current_package_id = current_package.package_id.as_str();
+
+    if path.len() >= 2
+        && let Some(package) = visible_package_root_for_module(workspace, resolved_module, &path[0])
+    {
+        return lookup_package_api_decl_path_filtered(
+            workspace,
+            current_package_id,
+            package,
+            &path[1..],
+        );
+    }
+    None
 }
 
 pub fn impl_target_is_public_from_package(

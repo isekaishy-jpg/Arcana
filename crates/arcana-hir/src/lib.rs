@@ -5,7 +5,7 @@ mod signature;
 pub mod type_surface;
 
 pub use lookup::{
-    current_workspace_package_for_module, impl_target_is_public_from_package,
+    current_workspace_package_for_module, impl_target_is_public_from_package, lookup_api_decl_path,
     lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lookup_symbol_path,
     visible_method_package_ids_for_module, visible_package_root_for_module,
 };
@@ -27,8 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use arcana_cabi::{
-    ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutEnumVariant, ArcanaCabiBindingLayoutField,
-    ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
+    ArcanaCabiApiBackendTargetKind, ArcanaCabiApiFieldContract, ArcanaCabiBindingLayout,
+    ArcanaCabiBindingLayoutEnumVariant, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
+    ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
 };
 use arcana_syntax::{
     AssignOp as ParsedAssignOp, ConstructCompletionKind, DirectiveKind as ParsedDirectiveKind,
@@ -387,6 +388,19 @@ pub struct HirNativeCallbackDecl {
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirApiDecl {
+    pub exported: bool,
+    pub name: String,
+    pub request_type: HirType,
+    pub response_type: HirType,
+    pub backend_target_kind: ArcanaCabiApiBackendTargetKind,
+    pub backend_target: String,
+    pub fields: Vec<ArcanaCabiApiFieldContract>,
+    pub surface_text: String,
+    pub span: Span,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HirShackleDeclKind {
     Type,
@@ -737,6 +751,7 @@ pub struct HirConstructRegion {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirRecordRegion {
+    pub kind: HirRecordRegionKind,
     pub completion: ConstructCompletionKind,
     pub target: Box<HirExpr>,
     pub base: Option<Box<HirExpr>>,
@@ -744,6 +759,12 @@ pub struct HirRecordRegion {
     pub default_modifier: Option<HirHeadedModifier>,
     pub lines: Vec<HirConstructLine>,
     pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirRecordRegionKind {
+    Api,
+    Record,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1199,6 +1220,7 @@ pub struct HirModuleSummary {
     pub lang_items: Vec<HirLangItem>,
     pub memory_specs: Vec<HirMemorySpecDecl>,
     pub native_callbacks: Vec<HirNativeCallbackDecl>,
+    pub api_decls: Vec<HirApiDecl>,
     pub shackle_decls: Vec<HirShackleDecl>,
     pub foreword_definitions: Vec<HirForewordDefinition>,
     pub foreword_handlers: Vec<HirForewordHandler>,
@@ -1286,6 +1308,17 @@ impl HirModuleSummary {
             )
         }));
         rows.extend(
+            self.api_decls
+                .iter()
+                .filter(|decl| decl.exported)
+                .map(|decl| {
+                    format!(
+                        "export:api:{}",
+                        render::encode_surface_text(&render::render_api_decl_fingerprint(decl))
+                    )
+                }),
+        );
+        rows.extend(
             self.shackle_decls
                 .iter()
                 .filter(|decl| decl.exported)
@@ -1347,6 +1380,11 @@ impl HirModuleSummary {
             self.native_callbacks
                 .iter()
                 .map(render::render_native_callback_fingerprint),
+        );
+        rows.extend(
+            self.api_decls
+                .iter()
+                .map(render::render_api_decl_fingerprint),
         );
         rows.extend(
             self.shackle_decls
@@ -1579,6 +1617,15 @@ pub struct HirResolvedShackleDeclRef<'a> {
     pub module_id: &'a str,
     pub decl_index: usize,
     pub decl: &'a HirShackleDecl,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolvedApiDeclRef<'a> {
+    pub package_id: &'a str,
+    pub package_name: &'a str,
+    pub module_id: &'a str,
+    pub decl_index: usize,
+    pub decl: &'a HirApiDecl,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2430,6 +2477,16 @@ fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
             .collect::<Option<Vec<_>>>()?;
         if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) {
             return symbol_call_return_type(workspace, symbol_ref, &generic_args);
+        }
+        if let Some(api_ref) = lookup_api_decl_path(workspace, resolved_module, &path) {
+            let package = workspace.package_by_id(api_ref.package_id)?;
+            let module = package.module(api_ref.module_id)?;
+            return Some(canonicalize_hir_type_in_module(
+                workspace,
+                package,
+                module,
+                &api_ref.decl.response_type,
+            ));
         }
         if path.len() >= 2 {
             let enum_path = path[..path.len() - 1].to_vec();
@@ -3430,6 +3487,21 @@ pub fn lower_parsed_module(
                     .map(type_surface::lower_surface_type),
                 target: callback.target.clone(),
                 span: callback.span,
+            })
+            .collect(),
+        api_decls: parsed
+            .api_decls
+            .iter()
+            .map(|decl| HirApiDecl {
+                exported: decl.exported,
+                name: decl.name.clone(),
+                request_type: type_surface::lower_surface_type(&decl.request_type),
+                response_type: type_surface::lower_surface_type(&decl.response_type),
+                backend_target_kind: decl.backend_target_kind,
+                backend_target: decl.backend_target.clone(),
+                fields: decl.fields.clone(),
+                surface_text: decl.surface_text.clone(),
+                span: decl.span,
             })
             .collect(),
         shackle_decls,
@@ -5072,6 +5144,11 @@ fn lower_construct_region(region: &arcana_syntax::ConstructRegion) -> HirConstru
 
 fn lower_record_region(region: &arcana_syntax::RecordRegion) -> HirRecordRegion {
     HirRecordRegion {
+        kind: match region.kind {
+            arcana_syntax::NominalFieldRegionKind::Api => HirRecordRegionKind::Api,
+            arcana_syntax::NominalFieldRegionKind::Record => HirRecordRegionKind::Record,
+            other => unreachable!("record region lowered from non-record kind `{other:?}`"),
+        },
         completion: region.completion,
         target: Box::new(lower_expr(&region.target)),
         base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
@@ -7097,6 +7174,43 @@ mod tests {
     }
 
     #[test]
+    fn lower_module_text_carries_api_decls_without_symbol_projection() {
+        let module = lower_module_text(
+            "host.api",
+            concat!(
+                "export api GetProcessInfo:\n",
+                "    request: host.api.ProcessInfoRequest\n",
+                "    response: host.api.ProcessInfoResponse\n",
+                "    backend: foreign kernel32.GetProcessInformation\n",
+                "    field process: opaque-handle mode=in\n",
+                "    field info: typed-pointee-edit mode=in-with-write-back transfer=caller-edited\n",
+                "fn main() -> Int:\n",
+                "    return 0\n",
+            ),
+        )
+        .expect("lowering should pass");
+
+        assert_eq!(module.api_decls.len(), 1);
+        assert_eq!(module.api_decls[0].name, "GetProcessInfo");
+        assert_eq!(
+            module.api_decls[0].request_type.render(),
+            "host.api.ProcessInfoRequest"
+        );
+        assert_eq!(
+            module.api_decls[0].backend_target_kind,
+            arcana_cabi::ArcanaCabiApiBackendTargetKind::ForeignSymbol
+        );
+        assert_eq!(module.symbol_count("GetProcessInfo"), 0);
+        assert!(
+            module
+                .summary_api_fingerprint_rows()
+                .iter()
+                .any(|row| row.starts_with("export:api:")),
+            "exported api decl should contribute to api fingerprint rows"
+        );
+    }
+
+    #[test]
     fn lower_module_text_lowers_typed_shackle_raw_metadata() {
         let module = lower_module_text(
             "arcana_winapi.raw.types",
@@ -7817,6 +7931,148 @@ mod tests {
                 &["core".to_string(), "hidden".to_string()]
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_api_decl_path_hides_private_dependency_api_decls() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text("app", "import core\nfn main() -> Int:\n    return 0\n")
+                    .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["core".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let core_summary = build_package_summary(
+            "core",
+            vec![
+                lower_module_text(
+                    "core",
+                    concat!(
+                        "export api Shared:\n",
+                        "    request: core.Request\n",
+                        "    response: core.Response\n",
+                        "    backend: foreign kernel32.Shared\n",
+                        "api Hidden:\n",
+                        "    request: core.Request\n",
+                        "    response: core.Response\n",
+                        "    backend: foreign kernel32.Hidden\n",
+                    ),
+                )
+                .expect("core should lower"),
+            ],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        assert!(
+            crate::lookup_api_decl_path(
+                &workspace,
+                resolved_module,
+                &["core".to_string(), "Shared".to_string()]
+            )
+            .is_some()
+        );
+        assert!(
+            crate::lookup_api_decl_path(
+                &workspace,
+                resolved_module,
+                &["core".to_string(), "Hidden".to_string()]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_api_decl_path_requires_same_package_boundary_prefix() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "export api Shared:\n",
+                        "    request: app.Request\n",
+                        "    response: app.Response\n",
+                        "    backend: foreign kernel32.Shared\n",
+                    ),
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+        let workspace = build_workspace_summary(vec![app_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        assert!(
+            crate::lookup_api_decl_path(&workspace, resolved_module, &["Shared".to_string()])
+                .is_none()
+        );
+        assert!(
+            crate::lookup_api_decl_path(
+                &workspace,
+                resolved_module,
+                &["app".to_string(), "Shared".to_string()]
+            )
+            .is_some()
         );
     }
 

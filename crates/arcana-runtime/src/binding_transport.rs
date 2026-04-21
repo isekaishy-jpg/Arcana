@@ -102,15 +102,125 @@ pub(super) fn runtime_binding_import_signatures_for_package(
     plan: &RuntimePackagePlan,
     package_id: &str,
 ) -> Result<Vec<ArcanaCabiBindingSignature>, String> {
-    plan.routines
+    let mut signatures = plan
+        .routines
         .iter()
         .filter(|routine| routine.package_id == package_id)
         .filter_map(|routine| routine.native_impl.as_ref().map(|name| (routine, name)))
         .map(|(routine, name)| {
-            Ok(ArcanaCabiBindingSignature {
+            Ok::<ArcanaCabiBindingSignature, String>(ArcanaCabiBindingSignature {
                 name: name.clone(),
                 return_type: runtime_binding_return_type(routine.return_type.as_ref())?,
                 params: runtime_binding_params_metadata(&routine.params)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    signatures.extend(runtime_binding_api_import_signatures_for_package(
+        plan, package_id,
+    )?);
+    Ok(signatures)
+}
+
+pub(super) fn runtime_binding_api_import_signatures_for_package(
+    plan: &RuntimePackagePlan,
+    package_id: &str,
+) -> Result<Vec<ArcanaCabiBindingSignature>, String> {
+    plan.api_decls
+        .iter()
+        .filter(|decl| decl.package_id == package_id)
+        .filter(|decl| {
+            matches!(
+                decl.backend_target_kind,
+                arcana_cabi::ArcanaCabiApiBackendTargetKind::ForeignSymbol
+                    | arcana_cabi::ArcanaCabiApiBackendTargetKind::EmbeddedCShim
+            )
+        })
+        .map(|decl| {
+            arcana_cabi::validate_api_contract_fields(&decl.name, &decl.fields)?;
+            let resolution = arcana_cabi::resolve_api_binding_resolution(&decl.name, &decl.fields)?;
+            let mut params = Vec::new();
+            for field_index in &resolution.param_field_indices {
+                let field = &decl.fields[*field_index];
+                match field.mode {
+                    arcana_cabi::ArcanaCabiApiFieldMode::In
+                    | arcana_cabi::ArcanaCabiApiFieldMode::InWithWriteBack => {
+                        let input_text = field.input_type.as_deref().ok_or_else(|| {
+                            format!(
+                                "runtime api `{}` field `{}` is missing an input transport type",
+                                decl.name, field.name
+                            )
+                        })?;
+                        let source_mode = match field.mode {
+                            arcana_cabi::ArcanaCabiApiFieldMode::In => {
+                                arcana_cabi::ArcanaCabiParamSourceMode::Read
+                            }
+                            arcana_cabi::ArcanaCabiApiFieldMode::InWithWriteBack => {
+                                arcana_cabi::ArcanaCabiParamSourceMode::Edit
+                            }
+                            arcana_cabi::ArcanaCabiApiFieldMode::Out => unreachable!(),
+                        };
+                        let input_type = ArcanaCabiBindingType::parse(input_text)?;
+                        validate_binding_transport_type(&input_type)?;
+                        if matches!(
+                            field.mode,
+                            arcana_cabi::ArcanaCabiApiFieldMode::InWithWriteBack
+                        ) && field.output_type.as_deref() != Some(input_text)
+                        {
+                            return Err(format!(
+                                "runtime api `{}` field `{}` uses `in-with-write-back` but its output type `{}` does not match input type `{input_text}`",
+                                decl.name,
+                                field.name,
+                                field.output_type.as_deref().unwrap_or("<missing>")
+                            ));
+                        }
+                        params.push(ArcanaCabiBindingParam::binding(
+                            field.name.clone(),
+                            source_mode,
+                            input_type,
+                        ));
+                    }
+                    arcana_cabi::ArcanaCabiApiFieldMode::Out => {
+                        let output_text = field.output_type.as_deref().ok_or_else(|| {
+                            format!(
+                                "runtime api `{}` field `{}` is missing an output transport type",
+                                decl.name, field.name
+                            )
+                        })?;
+                        let output_type = ArcanaCabiBindingType::parse(output_text)?;
+                        validate_binding_transport_type(&output_type)?;
+                        if output_type.supports_in_place_edit() {
+                            return Err(format!(
+                                "runtime api `{}` field `{}` cannot use a synthetic out-param slot with in-place transport type `{output_text}`",
+                                decl.name, field.name
+                            ));
+                        }
+                        params.push(ArcanaCabiBindingParam::binding(
+                            field.name.clone(),
+                            arcana_cabi::ArcanaCabiParamSourceMode::Edit,
+                            output_type,
+                        ));
+                    }
+                }
+            }
+            let return_type = match resolution.return_field_index {
+                None => ArcanaCabiBindingType::Unit,
+                Some(field_index) => {
+                    let field = &decl.fields[field_index];
+                    let output_text = field.output_type.as_deref().ok_or_else(|| {
+                        format!(
+                            "runtime api `{}` field `{}` is missing an output transport type",
+                            decl.name, field.name
+                        )
+                    })?;
+                    let output_type = ArcanaCabiBindingType::parse(output_text)?;
+                    validate_binding_transport_type(&output_type)?;
+                    output_type
+                }
+            };
+            Ok(ArcanaCabiBindingSignature {
+                name: decl.backend_target.clone(),
+                return_type,
+                params,
             })
         })
         .collect()
@@ -1082,6 +1192,7 @@ pub(super) fn runtime_value_from_binding_input(
                 package_id: leak_runtime_binding_text(package_id),
                 type_name: leak_runtime_binding_text(expected_type),
                 handle: unsafe { value.payload.opaque_value },
+                owned_release: None,
             })),
         ),
         (ArcanaCabiBindingType::View(view_type), ArcanaCabiBindingValueTag::View) => {
@@ -1374,6 +1485,7 @@ pub(super) fn runtime_value_from_binding_cabi_output(
                 package_id: leak_runtime_binding_text(package_id),
                 type_name: leak_runtime_binding_text(expected_type),
                 handle: unsafe { value.payload.opaque_value },
+                owned_release: None,
             })),
         ),
         (ArcanaCabiBindingType::View(view_type), ArcanaCabiBindingValueTag::View) => {

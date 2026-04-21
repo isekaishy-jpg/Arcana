@@ -4,7 +4,10 @@ use crate::artifact::AotPackageArtifact;
 use crate::native_abi::{
     collect_binding_layouts, collect_native_binding_callbacks, collect_native_binding_imports,
 };
-use arcana_cabi::{validate_binding_callbacks, validate_binding_imports, validate_binding_layouts};
+use arcana_cabi::{
+    validate_api_contract_fields, validate_binding_callbacks, validate_binding_imports,
+    validate_binding_layouts,
+};
 use arcana_ir::{
     IrForewordRetention, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
     parse_struct_bitfield_layout_row,
@@ -921,6 +924,31 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
             }
             _ => {}
         }
+    }
+
+    for decl in &artifact.api_decls {
+        if decl.name.trim().is_empty() {
+            return Err("backend artifact api declaration name must not be empty".to_string());
+        }
+        if decl.backend_target.trim().is_empty() {
+            return Err(format!(
+                "backend artifact api `{}` must declare a backend target",
+                decl.name
+            ));
+        }
+        if decl.request_type.render().trim().is_empty() {
+            return Err(format!(
+                "backend artifact api `{}` must declare a request type",
+                decl.name
+            ));
+        }
+        if decl.response_type.render().trim().is_empty() {
+            return Err(format!(
+                "backend artifact api `{}` must declare a response type",
+                decl.name
+            ));
+        }
+        validate_api_contract_fields(&decl.name, &decl.fields)?;
     }
 
     let binding_imports = collect_native_binding_imports(artifact)?;
